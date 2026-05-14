@@ -2,5 +2,19 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <key>Label</key><string>com.jobtracker.api</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{PYTHON}</string><string>-m</string><string>uvicorn</string>
+        <string>backend.main:app</string><string>--host</string><string>localhost</string>
+        <string>--port</string><string>8000</string>
+    </array>
+    <key>WorkingDirectory</key><string>{PROJECT_ROOT}</string>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <key>StandardOutPath</key><string>{HOME}/.job-tracker/logs/api.log</string>
+    <key>StandardErrorPath</key><string>{HOME}/.job-tracker/logs/api_error.log</string>
+    <key>EnvironmentVariables</key>
+    <dict><key>PYTHONPATH</key><string>{PROJECT_ROOT}</string></dict>
 </dict>
 </plist>
