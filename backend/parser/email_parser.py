@@ -1,0 +1,1 @@
+"""Email field extraction logic."""

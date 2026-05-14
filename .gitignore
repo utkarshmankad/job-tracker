@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+*.db
+*.db-shm
+*.db-wal
+~/.job-tracker/
+client_secret.json
+token.json
+.DS_Store
+node_modules/
+frontend/dist/
+*.log
+.pytest_cache/
+.mypy_cache/
