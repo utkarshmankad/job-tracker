@@ -1,1 +1,63 @@
 # User-editable rules for detecting application portals from email senders/subjects.
+
+portals:
+  - name: Naukri
+    sender_domains: [naukri.com, mailer.naukri.com]
+    subject_patterns: ["your application", "applied for", "job application", "application submitted"]
+    status_signals:
+      shortlisted: ["shortlisted", "profile selected", "resume shortlisted"]
+      interview_scheduled: ["interview scheduled", "interview invite", "schedule your interview"]
+      rejected: ["not moving forward", "other candidates", "regret to inform", "not selected"]
+      offer: ["offer letter", "pleased to offer", "congratulations"]
+
+  - name: LinkedIn
+    sender_domains: [linkedin.com, email.linkedin.com, jobs-noreply@linkedin.com]
+    subject_patterns: ["application was sent", "applied to", "your application to", "you applied"]
+    status_signals:
+      shortlisted: ["viewed your application", "interested in your profile"]
+      interview_scheduled: ["interview request", "wants to connect", "schedule a call"]
+      rejected: ["no longer being considered", "decided to move forward with other"]
+      offer: ["job offer", "offer from"]
+
+  - name: Hirest.Tech
+    sender_domains: [hirest.tech, mail.hirest.tech]
+    subject_patterns: ["application received", "applied", "your profile"]
+    status_signals:
+      shortlisted: ["shortlisted"]
+      interview_scheduled: ["interview"]
+      rejected: ["not selected", "regret"]
+
+  - name: Instahire
+    sender_domains: [instahire.in, mail.instahire.in]
+    subject_patterns: ["application", "profile", "job"]
+    status_signals:
+      shortlisted: ["shortlisted", "selected"]
+      interview_scheduled: ["interview"]
+      rejected: ["regret", "not selected"]
+
+  - name: Wellfound
+    sender_domains: [wellfound.com, angel.co, mail.wellfound.com]
+    subject_patterns: ["application", "intro request", "applied"]
+    status_signals:
+      shortlisted: ["interested", "wants to connect"]
+      rejected: ["decided not to move forward"]
+
+  - name: Instahyre
+    sender_domains: [instahyre.com, mail.instahyre.com]
+    subject_patterns: ["application", "profile", "applied"]
+    status_signals:
+      shortlisted: ["shortlisted", "profile shortlisted"]
+      interview_scheduled: ["interview"]
+      rejected: ["regret", "not shortlisted"]
+
+  - name: Direct/Unknown
+    sender_domains: []
+    subject_patterns: ["your cv", "your resume", "job application", "position of", "opening for", "opportunity at", "interview invitation", "application for", "applied for the role"]
+    status_signals:
+      shortlisted: ["shortlisted", "profile selected", "pleased to inform", "moved forward"]
+      interview_scheduled: ["interview scheduled", "would like to schedule", "invite you for an interview", "calendar invite"]
+      interview_in_progress: ["following up on your interview", "post interview"]
+      offer_negotiation: ["discussing compensation", "negotiation"]
+      offer: ["offer letter", "pleased to extend an offer", "formal offer", "job offer"]
+      rejected: ["regret to inform", "not selected", "moved forward with other", "not shortlisted", "unsuccessful"]
+    require_both: false
