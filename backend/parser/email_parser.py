@@ -7,11 +7,25 @@ from pathlib import Path
 from typing import Any
 
 import spacy
+import structlog
 import yaml
 
 from backend.config import PORTAL_RULES_PATH
 from backend.db.models import ApplicationStatus, SuppressRule
 from backend.parser.status_signals import GLOBAL_STATUS_KEYWORDS
+
+log = structlog.get_logger(__name__)
+
+def extract_sender_domain(sender: str) -> str:
+    """Extract the domain portion from a 'Name <user@domain.com>' or 'user@domain.com' string."""
+    match = re.search(r"<[^@]+@([^>]+)>", sender)
+    if match:
+        return match.group(1).lower()
+    match = re.search(r"[^@\s]+@([^\s>]+)", sender)
+    if match:
+        return match.group(1).lower()
+    return ""
+
 
 _SIGNAL_TO_STATUS: dict[str, ApplicationStatus] = {
     "shortlisted": ApplicationStatus.RESUME_SHORTLISTED,
@@ -61,7 +75,7 @@ class EmailParser:
             email.body_text = None
             return None
 
-        sender_domain = self._extract_sender_domain(email.sender)
+        sender_domain = extract_sender_domain(email.sender)
         subject_lower = email.subject.lower()
 
         matched_portal: dict[str, Any] | None = None
@@ -153,16 +167,6 @@ class EmailParser:
                 if kw.lower() in subject_lower:
                     return True
         return False
-
-    def _extract_sender_domain(self, sender: str) -> str:
-        # Match "Name <user@domain.com>" or "user@domain.com"
-        match = re.search(r"<[^@]+@([^>]+)>", sender)
-        if match:
-            return match.group(1).lower()
-        match = re.search(r"[^@\s]+@([^\s>]+)", sender)
-        if match:
-            return match.group(1).lower()
-        return ""
 
     # Words that indicate an extracted "company" is actually a program, event, or boilerplate.
     _REJECT_COMPANY_WORDS: frozenset[str] = frozenset([
@@ -329,10 +333,18 @@ class EmailParser:
         sender_lower = sender.lower()
         subject_lower = subject.lower()
         for rule in rules:
-            pattern = rule.sender_pattern.lower()
-            if re.search(pattern, sender_lower):
+            try:
+                if not re.search(rule.sender_pattern.lower(), sender_lower):
+                    continue
                 if rule.subject_pattern is None:
                     return True
                 if re.search(rule.subject_pattern.lower(), subject_lower):
                     return True
+            except re.error:
+                log.warning(
+                    "invalid_suppress_rule_regex",
+                    rule_id=rule.id,
+                    sender_pattern=rule.sender_pattern,
+                    subject_pattern=rule.subject_pattern,
+                )
         return False

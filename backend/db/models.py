@@ -23,14 +23,14 @@ class Application(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     company: Optional[str] = None
     role: Optional[str] = None
-    source_portal: str
+    source_portal: str = Field(index=True)
     job_url: Optional[str] = None
-    applied_date: datetime
-    current_status: ApplicationStatus = ApplicationStatus.APPLIED
+    applied_date: datetime = Field(index=True)
+    current_status: ApplicationStatus = Field(default=ApplicationStatus.APPLIED, index=True)
     thread_ids: str = "[]"  # JSON-encoded list[str]
     is_false_positive: bool = False
     created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow, index=True)
     status_history: List["StatusHistory"] = Relationship(back_populates="application")
 
 

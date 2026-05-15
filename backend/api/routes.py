@@ -4,17 +4,17 @@ from __future__ import annotations
 
 import csv
 import io
-from datetime import date, datetime, timedelta
+import re
+from datetime import date, datetime
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
-from backend.config import DB_PATH, STALE_DAYS_THRESHOLD
-from backend.db.data_store import ApplicationFilter, DataStore
+from backend.config import DB_PATH
+from backend.db.data_store import ApplicationFilter, DataStore, is_application_stale
 from backend.db.models import Application, ApplicationStatus
-from backend.engine.duplicate_detector import DuplicateDetector
 from backend.engine.insights_engine import InsightsEngine
 from backend.engine.status_updater import StatusUpdater
 
@@ -126,7 +126,7 @@ class ApplicationCreate(BaseModel):
     role: Optional[str] = None
     source_portal: str
     job_url: Optional[str] = None
-    applied_date: str  # ISO date string
+    applied_date: datetime
     current_status: ApplicationStatus = ApplicationStatus.APPLIED
 
 
@@ -148,16 +148,10 @@ class SuppressRuleCreate(BaseModel):
 # ------------------------------------------------------------------ #
 
 
-def _is_stale(app: Application) -> bool:
-    if app.current_status != ApplicationStatus.APPLIED:
-        return False
-    cutoff = datetime.utcnow() - timedelta(days=STALE_DAYS_THRESHOLD)
-    return app.updated_at < cutoff
-
-
 def _to_response(app: Application) -> ApplicationResponse:
+    assert app.id is not None, "Application must be persisted before serializing"
     return ApplicationResponse(
-        id=app.id,  # type: ignore[arg-type]
+        id=app.id,
         company=app.company,
         role=app.role,
         source_portal=app.source_portal,
@@ -168,7 +162,7 @@ def _to_response(app: Application) -> ApplicationResponse:
         is_false_positive=app.is_false_positive,
         created_at=app.created_at,
         updated_at=app.updated_at,
-        is_stale=_is_stale(app),
+        is_stale=is_application_stale(app),
     )
 
 
@@ -214,11 +208,19 @@ async def list_applications(
     page_size: int = Query(default=50, ge=1, le=500),
 ) -> ApplicationListResponse:
     db: DataStore = request.app.state.db
+    try:
+        date_from_dt = datetime.fromisoformat(date_from) if date_from else None
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date_from — expected ISO 8601")
+    try:
+        date_to_dt = datetime.fromisoformat(date_to) if date_to else None
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date_to — expected ISO 8601")
     filters = ApplicationFilter(
         status=status,
         source_portal=source_portal,
-        date_from=datetime.fromisoformat(date_from) if date_from else None,
-        date_to=datetime.fromisoformat(date_to) if date_to else None,
+        date_from=date_from_dt,
+        date_to=date_to_dt,
         search=search,
         page=page,
         page_size=page_size,
@@ -235,15 +237,14 @@ async def list_applications(
 @router.post("/applications", response_model=ApplicationResponse, status_code=201)
 async def create_application(body: ApplicationCreate, request: Request) -> ApplicationResponse:
     db: DataStore = request.app.state.db
-    applied = datetime.fromisoformat(body.applied_date)
     app = Application(
         company=body.company,
         role=body.role,
         source_portal=body.source_portal,
         job_url=body.job_url,
-        applied_date=applied,
+        applied_date=body.applied_date,
         current_status=body.current_status,
-        updated_at=applied,
+        updated_at=body.applied_date,
     )
     saved = db.upsert_application(app)
     return _to_response(saved)
@@ -297,7 +298,7 @@ async def patch_application(
         raise HTTPException(status_code=404, detail="Application not found")
 
     if body.current_status is not None:
-        updater = StatusUpdater(db, DuplicateDetector(db))
+        updater: StatusUpdater = request.app.state.updater
         app = updater.manual_update(id, body.current_status)
 
     needs_upsert = False
@@ -404,6 +405,15 @@ async def list_suppress_rules(request: Request) -> list[SuppressRuleResponse]:
 async def create_suppress_rule(
     body: SuppressRuleCreate, request: Request
 ) -> SuppressRuleResponse:
+    try:
+        re.compile(body.sender_pattern)
+    except re.error as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid sender_pattern regex: {exc}")
+    if body.subject_pattern is not None:
+        try:
+            re.compile(body.subject_pattern)
+        except re.error as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid subject_pattern regex: {exc}")
     db: DataStore = request.app.state.db
     rule = db.add_suppress_rule(
         sender_pattern=body.sender_pattern,

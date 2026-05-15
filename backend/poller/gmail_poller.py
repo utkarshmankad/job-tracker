@@ -1,8 +1,9 @@
 """Gmail API polling logic."""
 
-from collections import deque
 from enum import Enum
-import json, base64, email
+import json
+import base64
+import threading
 from dataclasses import replace as dataclass_replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -24,7 +25,7 @@ from backend.config import (
     GMAIL_SCOPES,
 )
 from backend.db.data_store import DataStore
-from backend.parser.email_parser import EmailParser, RawEmail
+from backend.parser.email_parser import EmailParser, RawEmail, extract_sender_domain
 from backend.engine.status_updater import StatusUpdater
 from backend.poller.error_retry import gmail_retry, AuthError
 
@@ -43,6 +44,7 @@ class GmailPoller:
         self._db = db
         self._parser = parser
         self._updater = updater
+        self._poll_lock = threading.Lock()
         self.service = None
         self.status = PollerStatus.SLEEPING
         state = db.get_poller_state()
@@ -73,7 +75,8 @@ class GmailPoller:
             return Credentials.from_authorized_user_info(
                 json.loads(token_json), GMAIL_SCOPES
             )
-        except Exception:
+        except Exception as exc:
+            log.warning("keyring_token_invalid", error=str(exc))
             return None
 
     def _save_token_to_keyring(self, creds: Credentials) -> None:
@@ -83,6 +86,15 @@ class GmailPoller:
 
     @gmail_retry()
     def poll_once(self) -> int:
+        if not self._poll_lock.acquire(blocking=False):
+            log.info("poll_skipped_already_running")
+            return 0
+        try:
+            return self._poll_once_locked()
+        finally:
+            self._poll_lock.release()
+
+    def _poll_once_locked(self) -> int:
         suppress_rules = self._db.get_suppress_rules()
         processed_count = 0
 
@@ -113,7 +125,7 @@ class GmailPoller:
                             refined = self._parser.refine_company(
                                 body,
                                 parsed.source_portal,
-                                self._extract_sender_domain(raw_email.sender),
+                                extract_sender_domain(raw_email.sender),
                             )
                             if refined:
                                 parsed = dataclass_replace(parsed, company=refined)
@@ -215,22 +227,14 @@ class GmailPoller:
             if data:
                 try:
                     return base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
-                except Exception:
+                except Exception as exc:
+                    log.warning("body_decode_error", error=str(exc))
                     return ""
         for part in payload.get("parts", []):
             text = self._extract_text_from_payload(part)
             if text:
                 return text
         return ""
-
-    @staticmethod
-    def _extract_sender_domain(sender: str) -> str:
-        import re
-        match = re.search(r"<[^@]+@([^>]+)>", sender)
-        if match:
-            return match.group(1).lower()
-        match = re.search(r"[^@\s]+@([^\s>]+)", sender)
-        return match.group(1).lower() if match else ""
 
     def _build_raw_email(self, msg: dict) -> RawEmail:
         headers = {

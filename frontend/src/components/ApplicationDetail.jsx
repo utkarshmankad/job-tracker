@@ -10,21 +10,25 @@ export default function ApplicationDetail({ applicationId, onClose }) {
   const [statusEdit, setStatusEdit] = useState("");
   const [saving, setSaving] = useState(false);
 
-  const fetchApp = () => {
+  const fetchApp = (signal) => {
     setLoading(true);
     api
-      .getApplication(applicationId)
+      .getApplication(applicationId, signal)
       .then((data) => {
         setApp(data);
         setStatusEdit(data.current_status);
         setError(null);
       })
-      .catch((e) => setError(e.message))
+      .catch((e) => {
+        if (e.name !== "AbortError") setError(e.message);
+      })
       .finally(() => setLoading(false));
   };
 
   useEffect(() => {
-    fetchApp();
+    const controller = new AbortController();
+    fetchApp(controller.signal);
+    return () => controller.abort();
   }, [applicationId]);
 
   const handleStatusChange = async (newStatus) => {

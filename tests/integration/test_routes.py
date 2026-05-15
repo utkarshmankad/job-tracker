@@ -10,6 +10,8 @@ from sqlmodel import Session
 from backend.config import STALE_DAYS_THRESHOLD
 from backend.db.data_store import DataStore
 from backend.db.models import Application, ApplicationStatus
+from backend.engine.duplicate_detector import DuplicateDetector
+from backend.engine.status_updater import StatusUpdater
 from backend.main import app
 
 
@@ -20,6 +22,7 @@ def seeded_client(tmp_path):
     with TestClient(app, raise_server_exceptions=True) as client:
         # Override AFTER lifespan runs so the test DB isn't replaced by startup event.
         app.state.db = test_db
+        app.state.updater = StatusUpdater(test_db, DuplicateDetector(test_db))
         yield client, test_db
 
 
@@ -215,3 +218,139 @@ def test_poller_status_endpoint(seeded_client):
     assert "last_sync_at" in body
     assert "error_message" in body
     assert body["status"] == "SLEEPING"
+
+
+# ------------------------------------------------------------------ #
+# New tests from code review fixes                                     #
+# ------------------------------------------------------------------ #
+
+
+def test_list_applications_bad_date_from_returns_400(seeded_client):
+    client, _ = seeded_client
+    resp = client.get(f"{_BASE}/applications?date_from=not-a-date")
+    assert resp.status_code == 400
+    assert "date_from" in resp.json()["detail"].lower()
+
+
+def test_list_applications_bad_date_to_returns_400(seeded_client):
+    client, _ = seeded_client
+    resp = client.get(f"{_BASE}/applications?date_to=garbage")
+    assert resp.status_code == 400
+    assert "date_to" in resp.json()["detail"].lower()
+
+
+def test_list_applications_valid_dates_accepted(seeded_client):
+    client, _ = seeded_client
+    resp = client.get(f"{_BASE}/applications?date_from=2024-01-01&date_to=2025-12-31")
+    assert resp.status_code == 200
+
+
+def test_create_application_invalid_date_returns_422(seeded_client):
+    client, _ = seeded_client
+    payload = {**_APP_PAYLOAD, "applied_date": "not-a-date"}
+    resp = client.post(f"{_BASE}/applications", json=payload)
+    assert resp.status_code == 422  # Pydantic validates datetime field
+
+
+def test_suppress_rule_invalid_sender_regex_returns_400(seeded_client):
+    client, _ = seeded_client
+    resp = client.post(
+        f"{_BASE}/suppress-rules",
+        json={"sender_pattern": "[unclosed", "subject_pattern": None},
+    )
+    assert resp.status_code == 400
+    assert "sender_pattern" in resp.json()["detail"].lower()
+
+
+def test_suppress_rule_invalid_subject_regex_returns_400(seeded_client):
+    client, _ = seeded_client
+    resp = client.post(
+        f"{_BASE}/suppress-rules",
+        json={"sender_pattern": r"naukri\.com", "subject_pattern": "[bad"},
+    )
+    assert resp.status_code == 400
+    assert "subject_pattern" in resp.json()["detail"].lower()
+
+
+def test_suppress_rule_valid_regex_accepted(seeded_client):
+    client, _ = seeded_client
+    resp = client.post(
+        f"{_BASE}/suppress-rules",
+        json={"sender_pattern": r"noreply@.*\.com", "subject_pattern": r"job\s+alert"},
+    )
+    assert resp.status_code == 201
+
+
+def test_system_status_endpoint(seeded_client):
+    client, _ = seeded_client
+    resp = client.get(f"{_BASE}/status")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "overall" in body
+    assert "components" in body
+    assert "stats" in body
+    assert body["overall"] in ("operational", "degraded", "outage")
+
+
+def test_patch_false_positive(seeded_client):
+    client, _ = seeded_client
+    created = _create_app(client)
+    app_id = created["id"]
+
+    resp = client.patch(f"{_BASE}/applications/{app_id}", json={"is_false_positive": True})
+    assert resp.status_code == 200
+    assert resp.json()["is_false_positive"] is True
+
+
+def test_delete_nonexistent_application(seeded_client):
+    client, _ = seeded_client
+    resp = client.delete(f"{_BASE}/applications/99999")
+    assert resp.status_code == 404
+
+
+def test_insights_flow_endpoint(seeded_client):
+    client, _ = seeded_client
+    resp = client.get(f"{_BASE}/insights/flow")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "nodes" in body
+    assert "links" in body
+    assert "kpis" in body
+
+
+def test_reauth_poller_endpoint(seeded_client):
+    client, _ = seeded_client
+    resp = client.post(f"{_BASE}/poller/reauth")
+    assert resp.status_code == 200
+    assert "message" in resp.json()
+    # Verify poller state was updated
+    status_resp = client.get(f"{_BASE}/poller/status")
+    assert status_resp.json()["status"] == "AUTH_REQUIRED"
+
+
+def test_patch_application_company_and_role(seeded_client):
+    client, _ = seeded_client
+    created = _create_app(client)
+    app_id = created["id"]
+
+    resp = client.patch(
+        f"{_BASE}/applications/{app_id}",
+        json={"company": "New Corp", "role": "Staff Engineer", "job_url": "https://example.com"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["company"] == "New Corp"
+    assert body["role"] == "Staff Engineer"
+    assert body["job_url"] == "https://example.com"
+
+
+def test_patch_application_not_found_returns_404(seeded_client):
+    client, _ = seeded_client
+    resp = client.patch(f"{_BASE}/applications/99999", json={"company": "X"})
+    assert resp.status_code == 404
+
+
+def test_suppress_rule_delete_nonexistent_returns_404(seeded_client):
+    client, _ = seeded_client
+    resp = client.delete(f"{_BASE}/suppress-rules/99999")
+    assert resp.status_code == 404

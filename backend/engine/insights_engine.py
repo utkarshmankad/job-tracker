@@ -73,7 +73,8 @@ class InsightsEngine:
         self._db = db
 
     def generate_report(self) -> InsightReport:
-        funnel = self._funnel_counts()
+        apps = self._fetch_active_apps()
+        funnel = self._funnel_counts(apps)
         total = sum(funnel.values())
 
         if total < MIN_APPLICATIONS_FOR_INSIGHTS:
@@ -86,7 +87,7 @@ class InsightsEngine:
                 generated_at=datetime.utcnow(),
             )
 
-        channels = self._channel_stats()
+        channels = self._channel_stats(apps)
         insights = self._flag_channels(channels)
 
         return InsightReport(
@@ -102,15 +103,15 @@ class InsightsEngine:
         apps, _ = self._db.get_applications(ApplicationFilter(page_size=10_000))
         return [a for a in apps if not a.is_false_positive]
 
-    def _funnel_counts(self) -> dict[str, int]:
+    def _funnel_counts(self, apps: list[Application]) -> dict[str, int]:
         counts: dict[str, int] = {s.value: 0 for s in ApplicationStatus}
-        for app in self._fetch_active_apps():
+        for app in apps:
             counts[app.current_status.value] += 1
         return counts
 
-    def _channel_stats(self) -> list[ChannelStat]:
+    def _channel_stats(self, apps: list[Application]) -> list[ChannelStat]:
         groups: dict[str, list[Application]] = {}
-        for app in self._fetch_active_apps():
+        for app in apps:
             groups.setdefault(app.source_portal, []).append(app)
 
         stats: list[ChannelStat] = []
@@ -128,25 +129,9 @@ class InsightsEngine:
     # Flow / Sankey data                                                   #
     # ------------------------------------------------------------------ #
 
-    _SHORTLISTED_VALUES: frozenset[str] = frozenset({
-        ApplicationStatus.RESUME_SHORTLISTED.value,
-        ApplicationStatus.INTERVIEW_SCHEDULED.value,
-        ApplicationStatus.INTERVIEW_IN_PROGRESS.value,
-        ApplicationStatus.OFFER_NEGOTIATION.value,
-        ApplicationStatus.OFFER.value,
-        ApplicationStatus.JOINED.value,
-    })
-    _INTERVIEWED_VALUES: frozenset[str] = frozenset({
-        ApplicationStatus.INTERVIEW_SCHEDULED.value,
-        ApplicationStatus.INTERVIEW_IN_PROGRESS.value,
-        ApplicationStatus.OFFER_NEGOTIATION.value,
-        ApplicationStatus.OFFER.value,
-        ApplicationStatus.JOINED.value,
-    })
-    _OFFERED_VALUES: frozenset[str] = frozenset({
-        ApplicationStatus.OFFER.value,
-        ApplicationStatus.JOINED.value,
-    })
+    _SHORTLISTED_VALUES: frozenset[str] = frozenset(s.value for s in _SHORTLISTED_STAGES)
+    _INTERVIEWED_VALUES: frozenset[str] = frozenset(s.value for s in _INTERVIEW_STAGES)
+    _OFFERED_VALUES: frozenset[str] = frozenset(s.value for s in _OFFER_STAGES)
     _TERMINAL_VALUES: frozenset[str] = frozenset({
         ApplicationStatus.REJECTED.value,
         ApplicationStatus.WITHDRAWN.value,
@@ -164,8 +149,9 @@ class InsightsEngine:
                 "insufficient_data": True,
             }
 
-        # Build set of stages each app passed through using StatusHistory
-        all_history = self._db.get_all_status_history()
+        # Build set of stages each app passed through using StatusHistory (filtered to active apps)
+        app_ids = {app.id for app in apps if app.id is not None}
+        all_history = self._db.get_status_history_for_apps(app_ids)
         stages_by_app: dict[int, set[str]] = {}
         for h in all_history:
             if h.application_id is not None:

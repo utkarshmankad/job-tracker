@@ -157,3 +157,112 @@ def test_suppress_rule_prevents_insert(poller, db):
 
     _, total = db.get_applications(ApplicationFilter())
     assert total == 0
+
+
+def test_fetch_via_history_used_when_last_history_id_set(poller, db):
+    """When last_history_id is set, the poller calls history.list, not messages.list."""
+    service = MagicMock()
+    history_response = {
+        "historyId": "100000",
+        "history": [
+            {
+                "messagesAdded": [
+                    {"message": {"id": "msg001", "threadId": "thread001"}}
+                ]
+            }
+        ],
+    }
+    service.users.return_value.history.return_value.list.return_value.execute.return_value = (
+        history_response
+    )
+
+    msg_response = TEST_MESSAGES[0]
+    service.users.return_value.messages.return_value.get.return_value.execute.return_value = (
+        msg_response
+    )
+
+    poller.service = service
+    poller.last_history_id = "99999"
+
+    poller.poll_once()
+
+    service.users.return_value.history.return_value.list.assert_called_once()
+    service.users.return_value.messages.return_value.list.assert_not_called()
+
+
+def test_body_text_fetched_when_company_is_none(poller, db):
+    """When company is None after initial parse, body text is fetched to refine it."""
+    no_company_msg = {
+        "id": "msg-nobody",
+        "threadId": "thread-nobody",
+        "snippet": "Your application has been received",
+        "payload": {
+            "headers": [
+                {"name": "From", "value": "noreply@naukri.com"},
+                {"name": "Subject", "value": "Application received"},
+                {"name": "Date", "value": "Mon, 13 May 2024 10:00:00 +0000"},
+            ]
+        },
+    }
+
+    service = make_mock_service([no_company_msg])
+    # Mock full-body fetch returning text that helps extract company
+    full_msg = {
+        "payload": {
+            "mimeType": "text/plain",
+            "body": {
+                "data": __import__("base64").urlsafe_b64encode(
+                    b"Dear Candidate, Your application to Infosys has been received."
+                ).decode()
+            },
+        }
+    }
+    service.users.return_value.messages.return_value.get.side_effect = None
+    responses = [no_company_msg, full_msg]
+    call_count = [0]
+
+    def get_side_effect(**kwargs):
+        mock = MagicMock()
+        if kwargs.get("format") == "full":
+            mock.execute.return_value = full_msg
+        else:
+            mock.execute.return_value = no_company_msg
+        return mock
+
+    service.users.return_value.messages.return_value.get.side_effect = get_side_effect
+    poller.service = service
+    poller.poll_once()
+
+    # Application was created (company may or may not be refined depending on NER)
+    _, total = db.get_applications(ApplicationFilter())
+    assert total == 1
+
+
+def test_build_raw_email_with_bad_date_falls_back_to_utcnow(poller):
+    """_build_raw_email falls back to utcnow when Date header is unparseable."""
+    msg = {
+        "id": "msg-bad-date",
+        "threadId": "thread-bad-date",
+        "snippet": "",
+        "payload": {
+            "headers": [
+                {"name": "From", "value": "hr@test.com"},
+                {"name": "Subject", "value": "Job Application"},
+                {"name": "Date", "value": "this is not a date"},
+            ]
+        },
+    }
+    raw = poller._build_raw_email(msg)
+    from datetime import datetime, timezone
+    # Should not raise and should be close to now
+    assert (datetime.utcnow() - raw.date).total_seconds() < 5
+
+
+def test_poll_updates_last_history_id(poller, db):
+    """After a successful poll, last_history_id is updated."""
+    poller.service = make_mock_service([])
+    assert poller.last_history_id is None
+
+    poller.poll_once()
+
+    assert poller.last_history_id == "99999"

@@ -12,7 +12,7 @@ async function request(path, options = {}) {
 export const api = {
   listApplications: (params = {}) =>
     request(`/applications?${new URLSearchParams(params)}`),
-  getApplication: (id) => request(`/applications/${id}`),
+  getApplication: (id, signal) => request(`/applications/${id}`, { signal }),
   createApplication: (body) =>
     request("/applications", { method: "POST", body: JSON.stringify(body) }),
   updateApplication: (id, body) =>

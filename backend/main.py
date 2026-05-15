@@ -7,8 +7,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api.routes import router
-from backend.config import API_HOST, API_PORT, FRONTEND_PORT
+from backend.config import API_HOST, API_PORT, FRONTEND_PORT, FRONTEND_PORT_ALT
 from backend.db.data_store import DataStore
+from backend.engine.duplicate_detector import DuplicateDetector
+from backend.engine.status_updater import StatusUpdater
 
 log = structlog.get_logger()
 
@@ -18,6 +20,7 @@ async def lifespan(app: FastAPI):
     from datetime import datetime
     db = DataStore()
     app.state.db = db
+    app.state.updater = StatusUpdater(db, DuplicateDetector(db))
     app.state.started_at = datetime.utcnow()
     log.info("app_started")
     yield
@@ -28,9 +31,12 @@ app = FastAPI(title="Job Tracker API", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[f"http://localhost:{FRONTEND_PORT}", "http://localhost:5173", "http://localhost:5174"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=[
+        f"http://localhost:{FRONTEND_PORT}",
+        f"http://localhost:{FRONTEND_PORT_ALT}",
+    ],
+    allow_methods=["GET", "POST", "PATCH", "DELETE"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 app.include_router(router, prefix="/api/v1")

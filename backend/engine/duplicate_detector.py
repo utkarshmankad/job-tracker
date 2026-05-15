@@ -26,7 +26,11 @@ class DuplicateDetector:
     def find_duplicate(self, parsed: ParsedApplication) -> Application | None:
         cutoff = datetime.utcnow() - timedelta(days=_LOOKUP_DAYS)
         candidates, _ = self._db.get_applications(
-            ApplicationFilter(date_from=cutoff, page_size=10_000)
+            ApplicationFilter(
+                date_from=cutoff,
+                source_portal=parsed.source_portal,
+                page_size=10_000,
+            )
         )
 
         company = (parsed.company or "").strip()

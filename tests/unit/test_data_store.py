@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -9,7 +10,7 @@ from pathlib import Path
 import pytest
 from sqlmodel import Session
 
-from backend.db.data_store import ApplicationFilter, DataStore
+from backend.db.data_store import ApplicationFilter, DataStore, is_application_stale
 from backend.db.models import Application, ApplicationStatus, StatusHistory
 
 
@@ -164,3 +165,136 @@ def test_duplicate_upsert_updates_timestamp(tmp_path: Path) -> None:
     assert total == 1  # no duplicate row
     assert updated.company == "Dup Corp (updated)"
     assert updated.updated_at >= first_updated_at
+
+
+# ------------------------------------------------------------------ #
+# New tests from code review fixes                                     #
+# ------------------------------------------------------------------ #
+
+
+def test_find_application_by_thread_id_found(tmp_path: Path) -> None:
+    ds = DataStore(tmp_path / "test.db")
+    app = _make_app(company="ThreadCo")
+    app.thread_ids = json.dumps(["thread-abc", "thread-xyz"])
+    saved = ds.upsert_application(app)
+
+    found = ds.find_application_by_thread_id("thread-abc")
+    assert found is not None
+    assert found.id == saved.id
+
+
+def test_find_application_by_thread_id_not_found(tmp_path: Path) -> None:
+    ds = DataStore(tmp_path / "test.db")
+    ds.upsert_application(_make_app(company="OtherCo"))
+
+    assert ds.find_application_by_thread_id("nonexistent-thread") is None
+
+
+def test_find_application_by_thread_id_second_in_list(tmp_path: Path) -> None:
+    ds = DataStore(tmp_path / "test.db")
+    app = _make_app(company="MultiThreadCo")
+    app.thread_ids = json.dumps(["first-thread", "second-thread", "third-thread"])
+    saved = ds.upsert_application(app)
+
+    assert ds.find_application_by_thread_id("second-thread") is not None
+    assert ds.find_application_by_thread_id("third-thread") is not None
+
+
+def test_find_application_by_thread_id_does_not_match_partial(tmp_path: Path) -> None:
+    ds = DataStore(tmp_path / "test.db")
+    app = _make_app(company="PartialCo")
+    app.thread_ids = json.dumps(["thread-123"])
+    ds.upsert_application(app)
+
+    # "thread-12" is a substring but not a full thread_id — should not match
+    assert ds.find_application_by_thread_id("thread-12") is None
+
+
+def test_get_status_history_for_apps_filters_correctly(tmp_path: Path) -> None:
+    ds = DataStore(tmp_path / "test.db")
+    app1 = ds.upsert_application(_make_app(company="Alpha"))
+    app2 = ds.upsert_application(_make_app(company="Beta"))
+
+    assert app1.id is not None
+    assert app2.id is not None
+
+    ds.append_status_history(app1.id, None, ApplicationStatus.APPLIED.value, "email")
+    ds.append_status_history(app1.id, ApplicationStatus.APPLIED.value, ApplicationStatus.REJECTED.value, "email")
+    ds.append_status_history(app2.id, None, ApplicationStatus.APPLIED.value, "email")
+
+    result = ds.get_status_history_for_apps({app1.id})
+    assert len(result) == 2
+    assert all(h.application_id == app1.id for h in result)
+
+
+def test_get_status_history_for_apps_empty_set(tmp_path: Path) -> None:
+    ds = DataStore(tmp_path / "test.db")
+    app = ds.upsert_application(_make_app(company="SomeCo"))
+    assert app.id is not None
+    ds.append_status_history(app.id, None, ApplicationStatus.APPLIED.value, "email")
+
+    assert ds.get_status_history_for_apps(set()) == []
+
+
+def test_is_application_stale_old_applied(tmp_path: Path) -> None:
+    ds = DataStore(tmp_path / "test.db")
+    app = ds.upsert_application(_make_app(company="StaleCo"))
+
+    with Session(ds._engine) as session:
+        db_app = session.get(Application, app.id)
+        db_app.updated_at = datetime.utcnow() - timedelta(days=20)
+        session.add(db_app)
+        session.commit()
+
+    refreshed = ds.get_application(app.id)
+    assert refreshed is not None
+    assert is_application_stale(refreshed, threshold_days=14) is True
+
+
+def test_is_application_stale_recent_applied(tmp_path: Path) -> None:
+    ds = DataStore(tmp_path / "test.db")
+    app = ds.upsert_application(_make_app(company="FreshCo"))
+    assert is_application_stale(app, threshold_days=14) is False
+
+
+def test_is_application_stale_non_applied_status(tmp_path: Path) -> None:
+    ds = DataStore(tmp_path / "test.db")
+    app = _make_app(company="RejectedCo", current_status=ApplicationStatus.REJECTED)
+    app = ds.upsert_application(app)
+
+    with Session(ds._engine) as session:
+        db_app = session.get(Application, app.id)
+        db_app.updated_at = datetime.utcnow() - timedelta(days=30)
+        session.add(db_app)
+        session.commit()
+
+    refreshed = ds.get_application(app.id)
+    assert refreshed is not None
+    assert is_application_stale(refreshed, threshold_days=14) is False
+
+
+def test_poller_state_missing_raises_runtime_error(tmp_path: Path) -> None:
+    ds = DataStore(tmp_path / "test.db")
+    # Delete the singleton PollerState row directly
+    from backend.db.models import PollerState
+    with Session(ds._engine) as session:
+        state = session.get(PollerState, 1)
+        if state:
+            session.delete(state)
+            session.commit()
+
+    with pytest.raises(RuntimeError, match="PollerState row missing"):
+        ds.get_poller_state()
+
+
+def test_update_poller_state_missing_raises_runtime_error(tmp_path: Path) -> None:
+    ds = DataStore(tmp_path / "test.db")
+    from backend.db.models import PollerState
+    with Session(ds._engine) as session:
+        state = session.get(PollerState, 1)
+        if state:
+            session.delete(state)
+            session.commit()
+
+    with pytest.raises(RuntimeError, match="PollerState row missing"):
+        ds.update_poller_state(status="ERROR")

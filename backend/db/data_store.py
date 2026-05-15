@@ -21,6 +21,16 @@ from backend.db.models import (
     SuppressRule,
 )
 
+
+def is_application_stale(
+    app: Application, threshold_days: int = STALE_DAYS_THRESHOLD
+) -> bool:
+    """Return True when an Applied-status application has had no update within threshold_days."""
+    if app.current_status != ApplicationStatus.APPLIED:
+        return False
+    cutoff = datetime.utcnow() - timedelta(days=threshold_days)
+    return app.updated_at < cutoff
+
 log = structlog.get_logger(__name__)
 
 
@@ -122,6 +132,14 @@ class DataStore:
         with Session(self._engine, expire_on_commit=False) as session:
             return session.get(Application, id)
 
+    def find_application_by_thread_id(self, thread_id: str) -> Application | None:
+        """Return the Application that owns thread_id, or None. Uses SQL LIKE on the JSON blob."""
+        with Session(self._engine, expire_on_commit=False) as session:
+            stmt = select(Application).where(
+                Application.thread_ids.contains(f'"{thread_id}"')
+            )
+            return session.exec(stmt).first()
+
     def delete_application(self, id: int) -> bool:
         with Session(self._engine) as session:
             app = session.get(Application, id)
@@ -208,7 +226,8 @@ class DataStore:
     def get_poller_state(self) -> PollerState:
         with Session(self._engine, expire_on_commit=False) as session:
             state = session.get(PollerState, 1)
-            assert state is not None  # guaranteed by _ensure_poller_state
+            if state is None:
+                raise RuntimeError("PollerState row missing — DB may be corrupted")
             return state
 
     def update_poller_state(
@@ -220,7 +239,8 @@ class DataStore:
     ) -> None:
         with Session(self._engine) as session:
             state = session.get(PollerState, 1)
-            assert state is not None
+            if state is None:
+                raise RuntimeError("PollerState row missing — DB may be corrupted")
             state.status = status
             if last_history_id is not None:
                 state.last_history_id = last_history_id
@@ -238,6 +258,14 @@ class DataStore:
     def get_all_status_history(self) -> list[StatusHistory]:
         with Session(self._engine, expire_on_commit=False) as session:
             return list(session.exec(select(StatusHistory)).all())
+
+    def get_status_history_for_apps(self, app_ids: set[int]) -> list[StatusHistory]:
+        """Return status history rows for only the given application IDs."""
+        if not app_ids:
+            return []
+        with Session(self._engine, expire_on_commit=False) as session:
+            stmt = select(StatusHistory).where(StatusHistory.application_id.in_(app_ids))
+            return list(session.exec(stmt).all())
 
     def get_stale_applications(self, threshold_days: int = STALE_DAYS_THRESHOLD) -> list[Application]:
         cutoff = datetime.utcnow() - timedelta(days=threshold_days)

@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { api } from "../api/client";
+import { formatTimeDiff } from "../utils/formatters";
 
 const REFRESH_INTERVAL = 30_000;
 
@@ -14,11 +15,7 @@ function formatUptime(seconds) {
 }
 
 function formatRelativeTime(isoString) {
-  if (!isoString) return "never";
-  const diff = Math.round((Date.now() - new Date(isoString).getTime()) / 1000);
-  if (diff < 60) return `${diff}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  return `${Math.floor(diff / 3600)}h ago`;
+  return formatTimeDiff(isoString) ?? "never";
 }
 
 const STATUS_CONFIG = {

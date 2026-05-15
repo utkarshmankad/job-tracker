@@ -16,15 +16,23 @@ export default function App() {
   const [showAddForm, setShowAddForm] = useState(false);
   const { dark, toggle } = useTheme();
 
+  const [exportError, setExportError] = useState(null);
+
   const handleExport = async () => {
-    const res = await api.exportApplications("csv");
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "applications.csv";
-    a.click();
-    URL.revokeObjectURL(url);
+    setExportError(null);
+    try {
+      const res = await api.exportApplications("csv");
+      if (!res.ok) throw new Error(`Export failed: ${res.status}`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "applications.csv";
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setExportError(e.message);
+    }
   };
 
   return (
@@ -88,6 +96,11 @@ export default function App() {
           </div>
         </div>
 
+        {exportError && (
+          <div className="mb-4 text-sm text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">
+            Export failed: {exportError}
+          </div>
+        )}
         {activeTab === "applications" && (
           <>
             <Filters filters={filters} onChange={setFilters} />

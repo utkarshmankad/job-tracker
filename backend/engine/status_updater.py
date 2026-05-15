@@ -7,7 +7,7 @@ from datetime import datetime
 
 import structlog
 
-from backend.db.data_store import ApplicationFilter, DataStore
+from backend.db.data_store import DataStore
 from backend.db.models import Application, ApplicationStatus
 from backend.engine.duplicate_detector import DuplicateDetector
 from backend.parser.email_parser import ParsedApplication
@@ -70,22 +70,26 @@ class StatusUpdater:
         if is_new:
             record = self._create_new(parsed)
         else:
+            assert record.id is not None
+            app_id = record.id
             self._detector.merge(record, parsed)
-            record = self._db.get_application(record.id)  # type: ignore[arg-type]
+            record = self._db.get_application(app_id)
+            if record is None:
+                raise RuntimeError(f"Application {app_id} vanished mid-update")
             if parsed.status_signal is not None:
                 self._advance_status(record, parsed.status_signal, parsed.message_id)
-                record = self._db.get_application(record.id)  # type: ignore[arg-type]
+                record = self._db.get_application(app_id)
+                if record is None:
+                    raise RuntimeError(f"Application {app_id} vanished after status advance")
 
         result = "applied" if is_new else ("status_update" if parsed.status_signal else "applied")
         self._db.mark_processed(parsed.message_id, result)
-        return record  # type: ignore[return-value]
+        return record
 
     def _find_existing(self, parsed: ParsedApplication) -> Application | None:
-        apps, _ = self._db.get_applications(ApplicationFilter(page_size=10_000))
-        for app in apps:
-            thread_ids: list[str] = json.loads(app.thread_ids or "[]")
-            if parsed.thread_id in thread_ids:
-                return app
+        found = self._db.find_application_by_thread_id(parsed.thread_id)
+        if found is not None:
+            return found
         return self._detector.find_duplicate(parsed)
 
     def _advance_status(
@@ -94,6 +98,7 @@ class StatusUpdater:
         signal: ApplicationStatus,
         message_id: str,
     ) -> None:
+        assert record.id is not None
         current = record.current_status
         valid_next = _TRANSITIONS.get(current, set())
         if signal not in valid_next:
@@ -110,7 +115,7 @@ class StatusUpdater:
         record.updated_at = datetime.utcnow()
         self._db.upsert_application(record)
         self._db.append_status_history(
-            application_id=record.id,  # type: ignore[arg-type]
+            application_id=record.id,
             from_status=from_val,
             to_status=signal.value,
             trigger="email",
@@ -132,8 +137,9 @@ class StatusUpdater:
             thread_ids=json.dumps([parsed.thread_id]),
         )
         saved = self._db.upsert_application(app)
+        assert saved.id is not None
         self._db.append_status_history(
-            application_id=saved.id,  # type: ignore[arg-type]
+            application_id=saved.id,
             from_status=None,
             to_status=ApplicationStatus.APPLIED.value,
             trigger="email",
@@ -141,8 +147,11 @@ class StatusUpdater:
         )
         if parsed.status_signal is not None:
             self._advance_status(saved, parsed.status_signal, parsed.message_id)
-            saved = self._db.get_application(saved.id)  # type: ignore[arg-type]
-        return saved  # type: ignore[return-value]
+            result = self._db.get_application(saved.id)
+            if result is None:
+                raise RuntimeError(f"Application {saved.id} vanished after creation advance")
+            saved = result
+        return saved
 
     def manual_update(self, application_id: int, new_status: ApplicationStatus) -> Application:
         record = self._db.get_application(application_id)
@@ -161,3 +170,5 @@ class StatusUpdater:
             message_id=None,
         )
         return updated
+
+

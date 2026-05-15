@@ -168,3 +168,59 @@ def test_url_extraction(parser: EmailParser) -> None:
     result = parser.parse(email, suppress_rules=[])
     assert result is not None
     assert result.job_url == "https://naukri.com/job/12345"
+
+
+# ------------------------------------------------------------------ #
+# New tests from code review fixes                                     #
+# ------------------------------------------------------------------ #
+
+
+def test_invalid_regex_in_suppress_rule_does_not_crash(parser: EmailParser) -> None:
+    """An invalid regex in a suppress rule must be skipped, not raise re.error."""
+    bad_rule = SuppressRule(sender_pattern="[unclosed", subject_pattern=None)
+    email = _make_email(
+        sender="noreply@naukri.com",
+        subject="Your application to Infosys",
+    )
+    # Should not raise — invalid rule is skipped with a warning
+    result = parser.parse(email, suppress_rules=[bad_rule])
+    # The email is still classified; the bad rule is ignored
+    assert result is not None
+
+
+def test_invalid_subject_regex_in_suppress_rule_is_skipped(parser: EmailParser) -> None:
+    """Invalid subject_pattern regex skips the rule entirely."""
+    bad_rule = SuppressRule(sender_pattern=r"naukri\.com", subject_pattern="[bad")
+    email = _make_email(
+        sender="noreply@naukri.com",
+        subject="Your application to Infosys",
+    )
+    result = parser.parse(email, suppress_rules=[bad_rule])
+    assert result is not None
+
+
+def test_valid_suppress_rule_still_works_alongside_invalid(parser: EmailParser) -> None:
+    """A valid rule after a bad rule still suppresses correctly."""
+    bad_rule = SuppressRule(sender_pattern="[unclosed", subject_pattern=None)
+    good_rule = SuppressRule(sender_pattern=r"naukri\.com", subject_pattern=None)
+    email = _make_email(
+        sender="noreply@naukri.com",
+        subject="Your application to Infosys",
+    )
+    result = parser.parse(email, suppress_rules=[bad_rule, good_rule])
+    assert result is None  # good_rule fires
+
+
+def test_extract_sender_domain_angle_brackets() -> None:
+    from backend.parser.email_parser import extract_sender_domain
+    assert extract_sender_domain("Naukri <noreply@naukri.com>") == "naukri.com"
+
+
+def test_extract_sender_domain_bare_email() -> None:
+    from backend.parser.email_parser import extract_sender_domain
+    assert extract_sender_domain("noreply@naukri.com") == "naukri.com"
+
+
+def test_extract_sender_domain_empty() -> None:
+    from backend.parser.email_parser import extract_sender_domain
+    assert extract_sender_domain("") == ""
