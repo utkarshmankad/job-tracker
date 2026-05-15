@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { api } from "../api/client";
+import { formatTimeDiff } from "../utils/formatters";
 
 export default function PollerStatusBar() {
   const [pollerData, setPollerData] = useState(null);
@@ -30,10 +31,8 @@ export default function PollerStatusBar() {
       message = "Auth Error — run: python backend/setup_wizard.py reauth";
     } else if (pollerData.status === "RUNNING" || pollerData.last_sync_at) {
       dot = "bg-green-500";
-      const lastSync = pollerData.last_sync_at
-        ? Math.round((Date.now() - new Date(pollerData.last_sync_at).getTime()) / 60_000)
-        : null;
-      message = lastSync !== null ? `Last synced: ${lastSync} min ago` : "Syncing…";
+      const lastSync = formatTimeDiff(pollerData.last_sync_at);
+      message = lastSync ? `Last synced: ${lastSync}` : "Syncing…";
     }
   }
 
