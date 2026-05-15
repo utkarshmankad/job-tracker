@@ -38,7 +38,7 @@ export default function PollerStatusBar() {
   }
 
   return (
-    <div className="bg-white border-b border-gray-200 px-4 py-2 flex items-center gap-2 text-sm text-gray-700">
+    <div className="bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700 px-4 py-2 flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
       <span className={`inline-block w-2 h-2 rounded-full ${dot}`} />
       <span>{message}</span>
     </div>

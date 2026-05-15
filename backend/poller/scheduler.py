@@ -9,6 +9,7 @@ from backend.parser.email_parser import EmailParser
 from backend.engine.status_updater import StatusUpdater
 from backend.engine.duplicate_detector import DuplicateDetector
 from backend.poller.gmail_poller import GmailPoller
+from backend.poller.sleep_watcher import SleepWatcher
 
 log = structlog.get_logger()
 
@@ -24,15 +25,20 @@ def build_poller() -> GmailPoller:
 def run_scheduler() -> None:
     poller = build_poller()
     poller.authenticate()
+
     scheduler = BlockingScheduler(timezone="UTC")
     scheduler.add_job(
         poller.poll_once,
         "interval",
         seconds=POLL_INTERVAL_SECONDS,
-        misfire_grace_time=60,
-        coalesce=True,  # run once if multiple missed (after sleep/wake)
+        misfire_grace_time=None,  # no cutoff — always fires once on wake regardless of sleep length
+        coalesce=True,            # collapse multiple missed fires into one
         id="gmail_poll",
     )
+
+    # Fire an immediate poll whenever macOS wakes from sleep
+    SleepWatcher(on_wake=poller.poll_once).start()
+
     log.info("scheduler_starting", interval_seconds=POLL_INTERVAL_SECONDS)
     poller.poll_once()  # immediate first run
     scheduler.start()

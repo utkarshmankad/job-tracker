@@ -3,6 +3,7 @@
 from collections import deque
 from enum import Enum
 import json, base64, email
+from dataclasses import replace as dataclass_replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -106,6 +107,16 @@ class GmailPoller:
                 parsed = self._parser.parse(raw_email, suppress_rules)
 
                 if parsed is not None:
+                    if parsed.company is None:
+                        body = self._fetch_body_text(msg_id)
+                        if body:
+                            refined = self._parser.refine_company(
+                                body,
+                                parsed.source_portal,
+                                self._extract_sender_domain(raw_email.sender),
+                            )
+                            if refined:
+                                parsed = dataclass_replace(parsed, company=refined)
                     self._updater.process(parsed)
                     processed_count += 1
                 else:
@@ -185,6 +196,41 @@ class GmailPoller:
                 break
 
         return message_ids, new_history_id
+
+    def _fetch_body_text(self, msg_id: str) -> str:
+        """Fetch full message and extract plain-text body. Body is never stored."""
+        try:
+            msg = self.service.users().messages().get(
+                userId="me", id=msg_id, format="full"
+            ).execute()
+            return self._extract_text_from_payload(msg.get("payload", {}))
+        except HttpError:
+            return ""
+
+    def _extract_text_from_payload(self, payload: dict) -> str:
+        """Recursively decode the first text/plain part from a MIME payload."""
+        mime_type = payload.get("mimeType", "")
+        if mime_type == "text/plain":
+            data = payload.get("body", {}).get("data", "")
+            if data:
+                try:
+                    return base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
+                except Exception:
+                    return ""
+        for part in payload.get("parts", []):
+            text = self._extract_text_from_payload(part)
+            if text:
+                return text
+        return ""
+
+    @staticmethod
+    def _extract_sender_domain(sender: str) -> str:
+        import re
+        match = re.search(r"<[^@]+@([^>]+)>", sender)
+        if match:
+            return match.group(1).lower()
+        match = re.search(r"[^@\s]+@([^\s>]+)", sender)
+        return match.group(1).lower() if match else ""
 
     def _build_raw_email(self, msg: dict) -> RawEmail:
         headers = {

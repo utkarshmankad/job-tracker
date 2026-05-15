@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 import pytest
-import pytest_asyncio
-from httpx import ASGITransport, AsyncClient
+from starlette.testclient import TestClient
 from sqlmodel import Session
 
 from backend.config import STALE_DAYS_THRESHOLD
@@ -14,15 +13,13 @@ from backend.db.models import Application, ApplicationStatus
 from backend.main import app
 
 
-@pytest_asyncio.fixture
-async def seeded_client(tmp_path):
+@pytest.fixture
+def seeded_client(tmp_path):
     db_path = tmp_path / "test.db"
     test_db = DataStore(db_path)
-    # ASGITransport does not trigger lifespan events, so inject the db directly.
-    app.state.db = test_db
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    with TestClient(app, raise_server_exceptions=True) as client:
+        # Override AFTER lifespan runs so the test DB isn't replaced by startup event.
+        app.state.db = test_db
         yield client, test_db
 
 
@@ -41,8 +38,8 @@ _APP_PAYLOAD = {
 }
 
 
-async def _create_app(client: AsyncClient, payload: dict | None = None) -> dict:
-    resp = await client.post(f"{_BASE}/applications", json=payload or _APP_PAYLOAD)
+def _create_app(client: TestClient, payload: dict | None = None) -> dict:
+    resp = client.post(f"{_BASE}/applications", json=payload or _APP_PAYLOAD)
     assert resp.status_code == 201
     return resp.json()
 
@@ -52,9 +49,9 @@ async def _create_app(client: AsyncClient, payload: dict | None = None) -> dict:
 # ------------------------------------------------------------------ #
 
 
-async def test_list_applications_empty(seeded_client):
+def test_list_applications_empty(seeded_client):
     client, _ = seeded_client
-    resp = await client.get(f"{_BASE}/applications")
+    resp = client.get(f"{_BASE}/applications")
     assert resp.status_code == 200
     body = resp.json()
     assert body["items"] == []
@@ -63,9 +60,9 @@ async def test_list_applications_empty(seeded_client):
     assert body["page_size"] == 50
 
 
-async def test_create_application_returns_201(seeded_client):
+def test_create_application_returns_201(seeded_client):
     client, _ = seeded_client
-    resp = await client.post(f"{_BASE}/applications", json=_APP_PAYLOAD)
+    resp = client.post(f"{_BASE}/applications", json=_APP_PAYLOAD)
     assert resp.status_code == 201
     body = resp.json()
     assert body["company"] == "Acme Corp"
@@ -75,12 +72,12 @@ async def test_create_application_returns_201(seeded_client):
     assert "id" in body
 
 
-async def test_get_application_by_id(seeded_client):
+def test_get_application_by_id(seeded_client):
     client, _ = seeded_client
-    created = await _create_app(client)
+    created = _create_app(client)
     app_id = created["id"]
 
-    resp = await client.get(f"{_BASE}/applications/{app_id}")
+    resp = client.get(f"{_BASE}/applications/{app_id}")
     assert resp.status_code == 200
     body = resp.json()
     assert body["id"] == app_id
@@ -89,49 +86,48 @@ async def test_get_application_by_id(seeded_client):
     assert isinstance(body["status_history"], list)
 
 
-async def test_get_application_not_found_returns_404(seeded_client):
+def test_get_application_not_found_returns_404(seeded_client):
     client, _ = seeded_client
-    resp = await client.get(f"{_BASE}/applications/99999")
+    resp = client.get(f"{_BASE}/applications/99999")
     assert resp.status_code == 404
 
 
-async def test_patch_status_manual_update(seeded_client):
+def test_patch_status_manual_update(seeded_client):
     client, _ = seeded_client
-    created = await _create_app(client)
+    created = _create_app(client)
     app_id = created["id"]
 
-    resp = await client.patch(
+    resp = client.patch(
         f"{_BASE}/applications/{app_id}",
         json={"current_status": "Resume Shortlisted"},
     )
     assert resp.status_code == 200
     assert resp.json()["current_status"] == "Resume Shortlisted"
 
-    # Status history should reflect the manual transition
-    detail = await client.get(f"{_BASE}/applications/{app_id}")
+    detail = client.get(f"{_BASE}/applications/{app_id}")
     history = detail.json()["status_history"]
     triggers = [h["trigger"] for h in history]
     assert "manual" in triggers
 
 
-async def test_delete_application(seeded_client):
+def test_delete_application(seeded_client):
     client, _ = seeded_client
-    created = await _create_app(client)
+    created = _create_app(client)
     app_id = created["id"]
 
-    resp = await client.delete(f"{_BASE}/applications/{app_id}")
+    resp = client.delete(f"{_BASE}/applications/{app_id}")
     assert resp.status_code == 200
     assert resp.json() == {"deleted": True}
 
-    resp = await client.get(f"{_BASE}/applications/{app_id}")
+    resp = client.get(f"{_BASE}/applications/{app_id}")
     assert resp.status_code == 404
 
 
-async def test_export_csv_headers(seeded_client):
+def test_export_csv_headers(seeded_client):
     client, _ = seeded_client
-    await _create_app(client)
+    _create_app(client)
 
-    resp = await client.get(f"{_BASE}/applications/export?format=csv")
+    resp = client.get(f"{_BASE}/applications/export?format=csv")
     assert resp.status_code == 200
     assert "text/csv" in resp.headers["content-type"]
 
@@ -143,11 +139,11 @@ async def test_export_csv_headers(seeded_client):
     assert "current_status" in header
 
 
-async def test_export_json_returns_list(seeded_client):
+def test_export_json_returns_list(seeded_client):
     client, _ = seeded_client
-    await _create_app(client)
+    _create_app(client)
 
-    resp = await client.get(f"{_BASE}/applications/export?format=json")
+    resp = client.get(f"{_BASE}/applications/export?format=json")
     assert resp.status_code == 200
     body = resp.json()
     assert isinstance(body, list)
@@ -155,9 +151,9 @@ async def test_export_json_returns_list(seeded_client):
     assert body[0]["company"] == "Acme Corp"
 
 
-async def test_insights_insufficient_data(seeded_client):
+def test_insights_insufficient_data(seeded_client):
     client, _ = seeded_client
-    resp = await client.get(f"{_BASE}/insights")
+    resp = client.get(f"{_BASE}/insights")
     assert resp.status_code == 200
     body = resp.json()
     assert body["insufficient_data"] is True
@@ -165,12 +161,11 @@ async def test_insights_insufficient_data(seeded_client):
     assert body["channels"] == []
 
 
-async def test_stale_flag_on_old_application(seeded_client):
+def test_stale_flag_on_old_application(seeded_client):
     client, test_db = seeded_client
-    created = await _create_app(client)
+    created = _create_app(client)
     app_id = created["id"]
 
-    # Backdate updated_at beyond the stale threshold directly in the DB
     old_date = datetime.utcnow() - timedelta(days=STALE_DAYS_THRESHOLD + 1)
     with Session(test_db._engine) as session:
         record = session.get(Application, app_id)
@@ -178,21 +173,19 @@ async def test_stale_flag_on_old_application(seeded_client):
         session.add(record)
         session.commit()
 
-    resp = await client.get(f"{_BASE}/applications/{app_id}")
+    resp = client.get(f"{_BASE}/applications/{app_id}")
     assert resp.status_code == 200
     assert resp.json()["is_stale"] is True
 
 
-async def test_suppress_rule_crud(seeded_client):
+def test_suppress_rule_crud(seeded_client):
     client, _ = seeded_client
 
-    # Empty list
-    resp = await client.get(f"{_BASE}/suppress-rules")
+    resp = client.get(f"{_BASE}/suppress-rules")
     assert resp.status_code == 200
     assert resp.json() == []
 
-    # Create
-    resp = await client.post(
+    resp = client.post(
         f"{_BASE}/suppress-rules",
         json={"sender_pattern": "noreply@spam.com", "subject_pattern": "You applied"},
     )
@@ -202,23 +195,20 @@ async def test_suppress_rule_crud(seeded_client):
     assert rule["subject_pattern"] == "You applied"
     rule_id = rule["id"]
 
-    # List has one entry
-    resp = await client.get(f"{_BASE}/suppress-rules")
+    resp = client.get(f"{_BASE}/suppress-rules")
     assert len(resp.json()) == 1
 
-    # Delete
-    resp = await client.delete(f"{_BASE}/suppress-rules/{rule_id}")
+    resp = client.delete(f"{_BASE}/suppress-rules/{rule_id}")
     assert resp.status_code == 200
     assert resp.json() == {"deleted": True}
 
-    # Empty again
-    resp = await client.get(f"{_BASE}/suppress-rules")
+    resp = client.get(f"{_BASE}/suppress-rules")
     assert resp.json() == []
 
 
-async def test_poller_status_endpoint(seeded_client):
+def test_poller_status_endpoint(seeded_client):
     client, _ = seeded_client
-    resp = await client.get(f"{_BASE}/poller/status")
+    resp = client.get(f"{_BASE}/poller/status")
     assert resp.status_code == 200
     body = resp.json()
     assert "status" in body

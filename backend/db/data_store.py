@@ -235,6 +235,10 @@ class DataStore:
     # Insights helpers                                                     #
     # ------------------------------------------------------------------ #
 
+    def get_all_status_history(self) -> list[StatusHistory]:
+        with Session(self._engine, expire_on_commit=False) as session:
+            return list(session.exec(select(StatusHistory)).all())
+
     def get_stale_applications(self, threshold_days: int = STALE_DAYS_THRESHOLD) -> list[Application]:
         cutoff = datetime.utcnow() - timedelta(days=threshold_days)
         with Session(self._engine, expire_on_commit=False) as session:

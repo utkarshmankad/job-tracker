@@ -1,7 +1,7 @@
 # Job Tracker — Claude Code Context
 
 ## Project
-Local Mac app. Python 3.11. FastAPI backend on localhost:8000. React frontend on localhost:5173. SQLite at ~/Codes/job-tracker/applications.db. Gmail API read-only polling every 5 minutes.
+Local Mac app. Python 3.11. FastAPI backend on localhost:8000. React frontend on localhost:5173. SQLite at ~/Codes/job-tracker/.job-tracker/applications.db. Gmail API read-only polling every 5 minutes.
 
 ## Commands
 - Run backend: `cd backend && uvicorn main:app --reload --port 8000`

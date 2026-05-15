@@ -83,16 +83,26 @@ class EmailParser:
                     domain_matched = True
                     break
             if domain_matched and self._subject_or_signal_matches(subject_lower, portal):
+                # Suppress job-count digest emails ("applied for 2 jobs today") which match
+                # subject_patterns but are not individual job applications.
+                if re.search(r"applied for \d+ job", email.subject, re.IGNORECASE):
+                    break
                 matched_portal = portal
                 break
 
-        # No domain match → check Direct/Unknown via subject_patterns OR status_signal keywords.
-        # Unknown senders that mention interview/offer/rejection signal are still job emails.
+        # No domain match → check Direct/Unknown via subject_patterns ONLY.
+        # Status-signal keywords alone (e.g. "shortlisted") are too broad without a domain
+        # anchor and cause certification-program marketing emails to be classified as job apps.
         if not matched_portal:
             direct_portal = next((p for p in self._portals if p.get("name") == "Direct/Unknown"), None)
-            if direct_portal and self._subject_or_signal_matches(subject_lower, direct_portal):
-                matched_portal = direct_portal
-                is_confident = False
+            if direct_portal:
+                subject_hit = any(
+                    pat.lower() in subject_lower
+                    for pat in direct_portal.get("subject_patterns", [])
+                )
+                if subject_hit:
+                    matched_portal = direct_portal
+                    is_confident = False
 
         if not matched_portal:
             email.body_text = None
@@ -109,7 +119,7 @@ class EmailParser:
         body_text_for_extraction = email.body_text or ""
         combined_snippet = f"{snippet_for_extraction} {body_text_for_extraction}".strip()
 
-        company = self._extract_company(email.subject, combined_snippet, portal_name)
+        company = self._extract_company(email.subject, combined_snippet, portal_name, sender_domain)
         role = self._extract_role(email.subject)
         job_url = self._extract_job_url(combined_snippet)
 
@@ -128,6 +138,10 @@ class EmailParser:
             raw_subject=email.subject,
             is_classification_confident=is_confident,
         )
+
+    def refine_company(self, extra_text: str, portal_name: str, sender_domain: str) -> str | None:
+        """Re-run company extraction on arbitrary text (e.g. email body fetched lazily)."""
+        return self._extract_company("", extra_text[:3000], portal_name, sender_domain)
 
     def _subject_or_signal_matches(self, subject_lower: str, portal: dict[str, Any]) -> bool:
         """Returns True if subject matches any subject_pattern or any status_signal keyword."""
@@ -150,27 +164,105 @@ class EmailParser:
             return match.group(1).lower()
         return ""
 
-    def _extract_company(self, subject: str, body_snippet: str, portal_name: str) -> str | None:
+    # Words that indicate an extracted "company" is actually a program, event, or boilerplate.
+    _REJECT_COMPANY_WORDS: frozenset[str] = frozenset([
+        "programme", "program", "course", "certification", "certificate",
+        "training", "bootcamp", "highlights", "compile", "view",
+        "event", "regards", "please", "ctc",
+        "application",  # prevents "Meesho Application" type extractions
+    ])
+    # Names that start with these words are almost never real company names.
+    _REJECT_COMPANY_LEADING: frozenset[str] = frozenset([
+        "the", "a", "an", "your", "our", "this", "please", "regards",
+        "received", "shortlisted", "selected", "confirm",
+        # Unambiguous job-title words — companies never start with these
+        "director", "manager", "senior", "sr.", "vp", "vice", "chief", "head",
+        "lead", "principal", "junior", "jr.", "associate", "staff", "fellow",
+    ])
+    # Greeting words that precede a person's name in email text and get fused into ORG entity
+    _GREETING_PATTERN = re.compile(r"\s*\b(?:hi|hello|dear|hey)\b\s*$", re.IGNORECASE)
+    # If an ORG entity ends with one of these, it's most likely a job title, not a company.
+    _REJECT_COMPANY_TRAILING: frozenset[str] = frozenset([
+        "engineer", "developer", "analyst", "manager", "director",
+        "scientist", "architect", "designer", "consultant", "officer",
+        "development", "engineering", "technical", "officer",
+    ])
+
+    def _is_valid_company(self, name: str) -> bool:
+        if not name or len(name) > 50:
+            return False
+        words = name.split()
+        if len(words) > 5:
+            return False
+        if words[0].lower() in self._REJECT_COMPANY_LEADING:
+            return False
+        if words[-1].lower() in self._REJECT_COMPANY_TRAILING:
+            return False
+        name_lower = name.lower()
+        return not any(w in name_lower for w in self._REJECT_COMPANY_WORDS)
+
+    def _extract_company(
+        self, subject: str, body_snippet: str, portal_name: str, sender_domain: str = ""
+    ) -> str | None:
         text = f"{subject} {body_snippet}"
 
-        # spacy ORG entities
         doc = self._nlp(text)
-        orgs = [ent.text.strip() for ent in doc.ents if ent.label_ == "ORG"]
-        if orgs:
-            return orgs[0]
+
+        # Build a domain-based company hint (e.g. "hilabs.com" → "hilabs") to resolve
+        # ORG+person fusions when spacy's English NER misses Indian person names.
+        domain_hint = sender_domain.split(".")[0].lower() if sender_domain else ""
+
+        # Index PERSON spans so we can detect company+person fusions (e.g. "HiLabs Ujwala Kudur")
+        person_spans = [(e.start_char, e.end_char) for e in doc.ents if e.label_ == "PERSON"]
+
+        for ent in doc.ents:
+            if ent.label_ != "ORG":
+                continue
+            org_text = ent.text.strip()
+
+            # Skip entities with unclosed brackets — spacy sometimes captures partial text.
+            if "(" in org_text and ")" not in org_text:
+                org_text = org_text.split("(")[0].strip()
+
+            # If sender domain hint matches a word inside a multi-word ORG entity, use just
+            # that word (e.g. "HiLabs" from "hilabs.com" within "HiLabs Ujwala Kudur").
+            if domain_hint and len(org_text.split()) > 1:
+                for word in org_text.split():
+                    if word.lower() == domain_hint:
+                        org_text = word
+                        break
+
+            # If a PERSON span starts inside this ORG span, truncate just before it
+            # and strip any trailing greeting word (Hi, Hello, Dear, Hey).
+            for p_start, _ in person_spans:
+                if ent.start_char < p_start < ent.end_char:
+                    org_text = text[ent.start_char:p_start].strip(" -–—,")
+                    org_text = self._GREETING_PATTERN.sub("", org_text).strip()
+                    break
+
+            if self._is_valid_company(org_text):
+                return org_text
 
         # Regex fallbacks on subject
         patterns = [
             r"(?:your application to|applied to|application to)\s+([A-Z][A-Za-z0-9 &,.']+?)(?:\s+(?:for|is|has|-)|\s*$)",
             r"(?:at|from)\s+([A-Z][A-Za-z0-9 &,.']+?)(?:\s+(?:for|is|has|-)|\s*$)",
-            r"^([A-Z][A-Za-z0-9 &,.']+?)\s*[-–—]\s*(?:Job Application|Application)",
+            r"^([A-Z][A-Za-z0-9 &,.']+?)\s*[-–—]\s*(?:(?:your\s+)?(?:job )?application)",
+            # "Job Offer - Company", "Interview Invitation - Company", "Your Application - Company"
+            r"(?:job offer|employment offer|interview invitation|opportunity|your application|application received)\s*[-–—:]\s*([A-Z][A-Za-z0-9 &,.']+?)\s*$",
         ]
         for pattern in patterns:
             match = re.search(pattern, subject, re.IGNORECASE)
             if match:
-                return match.group(1).strip()
+                candidate = match.group(1).strip()
+                if self._is_valid_company(candidate):
+                    return candidate
 
         return None
+
+    _ROLE_LEADING_STRIP = re.compile(
+        r"^(?:our|the|a|an|this|your)\s+", re.IGNORECASE
+    )
 
     def _extract_role(self, subject: str) -> str | None:
         patterns = [
@@ -178,14 +270,15 @@ class EmailParser:
             r"for\s+(.+?)\s+position",
             r"^(.+?)\s*[-–—]\s*Application",
             r"application for\s+(.+?)(?:\s+at\s+|\s+position|\s*$)",
-            r"applied for\s+(?:the\s+)?(?:role of\s+)?(.+?)(?:\s+at\s+|\s*$)",
-            r"applied for\s+(.+?)(?:\s+at\s+|\s*$)",
+            r"applied for the (?:role|position) of\s+(.+?)(?:\s+at\s+|\s*$)",
+            r"applied for the (?:role|position)\s+(.+?)(?:\s+at\s+|\s*$)",
         ]
         for pattern in patterns:
             match = re.search(pattern, subject, re.IGNORECASE)
             if match:
-                role = match.group(1).strip()
-                if len(role) > 2:
+                role = self._ROLE_LEADING_STRIP.sub("", match.group(1).strip())
+                # Reject if it looks like a digest ("2 jobs on …") or too short
+                if len(role) > 2 and not re.match(r"^\d+\s+job", role, re.IGNORECASE):
                     return role
         return None
 

@@ -15,17 +15,28 @@ from backend.parser.email_parser import ParsedApplication
 log = structlog.get_logger(__name__)
 
 # Forward-only transitions valid for automated (email) signals.
+# Allow skipping stages because emails are processed newest-first during backfill,
+# so we may see a later-stage signal before the original application confirmation.
 _TRANSITIONS: dict[ApplicationStatus, set[ApplicationStatus]] = {
     ApplicationStatus.APPLIED: {
         ApplicationStatus.RESUME_SHORTLISTED,
+        ApplicationStatus.INTERVIEW_SCHEDULED,
+        ApplicationStatus.INTERVIEW_IN_PROGRESS,
+        ApplicationStatus.OFFER_NEGOTIATION,
+        ApplicationStatus.OFFER,
         ApplicationStatus.REJECTED,
     },
     ApplicationStatus.RESUME_SHORTLISTED: {
         ApplicationStatus.INTERVIEW_SCHEDULED,
+        ApplicationStatus.INTERVIEW_IN_PROGRESS,
+        ApplicationStatus.OFFER_NEGOTIATION,
+        ApplicationStatus.OFFER,
         ApplicationStatus.REJECTED,
     },
     ApplicationStatus.INTERVIEW_SCHEDULED: {
         ApplicationStatus.INTERVIEW_IN_PROGRESS,
+        ApplicationStatus.OFFER_NEGOTIATION,
+        ApplicationStatus.OFFER,
         ApplicationStatus.REJECTED,
     },
     ApplicationStatus.INTERVIEW_IN_PROGRESS: {
@@ -107,25 +118,31 @@ class StatusUpdater:
         )
 
     def _create_new(self, parsed: ParsedApplication) -> Application:
-        initial_status = parsed.status_signal or ApplicationStatus.APPLIED
+        # Always start at APPLIED so that status_signal advances via _advance_status
+        # (which enforces forward-only transitions and logs history).  Without this,
+        # emails processed newest-first during backfill would create records at whatever
+        # late-stage status the first-seen email implies.
         app = Application(
             company=parsed.company,
             role=parsed.role,
             source_portal=parsed.source_portal,
             job_url=parsed.job_url,
             applied_date=parsed.applied_date,
-            current_status=initial_status,
+            current_status=ApplicationStatus.APPLIED,
             thread_ids=json.dumps([parsed.thread_id]),
         )
         saved = self._db.upsert_application(app)
         self._db.append_status_history(
             application_id=saved.id,  # type: ignore[arg-type]
             from_status=None,
-            to_status=initial_status.value,
+            to_status=ApplicationStatus.APPLIED.value,
             trigger="email",
             message_id=parsed.message_id,
         )
-        return saved
+        if parsed.status_signal is not None:
+            self._advance_status(saved, parsed.status_signal, parsed.message_id)
+            saved = self._db.get_application(saved.id)  # type: ignore[arg-type]
+        return saved  # type: ignore[return-value]
 
     def manual_update(self, application_id: int, new_status: ApplicationStatus) -> Application:
         record = self._db.get_application(application_id)

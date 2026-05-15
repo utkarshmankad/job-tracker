@@ -3,7 +3,7 @@ from pathlib import Path
 
 # Paths
 HOME = Path.home()
-JOB_TRACKER_DIR = Path(os.environ.get("JOB_TRACKER_DIR", str(Path(__file__).parent.parent)))
+JOB_TRACKER_DIR = Path(os.environ.get("JOB_TRACKER_DIR", str(Path(__file__).parent.parent / ".job-tracker")))
 DB_PATH = JOB_TRACKER_DIR / "applications.db"
 CREDENTIALS_PATH = JOB_TRACKER_DIR / "client_secret.json"
 LOG_DIR = JOB_TRACKER_DIR / "logs"

@@ -3,7 +3,9 @@
 portals:
   - name: Naukri
     sender_domains: [naukri.com, mailer.naukri.com]
-    subject_patterns: ["your application", "applied for", "job application", "application submitted"]
+    # "applied for N jobs" digest emails are suppressed in the parser via a regex guard.
+    subject_patterns: ["your application", "application submitted", "application received",
+                       "applied for the role", "applied for the position", "applied for"]
     status_signals:
       shortlisted: ["shortlisted", "profile selected", "resume shortlisted"]
       interview_scheduled: ["interview scheduled", "interview invite", "schedule your interview"]
@@ -11,8 +13,10 @@ portals:
       offer: ["offer letter", "pleased to offer", "congratulations"]
 
   - name: LinkedIn
-    sender_domains: [linkedin.com, email.linkedin.com, jobs-noreply@linkedin.com]
-    subject_patterns: ["application was sent", "applied to", "your application to", "you applied"]
+    sender_domains: [linkedin.com, email.linkedin.com, e.linkedin.com,
+                     jobs-noreply@linkedin.com, messages-noreply@linkedin.com]
+    subject_patterns: ["application was sent", "applied to", "your application to",
+                       "you applied", "application viewed"]
     status_signals:
       shortlisted: ["viewed your application", "interested in your profile"]
       interview_scheduled: ["interview request", "wants to connect", "schedule a call"]
@@ -50,14 +54,185 @@ portals:
       interview_scheduled: ["interview"]
       rejected: ["regret", "not shortlisted"]
 
+  - name: Greenhouse
+    sender_domains: [greenhouse.io, mygreenhouseapp.com, us.greenhouse-mail.io]
+    subject_patterns: ["application received", "application for", "your application",
+                       "interview", "we'd like to move forward"]
+    status_signals:
+      shortlisted: ["we'd like to move forward", "next stage", "next step"]
+      interview_scheduled: ["interview scheduled", "interview request", "schedule"]
+      rejected: ["decided to move forward with other", "not moving forward",
+                 "no longer being considered", "not be moving forward"]
+      offer: ["offer from", "offer letter", "pleased to offer"]
+
+  - name: Lever
+    sender_domains: [lever.co, hire.lever.co, jobs.lever.co, email.lever.co]
+    subject_patterns: ["application", "interview", "your application", "applied"]
+    status_signals:
+      shortlisted: ["we'd like to move forward", "next step"]
+      interview_scheduled: ["interview scheduled", "schedule", "invite you"]
+      rejected: ["decided to move forward", "no longer considering",
+                 "decided not to move forward"]
+      offer: ["offer letter", "pleased to extend"]
+
+  - name: Workday
+    sender_domains: [myworkdayjobs.com, workday.com, wd1.myworkdayjobs.com,
+                     wd3.myworkdayjobs.com, wd5.myworkdayjobs.com]
+    subject_patterns: ["application", "your application", "interview", "applied"]
+    status_signals:
+      interview_scheduled: ["interview scheduled", "interview"]
+      rejected: ["not selected", "decided not to move forward", "no longer under consideration"]
+      offer: ["offer letter", "offer from"]
+
+  - name: SmartRecruiters
+    sender_domains: [smartrecruiters.com, hire.smartrecruiters.com,
+                     email.smartrecruiters.com]
+    subject_patterns: ["application", "interview", "your application", "applied"]
+    status_signals:
+      interview_scheduled: ["interview"]
+      rejected: ["not moving forward", "other candidates", "decided not to proceed"]
+      offer: ["offer", "pleased to offer"]
+
+  - name: Cutshort
+    sender_domains: [cutshort.io, mail.cutshort.io]
+    subject_patterns: ["application", "interview", "profile", "shortlisted", "applied"]
+    status_signals:
+      shortlisted: ["shortlisted", "interested in your profile", "match"]
+      interview_scheduled: ["interview"]
+      rejected: ["regret", "not selected", "not a match"]
+
+  - name: Internshala
+    sender_domains: [internshala.com, mail.internshala.com]
+    subject_patterns: ["application", "applied", "interview", "shortlisted"]
+    status_signals:
+      shortlisted: ["shortlisted", "selected"]
+      interview_scheduled: ["interview"]
+      rejected: ["regret", "not selected"]
+
+  - name: iimjobs
+    sender_domains: [iimjobs.com, mail.iimjobs.com]
+    subject_patterns: ["application", "job application", "applied", "profile"]
+    status_signals:
+      shortlisted: ["shortlisted", "profile shortlisted"]
+      interview_scheduled: ["interview"]
+      rejected: ["regret", "not selected"]
+
+  - name: Darwinbox
+    sender_domains: [darwinbox.com, mail.darwinbox.com]
+    subject_patterns: ["application", "interview", "applied", "your application"]
+    status_signals:
+      shortlisted: ["shortlisted"]
+      interview_scheduled: ["interview"]
+      rejected: ["regret", "not selected"]
+
+  - name: Keka
+    sender_domains: [keka.com, keka.hr, mail.keka.com]
+    subject_patterns: ["application", "interview", "applied", "your application"]
+    status_signals:
+      shortlisted: ["shortlisted"]
+      interview_scheduled: ["interview"]
+      rejected: ["regret", "not selected"]
+
+  - name: Freshteam
+    sender_domains: [freshteam.com, mail.freshteam.com, freshworks.com]
+    subject_patterns: ["application", "interview", "applied", "your application"]
+    status_signals:
+      shortlisted: ["shortlisted", "next stage"]
+      interview_scheduled: ["interview"]
+      rejected: ["regret", "not selected", "not moving forward"]
+
+  - name: iCIMS
+    sender_domains: [icims.com, jobs.icims.com]
+    subject_patterns: ["application", "your application", "interview", "applied"]
+    status_signals:
+      interview_scheduled: ["interview"]
+      rejected: ["not selected", "decided not to move forward"]
+
+  - name: Jobvite
+    sender_domains: [jobvite.com, mail.jobvite.com]
+    subject_patterns: ["application", "your application", "interview", "applied"]
+    status_signals:
+      interview_scheduled: ["interview"]
+      rejected: ["not selected", "not moving forward"]
+
+  - name: HackerEarth
+    sender_domains: [hackerearth.com, mail.hackerearth.com]
+    subject_patterns: ["application", "applied", "interview", "assessment", "shortlisted"]
+    status_signals:
+      shortlisted: ["shortlisted", "selected", "qualified"]
+      interview_scheduled: ["interview"]
+      rejected: ["regret", "not selected", "did not qualify"]
+
+  - name: Unstop
+    sender_domains: [unstop.com, dare2compete.com, mail.unstop.com]
+    subject_patterns: ["application", "applied", "shortlisted", "interview"]
+    status_signals:
+      shortlisted: ["shortlisted", "selected"]
+      interview_scheduled: ["interview"]
+      rejected: ["regret", "not selected"]
+
   - name: Direct/Unknown
     sender_domains: []
-    subject_patterns: ["your cv", "your resume", "job application", "position of", "opening for", "opportunity at", "interview invitation", "application for", "applied for the role"]
+    # These patterns are the ONLY filter for Direct/Unknown (no domain anchor).
+    # Keep them specific enough to avoid false positives from certification/marketing emails.
+    subject_patterns:
+      - "your application"
+      - "your cv"
+      - "your resume"
+      - "job application"
+      - "position of"
+      - "opening for"
+      - "opportunity at"
+      - "interview invitation"
+      - "application for"
+      - "applied for the role"
+      - "applied for the position"
+      - "application received"
+      - "thank you for applying"
+      - "thanks for applying"
+      - "interview request"
+      - "interview scheduled"
+      - "schedule an interview"
+      - "invite you for an interview"
+      - "we reviewed your"
+      - "we have reviewed your"
+      - "job offer"
+      - "offer letter"
+      - "regarding your application"
+      - "regarding your candidature"
+      - "shortlisted for the role"
+      - "shortlisted for the position"
+      - "your candidature"
+      - "application status"
+      - "not moving forward with your"
+      - "regret to inform you"
+      - "we regret to inform"
+      - "hiring for"
+      - "excited to offer"
+      - "pleased to offer"
+      - "pleased to extend an offer"
+      - "employment offer"
+      - "conditional offer"
+      - "congratulations on your offer"
+      - "next round"
+      - "next steps in your application"
+      - "update on your application"
+      - "your interview"
+      - "interview at"
+      - "interview with"
+      - "interview from"
+      - "interview for"
+      - "schedule your interview"
+      - "we'd like to invite you"
+      - "interested in your profile"
+      - "we have reviewed your application"
     status_signals:
       shortlisted: ["shortlisted", "profile selected", "pleased to inform", "moved forward"]
-      interview_scheduled: ["interview scheduled", "would like to schedule", "invite you for an interview", "calendar invite"]
+      interview_scheduled: ["interview scheduled", "would like to schedule",
+                            "invite you for an interview", "calendar invite"]
       interview_in_progress: ["following up on your interview", "post interview"]
       offer_negotiation: ["discussing compensation", "negotiation"]
-      offer: ["offer letter", "pleased to extend an offer", "formal offer", "job offer"]
-      rejected: ["regret to inform", "not selected", "moved forward with other", "not shortlisted", "unsuccessful"]
-    require_both: false
+      offer: ["offer letter", "pleased to extend an offer", "formal offer",
+              "job offer", "employment offer", "excited to offer"]
+      rejected: ["regret to inform", "not selected", "moved forward with other",
+                 "not shortlisted", "unsuccessful", "not moving forward with your"]

@@ -83,7 +83,7 @@ export default function ApplicationsTable({ filters, onSelectId }) {
         cell: (info) => (
           <button
             onClick={() => onSelectId(info.row.original.id)}
-            className="px-2 py-1 text-xs bg-blue-50 text-blue-700 border border-blue-200 rounded hover:bg-blue-100"
+            className="px-2 py-1 text-xs bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-700 rounded hover:bg-blue-100 dark:hover:bg-blue-900/50"
           >
             View
           </button>
@@ -104,20 +104,20 @@ export default function ApplicationsTable({ filters, onSelectId }) {
     initialState: { pagination: { pageSize: PAGE_SIZE } },
   });
 
-  if (loading) return <div className="text-sm text-gray-500 py-8 text-center">Loading…</div>;
+  if (loading) return <div className="text-sm text-gray-500 dark:text-gray-400 py-8 text-center">Loading…</div>;
   if (error) return <div className="text-sm text-red-600 py-8 text-center">Error: {error}</div>;
 
   return (
-    <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+    <div className="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
       <table className="w-full text-sm">
-        <thead className="bg-gray-50 border-b border-gray-200">
+        <thead className="bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
           {table.getHeaderGroups().map((hg) => (
             <tr key={hg.id}>
               {hg.headers.map((header) => (
                 <th
                   key={header.id}
                   onClick={header.column.getToggleSortingHandler()}
-                  className={`px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider ${
+                  className={`px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider ${
                     header.column.getCanSort() ? "cursor-pointer select-none" : ""
                   }`}
                 >
@@ -129,7 +129,7 @@ export default function ApplicationsTable({ filters, onSelectId }) {
             </tr>
           ))}
         </thead>
-        <tbody className="divide-y divide-gray-100">
+        <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
           {table.getRowModel().rows.length === 0 ? (
             <tr>
               <td colSpan={columns.length} className="px-4 py-8 text-center text-gray-400">
@@ -140,12 +140,12 @@ export default function ApplicationsTable({ filters, onSelectId }) {
             table.getRowModel().rows.map((row) => (
               <tr
                 key={row.id}
-                className={`hover:bg-gray-50 ${
+                className={`hover:bg-gray-50 dark:hover:bg-gray-800 ${
                   row.original.is_stale ? "border-l-4 border-amber-400" : ""
                 }`}
               >
                 {row.getVisibleCells().map((cell) => (
-                  <td key={cell.id} className="px-4 py-3 text-gray-700">
+                  <td key={cell.id} className="px-4 py-3 text-gray-700 dark:text-gray-300">
                     {flexRender(cell.column.columnDef.cell, cell.getContext())}
                   </td>
                 ))}
@@ -155,7 +155,7 @@ export default function ApplicationsTable({ filters, onSelectId }) {
         </tbody>
       </table>
 
-      <div className="flex items-center justify-between px-4 py-3 border-t border-gray-200 text-sm text-gray-600">
+      <div className="flex items-center justify-between px-4 py-3 border-t border-gray-200 dark:border-gray-700 text-sm text-gray-600 dark:text-gray-400">
         <span>
           Page {table.getState().pagination.pageIndex + 1} of{" "}
           {Math.max(table.getPageCount(), 1)}
@@ -164,14 +164,14 @@ export default function ApplicationsTable({ filters, onSelectId }) {
           <button
             onClick={() => table.previousPage()}
             disabled={!table.getCanPreviousPage()}
-            className="px-3 py-1 border border-gray-300 rounded disabled:opacity-40 hover:bg-gray-50"
+            className="px-3 py-1 border border-gray-300 dark:border-gray-600 rounded disabled:opacity-40 hover:bg-gray-50 dark:hover:bg-gray-800 dark:text-gray-300"
           >
             Previous
           </button>
           <button
             onClick={() => table.nextPage()}
             disabled={!table.getCanNextPage()}
-            className="px-3 py-1 border border-gray-300 rounded disabled:opacity-40 hover:bg-gray-50"
+            className="px-3 py-1 border border-gray-300 dark:border-gray-600 rounded disabled:opacity-40 hover:bg-gray-50 dark:hover:bg-gray-800 dark:text-gray-300"
           >
             Next
           </button>
