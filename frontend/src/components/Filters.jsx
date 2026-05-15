@@ -27,8 +27,9 @@ export default function Filters({ filters, onChange }) {
       </div>
 
       <div className="flex flex-col gap-1">
-        <label className="text-xs text-gray-500">Status</label>
+        <label htmlFor="status-filter" className="text-xs text-gray-500">Status</label>
         <select
+          id="status-filter"
           value={filters.status || ""}
           onChange={(e) => update("status", e.target.value)}
           className="border border-gray-300 rounded px-2 py-1.5 text-sm w-44 focus:outline-none focus:ring-2 focus:ring-blue-500"

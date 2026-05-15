@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import os
+import re
+import signal
 import subprocess
 import time
+from pathlib import Path
 
 import pytest
 import requests
@@ -15,25 +19,33 @@ from playwright.sync_api import Page, expect
 
 
 @pytest.fixture(scope="module")
-def backend_server():
+def backend_server(tmp_path_factory):
+    test_dir = tmp_path_factory.mktemp("e2e_db")
+    env = {**os.environ, "JOB_TRACKER_DIR": str(test_dir)}
     proc = subprocess.Popen(
         ["python", "-m", "uvicorn", "backend.main:app", "--port", "8001"],
         cwd=".",
+        env=env,
+        start_new_session=True,
     )
     time.sleep(3)
     yield "http://localhost:8001"
-    proc.terminate()
+    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
 
 
 @pytest.fixture(scope="module")
-def frontend_server():
+def frontend_server(backend_server):
+    env_file = Path("frontend/.env.local")
+    env_file.write_text(f"VITE_API_BASE={backend_server}\n")
     proc = subprocess.Popen(
         ["npm", "run", "dev", "--", "--port", "5174"],
         cwd="frontend",
+        start_new_session=True,
     )
     time.sleep(5)
     yield "http://localhost:5174"
-    proc.terminate()
+    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    env_file.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -98,10 +110,10 @@ def test_stale_row_highlighted(page: Page, frontend_server: str, backend_server:
 
     page.goto(frontend_server)
     stale_row = page.locator("tr", has_text="StaleE2ECorp")
-    expect(stale_row).to_have_class(r".*amber.*")
+    expect(stale_row).to_have_class(re.compile(r".*amber.*"))
 
 
-def test_analytics_tab_insufficient_data(page: Page, frontend_server: str) -> None:
+def test_analytics_tab_insufficient_data(page: Page, frontend_server: str, backend_server: str) -> None:
     page.goto(frontend_server)
     page.get_by_role("button", name="Analytics").click()
     expect(page.locator("body")).to_contain_text("Add at least 10 applications")

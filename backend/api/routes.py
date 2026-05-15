@@ -221,13 +221,15 @@ async def list_applications(
 @router.post("/applications", response_model=ApplicationResponse, status_code=201)
 async def create_application(body: ApplicationCreate, request: Request) -> ApplicationResponse:
     db: DataStore = request.app.state.db
+    applied = datetime.fromisoformat(body.applied_date)
     app = Application(
         company=body.company,
         role=body.role,
         source_portal=body.source_portal,
         job_url=body.job_url,
-        applied_date=datetime.fromisoformat(body.applied_date),
+        applied_date=applied,
         current_status=body.current_status,
+        updated_at=applied,
     )
     saved = db.upsert_application(app)
     return _to_response(saved)

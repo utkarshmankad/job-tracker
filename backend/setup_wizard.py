@@ -7,6 +7,8 @@ import click
 import keyring
 from google_auth_oauthlib.flow import InstalledAppFlow
 
+sys.path.append(str(Path(__file__).parent.parent))
+
 from backend.config import (
     CREDENTIALS_PATH,
     GMAIL_KEYCHAIN_SERVICE,
@@ -54,8 +56,8 @@ def _install_launchd_plists() -> None:
     <key>WorkingDirectory</key><string>{PROJECT_ROOT}</string>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
-    <key>StandardOutPath</key><string>{HOME}/.job-tracker/logs/api.log</string>
-    <key>StandardErrorPath</key><string>{HOME}/.job-tracker/logs/api_error.log</string>
+    <key>StandardOutPath</key><string>{LOG_DIR}/api.log</string>
+    <key>StandardErrorPath</key><string>{LOG_DIR}/api_error.log</string>
     <key>EnvironmentVariables</key>
     <dict><key>PYTHONPATH</key><string>{PROJECT_ROOT}</string></dict>
 </dict>
@@ -75,8 +77,8 @@ def _install_launchd_plists() -> None:
     <key>WorkingDirectory</key><string>{PROJECT_ROOT}</string>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
-    <key>StandardOutPath</key><string>{HOME}/.job-tracker/logs/poller.log</string>
-    <key>StandardErrorPath</key><string>{HOME}/.job-tracker/logs/poller_error.log</string>
+    <key>StandardOutPath</key><string>{LOG_DIR}/poller.log</string>
+    <key>StandardErrorPath</key><string>{LOG_DIR}/poller_error.log</string>
     <key>EnvironmentVariables</key>
     <dict><key>PYTHONPATH</key><string>{PROJECT_ROOT}</string></dict>
 </dict>

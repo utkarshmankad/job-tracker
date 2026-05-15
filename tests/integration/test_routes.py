@@ -71,7 +71,7 @@ async def test_create_application_returns_201(seeded_client):
     assert body["company"] == "Acme Corp"
     assert body["source_portal"] == "LinkedIn"
     assert body["current_status"] == "Applied"
-    assert body["is_stale"] is False
+    assert body["is_stale"] is True  # applied_date is old, so updated_at = applied_date → stale
     assert "id" in body
 
 

@@ -20,7 +20,7 @@ python -m spacy download en_core_web_sm
 2. Enable Gmail API: APIs & Services → Library → Gmail API → Enable
 3. OAuth consent screen: External → add your Gmail as test user → scope: gmail.readonly → Publish App (to avoid 7-day token expiry)
 4. Credentials: Create → OAuth 2.0 Client ID → Desktop app → Download JSON
-5. `mv ~/Downloads/client_secret.json ~/.job-tracker/client_secret.json`
+5. `mv ~/Downloads/client_secret.json ~/Codes/job-tracker/client_secret.json`
 
 ## First Run
 
@@ -31,7 +31,7 @@ python backend/setup_wizard.py setup
 
 This will:
 - Open browser for Gmail OAuth (click through "unverified app" warning)
-- Create database at ~/.job-tracker/applications.db
+- Create database at ~/Codes/job-tracker/applications.db
 - Install and start background services via launchd
 
 ## Start / Stop Services
@@ -53,6 +53,6 @@ python backend/setup_wizard.py reauth
 
 ## Logs
 ```bash
-tail -f ~/.job-tracker/logs/poller.log
-tail -f ~/.job-tracker/logs/api_error.log
+tail -f ~/Codes/job-tracker/logs/poller.log
+tail -f ~/Codes/job-tracker/logs/api_error.log
 ```

@@ -7,7 +7,7 @@ const EMPTY = {
   role: "",
   source_portal: "",
   job_url: "",
-  applied_date: "",
+  applied_date: new Date().toISOString().split("T")[0],
   current_status: "Applied",
 };
 
@@ -73,8 +73,9 @@ export default function AddApplicationForm({ onSuccess, onClose }) {
           )}
 
           <div>
-            <label className="block text-sm text-gray-600 mb-1">Company *</label>
+            <label htmlFor="company" className="block text-sm text-gray-600 mb-1">Company *</label>
             <input
+              id="company"
               type="text"
               value={form.company}
               onChange={(e) => update("company", e.target.value)}
@@ -84,8 +85,9 @@ export default function AddApplicationForm({ onSuccess, onClose }) {
           </div>
 
           <div>
-            <label className="block text-sm text-gray-600 mb-1">Role</label>
+            <label htmlFor="role" className="block text-sm text-gray-600 mb-1">Role</label>
             <input
+              id="role"
               type="text"
               value={form.role}
               onChange={(e) => update("role", e.target.value)}
@@ -94,8 +96,9 @@ export default function AddApplicationForm({ onSuccess, onClose }) {
           </div>
 
           <div>
-            <label className="block text-sm text-gray-600 mb-1">Source Portal *</label>
+            <label htmlFor="source_portal" className="block text-sm text-gray-600 mb-1">Source Portal *</label>
             <select
+              id="source_portal"
               value={form.source_portal}
               onChange={(e) => update("source_portal", e.target.value)}
               className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
@@ -121,8 +124,9 @@ export default function AddApplicationForm({ onSuccess, onClose }) {
           </div>
 
           <div>
-            <label className="block text-sm text-gray-600 mb-1">Applied Date *</label>
+            <label htmlFor="applied_date" className="block text-sm text-gray-600 mb-1">Applied Date *</label>
             <input
+              id="applied_date"
               type="date"
               value={form.applied_date}
               onChange={(e) => update("applied_date", e.target.value)}
@@ -159,7 +163,7 @@ export default function AddApplicationForm({ onSuccess, onClose }) {
               disabled={submitting}
               className="px-4 py-2 text-sm bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-60"
             >
-              {submitting ? "Saving…" : "Add Application"}
+              {submitting ? "Saving…" : "Submit"}
             </button>
           </div>
         </form>

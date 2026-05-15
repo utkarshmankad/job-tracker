@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { api } from "./api/client";
 import PollerStatusBar from "./components/PollerStatusBar";
 import Filters from "./components/Filters";
 import ApplicationsTable from "./components/ApplicationsTable";
@@ -11,6 +12,17 @@ export default function App() {
   const [filters, setFilters] = useState({});
   const [selectedId, setSelectedId] = useState(null);
   const [showAddForm, setShowAddForm] = useState(false);
+
+  const handleExport = async () => {
+    const res = await api.exportApplications("csv");
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "applications.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -34,6 +46,12 @@ export default function App() {
               }`}
             >
               Analytics
+            </button>
+            <button
+              onClick={handleExport}
+              className="px-4 py-2 bg-gray-600 text-white rounded"
+            >
+              Export
             </button>
             <button
               onClick={() => setShowAddForm(true)}

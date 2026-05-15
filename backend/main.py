@@ -26,7 +26,7 @@ app = FastAPI(title="Job Tracker API", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[f"http://localhost:{FRONTEND_PORT}", "http://localhost:5173"],
+    allow_origins=[f"http://localhost:{FRONTEND_PORT}", "http://localhost:5173", "http://localhost:5174"],
     allow_methods=["*"],
     allow_headers=["*"],
 )

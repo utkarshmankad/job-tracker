@@ -65,7 +65,6 @@ class DataStore:
 
     def upsert_application(self, app: Application) -> Application:
         with Session(self._engine, expire_on_commit=False) as session:
-            app.updated_at = datetime.utcnow()
             if app.id is None:
                 session.add(app)
                 session.commit()
@@ -78,6 +77,7 @@ class DataStore:
                 session.refresh(app)
                 return app
             # Update scalar fields only; relationships are left untouched.
+            app.updated_at = datetime.utcnow()
             for field_name in Application.model_fields:
                 if field_name not in ("id", "created_at"):
                     setattr(db_app, field_name, getattr(app, field_name))
