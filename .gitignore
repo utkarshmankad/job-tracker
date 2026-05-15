@@ -5,9 +5,10 @@ __pycache__/
 *.db
 *.db-shm
 *.db-wal
-~/.job-tracker/
+.job-tracker/
 client_secret.json
 token.json
+.claude/
 .DS_Store
 node_modules/
 frontend/dist/

@@ -23,8 +23,10 @@ export const api = {
     fetch(`${BASE}/applications/export?format=${format}`),
 
   getInsights: () => request("/insights"),
+  getFlowData: () => request("/insights/flow"),
 
   getPollerStatus: () => request("/poller/status"),
+  getSystemStatus: () => request("/status"),
 
   listSuppressRules: () => request("/suppress-rules"),
   createSuppressRule: (body) =>

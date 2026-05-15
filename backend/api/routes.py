@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
-from backend.config import STALE_DAYS_THRESHOLD
+from backend.config import DB_PATH, STALE_DAYS_THRESHOLD
 from backend.db.data_store import ApplicationFilter, DataStore
 from backend.db.models import Application, ApplicationStatus
 from backend.engine.duplicate_detector import DuplicateDetector
@@ -91,6 +91,20 @@ class PollerStatusResponse(BaseModel):
     status: str
     last_sync_at: Optional[datetime]
     error_message: Optional[str]
+
+
+class ComponentStatusResponse(BaseModel):
+    name: str
+    status: str  # "operational" | "degraded" | "outage"
+    description: str
+    checked_at: datetime
+
+
+class SystemStatusResponse(BaseModel):
+    overall: str  # "operational" | "degraded" | "outage"
+    components: list[ComponentStatusResponse]
+    stats: dict
+    checked_at: datetime
 
 
 class SuppressRuleResponse(BaseModel):
@@ -320,6 +334,12 @@ async def delete_application(id: int, request: Request) -> dict:
 # ------------------------------------------------------------------ #
 
 
+@router.get("/insights/flow")
+async def get_insights_flow(request: Request) -> dict:
+    db: DataStore = request.app.state.db
+    return InsightsEngine(db).flow_data()
+
+
 @router.get("/insights", response_model=InsightReportResponse)
 async def get_insights(request: Request) -> InsightReportResponse:
     db: DataStore = request.app.state.db
@@ -399,3 +419,109 @@ async def delete_suppress_rule(id: int, request: Request) -> dict:
     if not deleted:
         raise HTTPException(status_code=404, detail="Suppress rule not found")
     return {"deleted": True}
+
+
+# ------------------------------------------------------------------ #
+# System status                                                         #
+# ------------------------------------------------------------------ #
+
+
+@router.get("/status", response_model=SystemStatusResponse)
+async def get_system_status(request: Request) -> SystemStatusResponse:
+    db: DataStore = request.app.state.db
+    now = datetime.utcnow()
+    started_at: Optional[datetime] = getattr(request.app.state, "started_at", None)
+    components: list[ComponentStatusResponse] = []
+
+    # API Server — always operational if the request arrived
+    components.append(ComponentStatusResponse(
+        name="API Server",
+        status="operational",
+        description="FastAPI server is responding",
+        checked_at=now,
+    ))
+
+    # Database
+    db_total = 0
+    db_size_kb = 0
+    try:
+        _, db_total = db.get_applications(ApplicationFilter(page_size=1))
+        db_size_kb = DB_PATH.stat().st_size // 1024 if DB_PATH.exists() else 0
+        components.append(ComponentStatusResponse(
+            name="Database",
+            status="operational",
+            description=f"SQLite healthy — {db_total} applications, {db_size_kb} KB",
+            checked_at=now,
+        ))
+    except Exception as exc:
+        components.append(ComponentStatusResponse(
+            name="Database",
+            status="outage",
+            description=f"Database error: {exc}",
+            checked_at=now,
+        ))
+
+    # Gmail Poller
+    poller = db.get_poller_state()
+    if poller.status in ("AUTH_ERROR", "AUTH_REQUIRED"):
+        poller_status = "outage"
+        poller_desc = "Authentication error — run: python backend/setup_wizard.py reauth"
+    elif poller.status == "ERROR":
+        poller_status = "degraded"
+        poller_desc = f"Poller error: {poller.error_message or 'unknown'}"
+    elif poller.last_sync_at:
+        minutes_ago = int((now - poller.last_sync_at).total_seconds() / 60)
+        if minutes_ago > 15:
+            poller_status = "degraded"
+            poller_desc = f"Last synced {minutes_ago} min ago — poller may be stopped"
+        else:
+            poller_status = "operational"
+            poller_desc = f"Last synced {minutes_ago} min ago"
+    else:
+        poller_status = "degraded"
+        poller_desc = "Never synced — start the scheduler to begin polling"
+
+    components.append(ComponentStatusResponse(
+        name="Gmail Poller",
+        status=poller_status,
+        description=poller_desc,
+        checked_at=now,
+    ))
+
+    # Gmail Auth
+    if poller.status in ("AUTH_ERROR", "AUTH_REQUIRED"):
+        auth_status = "outage"
+        auth_desc = "OAuth token invalid — re-run setup wizard"
+    else:
+        auth_status = "operational"
+        auth_desc = "OAuth token valid"
+
+    components.append(ComponentStatusResponse(
+        name="Gmail Auth",
+        status=auth_status,
+        description=auth_desc,
+        checked_at=now,
+    ))
+
+    # Overall
+    statuses = {c.status for c in components}
+    if "outage" in statuses:
+        overall = "outage"
+    elif "degraded" in statuses:
+        overall = "degraded"
+    else:
+        overall = "operational"
+
+    uptime_seconds = int((now - started_at).total_seconds()) if started_at else None
+
+    return SystemStatusResponse(
+        overall=overall,
+        components=components,
+        stats={
+            "total_applications": db_total,
+            "db_size_kb": db_size_kb,
+            "last_poll_at": poller.last_sync_at.isoformat() if poller.last_sync_at else None,
+            "uptime_seconds": uptime_seconds,
+        },
+        checked_at=now,
+    )

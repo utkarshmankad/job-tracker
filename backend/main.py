@@ -15,8 +15,10 @@ log = structlog.get_logger()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from datetime import datetime
     db = DataStore()
     app.state.db = db
+    app.state.started_at = datetime.utcnow()
     log.info("app_started")
     yield
     log.info("app_shutdown")
