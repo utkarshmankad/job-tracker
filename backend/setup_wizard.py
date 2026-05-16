@@ -50,7 +50,7 @@ def _install_launchd_plists() -> None:
     <key>ProgramArguments</key>
     <array>
         <string>{PYTHON}</string><string>-m</string><string>uvicorn</string>
-        <string>backend.main:app</string><string>--host</string><string>localhost</string>
+        <string>backend.main:app</string><string>--host</string><string>jobtracker.localhost</string>
         <string>--port</string><string>8000</string>
     </array>
     <key>WorkingDirectory</key><string>{PROJECT_ROOT}</string>

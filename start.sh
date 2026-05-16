@@ -80,7 +80,7 @@ init_db() {
 start_backend() {
     mkdir -p "$LOG_DIR" "$PID_DIR"
     PYTHONPATH="$SCRIPT_DIR" "$VENV_PYTHON" -m uvicorn backend.main:app \
-        --host localhost --port "$API_PORT" \
+        --host jobtracker.localhost --port "$API_PORT" \
         >> "$LOG_DIR/api.log" 2>> "$LOG_DIR/api_error.log" &
     local pid=$!
     echo "$pid" > "$PID_DIR/api.pid"
@@ -88,7 +88,7 @@ start_backend() {
     if ! kill -0 "$pid" 2>/dev/null; then
         die "Backend exited immediately — check $LOG_DIR/api_error.log"
     fi
-    ok "Backend   PID=$pid   http://localhost:$API_PORT"
+    ok "Backend   PID=$pid   http://jobtracker.localhost:$API_PORT"
 }
 
 # ── Start Vite dev server in the background
@@ -102,7 +102,7 @@ start_frontend() {
     if ! kill -0 "$pid" 2>/dev/null; then
         die "Frontend exited immediately — check $LOG_DIR/frontend_error.log"
     fi
-    ok "Frontend  PID=$pid   http://localhost:$FRONTEND_PORT"
+    ok "Frontend  PID=$pid   http://jobtracker.localhost:$FRONTEND_PORT"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -123,7 +123,7 @@ start_backend
 start_frontend
 
 printf "\n${GREEN}${BOLD}All systems up.${NC}\n"
-printf "  API      →  http://localhost:%s\n" "$API_PORT"
-printf "  Frontend →  http://localhost:%s\n" "$FRONTEND_PORT"
+printf "  API      →  http://jobtracker.localhost:%s\n" "$API_PORT"
+printf "  Frontend →  http://jobtracker.localhost:%s\n" "$FRONTEND_PORT"
 printf "  Logs     →  %s\n" "$LOG_DIR"
 printf "  PIDs     →  %s/{api,frontend}.pid\n\n" "$PID_DIR"

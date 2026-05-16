@@ -25,7 +25,7 @@ A fully local Mac app that reads your Gmail, figures out where you are in every 
 | Thing | What it does |
 |---|---|
 | **Python 3.11** | Core runtime |
-| **FastAPI** | REST API on `localhost:8000` |
+| **FastAPI** | REST API on `jobtracker.localhost:8000` |
 | **SQLModel + SQLite** | ORM + local DB at `~/.job-tracker/applications.db` |
 | **spaCy** (`en_core_web_sm`) | NLP for company/role extraction from email text |
 | **APScheduler** | Runs the Gmail polling loop every 5 minutes |
@@ -39,7 +39,7 @@ A fully local Mac app that reads your Gmail, figures out where you are in every 
 | Thing | What it does |
 |---|---|
 | **React 19** | UI framework |
-| **Vite 8** | Build tool / dev server on `localhost:5173` |
+| **Vite 8** | Build tool / dev server on `jobtracker.localhost:5173` |
 | **Tailwind CSS 4** | Styling |
 | **Recharts** | Donut and KPI charts |
 | **d3-sankey** | Sankey flow diagram in the analytics panel |
@@ -143,7 +143,7 @@ source .venv/bin/activate
 cd frontend && npm run dev
 ```
 
-Open [http://localhost:5173](http://localhost:5173) — you're in.
+Open [http://jobtracker.localhost:5173](http://jobtracker.localhost:5173) — you're in.
 
 ### Useful commands
 

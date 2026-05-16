@@ -44,7 +44,7 @@ launchctl stop com.jobtracker.poller
 ```
 
 ## Dashboard
-Open http://localhost:5173 in your browser (after starting frontend).
+Open http://jobtracker.localhost:5173 in your browser (after starting frontend).
 
 ## Re-authenticate (if token issues)
 ```bash

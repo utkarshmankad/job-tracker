@@ -29,7 +29,7 @@ def backend_server(tmp_path_factory):
         start_new_session=True,
     )
     time.sleep(3)
-    yield "http://localhost:8001"
+    yield "http://jobtracker.localhost:8001"
     os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
 
 
@@ -43,7 +43,7 @@ def frontend_server(backend_server):
         start_new_session=True,
     )
     time.sleep(5)
-    yield "http://localhost:5174"
+    yield "http://jobtracker.localhost:5174"
     os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
     env_file.unlink(missing_ok=True)
 
