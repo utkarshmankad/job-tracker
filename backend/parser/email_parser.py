@@ -68,7 +68,11 @@ class EmailParser:
         with open(rules_path) as f:
             data = yaml.safe_load(f)
         self._portals: list[dict[str, Any]] = data.get("portals", [])
-        self._nlp = spacy.load("en_core_web_sm")
+        try:
+            self._nlp = spacy.load("en_core_web_sm")
+        except OSError:
+            log.warning("spacy_model_not_found_falling_back_to_regex_only")
+            self._nlp = None
 
     def parse(self, email: RawEmail, suppress_rules: list[SuppressRule]) -> ParsedApplication | None:
         if self._matches_suppress_rule(email.sender, email.subject, suppress_rules):
@@ -134,7 +138,7 @@ class EmailParser:
         combined_snippet = f"{snippet_for_extraction} {body_text_for_extraction}".strip()
 
         company = self._extract_company(email.subject, combined_snippet, portal_name, sender_domain)
-        role = self._extract_role(email.subject)
+        role = self._extract_role(email.subject, snippet_for_extraction)
         job_url = self._extract_job_url(combined_snippet)
 
         email.body_text = None
@@ -156,6 +160,10 @@ class EmailParser:
     def refine_company(self, extra_text: str, portal_name: str, sender_domain: str) -> str | None:
         """Re-run company extraction on arbitrary text (e.g. email body fetched lazily)."""
         return self._extract_company("", extra_text[:3000], portal_name, sender_domain)
+
+    def refine_role(self, subject: str, extra_text: str) -> str | None:
+        """Re-run role extraction using body text as additional context."""
+        return self._extract_role(subject, extra_text[:1000])
 
     def _subject_or_signal_matches(self, subject_lower: str, portal: dict[str, Any]) -> bool:
         """Returns True if subject matches any subject_pattern or any status_signal keyword."""
@@ -185,6 +193,8 @@ class EmailParser:
     ])
     # Greeting words that precede a person's name in email text and get fused into ORG entity
     _GREETING_PATTERN = re.compile(r"\s*\b(?:hi|hello|dear|hey)\b\s*$", re.IGNORECASE)
+    # Strip "Hi/Hello/Dear [Name]" suffix anywhere in the ORG text, e.g. "Applied Materials Hi Utkarsh"
+    _GREETING_SUFFIX_PATTERN = re.compile(r"\s+(?:hi|hello|dear|hey)\b.*$", re.IGNORECASE)
     # If an ORG entity ends with one of these, it's most likely a job title, not a company.
     _REJECT_COMPANY_TRAILING: frozenset[str] = frozenset([
         "engineer", "developer", "analyst", "manager", "director",
@@ -210,16 +220,22 @@ class EmailParser:
     ) -> str | None:
         text = f"{subject} {body_snippet}"
 
-        doc = self._nlp(text)
-
         # Build a domain-based company hint (e.g. "hilabs.com" → "hilabs") to resolve
         # ORG+person fusions when spacy's English NER misses Indian person names.
         domain_hint = sender_domain.split(".")[0].lower() if sender_domain else ""
 
-        # Index PERSON spans so we can detect company+person fusions (e.g. "HiLabs Ujwala Kudur")
-        person_spans = [(e.start_char, e.end_char) for e in doc.ents if e.label_ == "PERSON"]
+        doc = None
+        if self._nlp is not None:
+            try:
+                doc = self._nlp(text)
+            except Exception as exc:
+                log.warning("spacy_nlp_error_falling_back_to_regex", error=str(exc))
 
-        for ent in doc.ents:
+        if doc is not None:
+            # Index PERSON spans so we can detect company+person fusions (e.g. "HiLabs Ujwala Kudur")
+            person_spans = [(e.start_char, e.end_char) for e in doc.ents if e.label_ == "PERSON"]
+
+        for ent in (doc.ents if doc is not None else []):
             if ent.label_ != "ORG":
                 continue
             org_text = ent.text.strip()
@@ -228,13 +244,31 @@ class EmailParser:
             if "(" in org_text and ")" not in org_text:
                 org_text = org_text.split("(")[0].strip()
 
-            # If sender domain hint matches a word inside a multi-word ORG entity, use just
-            # that word (e.g. "HiLabs" from "hilabs.com" within "HiLabs Ujwala Kudur").
+            # Strip "Hi/Hello/Dear [Name...]" suffix fused into entity by spacy
+            # e.g. "Applied Materials Hi Utkarsh" → "Applied Materials"
+            org_text = self._GREETING_SUFFIX_PATTERN.sub("", org_text).strip()
+            if not org_text:
+                continue
+
+            # If sender domain hint matches inside a multi-word ORG entity, extract just
+            # the matching portion. Supports both single-word ("hilabs" → "HiLabs") and
+            # compound domains ("appliedmaterials" → "Applied Materials").
             if domain_hint and len(org_text.split()) > 1:
-                for word in org_text.split():
+                words = org_text.split()
+                matched_by_hint = False
+                # Try exact single-word match first
+                for word in words:
                     if word.lower() == domain_hint:
                         org_text = word
+                        matched_by_hint = True
                         break
+                if not matched_by_hint:
+                    # Try cumulative compound match: "applied"+"materials" == "appliedmaterials"
+                    for end_i in range(1, min(5, len(words) + 1)):
+                        compound = "".join(w.lower() for w in words[:end_i])
+                        if compound == domain_hint:
+                            org_text = " ".join(words[:end_i])
+                            break
 
             # If a PERSON span starts inside this ORG span, truncate just before it
             # and strip any trailing greeting word (Hi, Hello, Dear, Hey).
@@ -267,23 +301,52 @@ class EmailParser:
     _ROLE_LEADING_STRIP = re.compile(
         r"^(?:our|the|a|an|this|your)\s+", re.IGNORECASE
     )
+    # Extracted text that is a meta-word, not a real role name.
+    _REJECT_ROLE_WORDS: frozenset[str] = frozenset([
+        "role", "position", "opening", "job", "opportunity", "vacancy",
+        "post", "application", "profile",
+    ])
 
-    def _extract_role(self, subject: str) -> str | None:
+    def _extract_role(self, subject: str, snippet: str = "") -> str | None:
         patterns = [
+            # "for the role of Software Engineer at Company"
             r"for the role of\s+(.+?)(?:\s+at\s+|\s*$)",
+            # "for Software Engineer position"
             r"for\s+(.+?)\s+position",
-            r"^(.+?)\s*[-–—]\s*Application",
-            r"application for\s+(.+?)(?:\s+at\s+|\s+position|\s*$)",
-            r"applied for the (?:role|position) of\s+(.+?)(?:\s+at\s+|\s*$)",
-            r"applied for the (?:role|position)\s+(.+?)(?:\s+at\s+|\s*$)",
+            # "Software Engineer - Application" (role before separator)
+            r"^(.+?)\s*[-–—]\s*(?:application|applied|job|opening|opportunity)\b",
+            # "application for Software Engineer at Company"
+            r"application\s+for\s+(.+?)(?:\s+at\s+|\s+with\s+|\s+position|\s*$)",
+            # "applied for the role/position of Software Engineer"
+            r"applied\s+for\s+the\s+(?:role|position)\s+of\s+(.+?)(?:\s+at\s+|\s*$)",
+            r"applied\s+for\s+the\s+(?:role|position)\s+(.+?)(?:\s+at\s+|\s*$)",
+            # "applied for Software Engineer at Company" / "applied to Software Engineer"
+            r"applied\s+(?:for|to)\s+(?:the\s+)?(?:role\s+of\s+|position\s+of\s+)?(.+?)(?:\s+at\s+|\s+with\s+|\s*$)",
+            # "Your application as a Software Engineer"
+            r"application\s+as\s+(?:a\s+|an\s+)?(.+?)(?:\s+at\s+|\s+with\s+|\s+has\s+|\s+is\s+|\s*[,\-–—]|\s*$)",
+            # "interview for Software Engineer at Company"
+            r"interview\s+for\s+(?:the\s+)?(.+?)(?:\s+at\s+|\s+with\s+|\s+position|\s*$)",
+            # "position of Software Engineer"
+            r"(?:role|position)\s+of\s+(.+?)(?:\s+at\s+|\s+with\s+|\s*[,.]|\s*$)",
+            # "Software Engineer at Company - Application Received" (role | company at start)
+            r"^([A-Z][A-Za-z0-9 &,.']+?)\s+at\s+[A-Z][A-Za-z]",
+            # "opportunity for Software Engineer"
+            r"opportunity\s+for\s+(?:a\s+|an\s+)?(.+?)(?:\s+at\s+|\s+with\s+|\s*$)",
+            # "opening for Software Engineer"
+            r"opening\s+for\s+(?:a\s+|an\s+)?(.+?)(?:\s+at\s+|\s+with\s+|\s*$)",
         ]
-        for pattern in patterns:
-            match = re.search(pattern, subject, re.IGNORECASE)
-            if match:
-                role = self._ROLE_LEADING_STRIP.sub("", match.group(1).strip())
-                # Reject if it looks like a digest ("2 jobs on …") or too short
-                if len(role) > 2 and not re.match(r"^\d+\s+job", role, re.IGNORECASE):
-                    return role
+        for text in filter(None, [subject, snippet]):
+            for pattern in patterns:
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    role = self._ROLE_LEADING_STRIP.sub("", match.group(1).strip())
+                    # Reject digests ("2 jobs on …"), too-short strings, and meta-words
+                    if (
+                        len(role) > 3
+                        and not re.match(r"^\d+\s+job", role, re.IGNORECASE)
+                        and role.lower() not in self._REJECT_ROLE_WORDS
+                    ):
+                        return role
         return None
 
     def _extract_job_url(self, snippet: str) -> str | None:

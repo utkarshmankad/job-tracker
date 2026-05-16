@@ -27,7 +27,7 @@ from backend.config import (
 from backend.db.data_store import DataStore
 from backend.parser.email_parser import EmailParser, RawEmail, extract_sender_domain
 from backend.engine.status_updater import StatusUpdater
-from backend.poller.error_retry import gmail_retry, AuthError
+from backend.poller.error_retry import gmail_retry, AuthError, StaleHistoryError
 
 log = structlog.get_logger()
 
@@ -100,7 +100,12 @@ class GmailPoller:
 
         try:
             if self.last_history_id is not None:
-                message_ids, new_history_id = self._fetch_via_history()
+                try:
+                    message_ids, new_history_id = self._fetch_via_history()
+                except StaleHistoryError:
+                    log.warning("history_id_stale_resetting_to_backfill")
+                    self.last_history_id = None
+                    message_ids, new_history_id = self._fetch_backfill()
             else:
                 message_ids, new_history_id = self._fetch_backfill()
 
@@ -108,31 +113,47 @@ class GmailPoller:
                 if self._db.is_processed(msg_id):
                     continue
 
-                msg = self.service.users().messages().get(
-                    userId="me",
-                    id=msg_id,
-                    format="metadata",
-                    metadataHeaders=["From", "Subject", "Date"],
-                ).execute()
+                try:
+                    msg = self.service.users().messages().get(
+                        userId="me",
+                        id=msg_id,
+                        format="metadata",
+                        metadataHeaders=["From", "Subject", "Date"],
+                    ).execute()
 
-                raw_email = self._build_raw_email(msg)
-                parsed = self._parser.parse(raw_email, suppress_rules)
+                    raw_email = self._build_raw_email(msg)
+                    parsed = self._parser.parse(raw_email, suppress_rules)
 
-                if parsed is not None:
-                    if parsed.company is None:
-                        body = self._fetch_body_text(msg_id)
-                        if body:
-                            refined = self._parser.refine_company(
-                                body,
-                                parsed.source_portal,
-                                extract_sender_domain(raw_email.sender),
-                            )
-                            if refined:
-                                parsed = dataclass_replace(parsed, company=refined)
-                    self._updater.process(parsed)
-                    processed_count += 1
-                else:
-                    self._db.mark_processed(msg_id, "suppressed")
+                    if parsed is not None:
+                        if parsed.company is None or parsed.role is None:
+                            body = self._fetch_body_text(msg_id)
+                            if body:
+                                if parsed.company is None:
+                                    refined_company = self._parser.refine_company(
+                                        body,
+                                        parsed.source_portal,
+                                        extract_sender_domain(raw_email.sender),
+                                    )
+                                    if refined_company:
+                                        parsed = dataclass_replace(parsed, company=refined_company)
+                                if parsed.role is None:
+                                    refined_role = self._parser.refine_role(
+                                        raw_email.subject, body
+                                    )
+                                    if refined_role:
+                                        parsed = dataclass_replace(parsed, role=refined_role)
+                        self._updater.process(parsed)
+                        processed_count += 1
+                    else:
+                        self._db.mark_processed(msg_id, "suppressed")
+                except HttpError:
+                    raise  # let the outer handler deal with auth/rate errors
+                except Exception as exc:
+                    log.error(
+                        "email_processing_error_skipping",
+                        message_id=msg_id,
+                        error=str(exc),
+                    )
 
             if new_history_id:
                 self.last_history_id = new_history_id
@@ -153,6 +174,11 @@ class GmailPoller:
                 )
                 self.status = PollerStatus.AUTH_ERROR
                 raise AuthError(f"Gmail auth failed: {e.resp.status}") from e
+            self._db.update_poller_state(
+                status=PollerStatus.API_ERROR.value,
+                error_message=f"HTTP {e.resp.status}: {str(e)[:200]}",
+            )
+            self.status = PollerStatus.API_ERROR
             raise
 
     def _fetch_backfill(self) -> tuple[list[tuple[str, str]], str | None]:
@@ -194,7 +220,12 @@ class GmailPoller:
             if page_token:
                 kwargs["pageToken"] = page_token
 
-            response = self.service.users().history().list(**kwargs).execute()
+            try:
+                response = self.service.users().history().list(**kwargs).execute()
+            except HttpError as e:
+                if e.resp.status == 404:
+                    raise StaleHistoryError("History ID expired") from e
+                raise
             new_history_id = response.get("historyId")
 
             for history_item in response.get("history", []):

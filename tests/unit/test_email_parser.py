@@ -224,3 +224,55 @@ def test_extract_sender_domain_bare_email() -> None:
 def test_extract_sender_domain_empty() -> None:
     from backend.parser.email_parser import extract_sender_domain
     assert extract_sender_domain("") == ""
+
+
+# ------------------------------------------------------------------ #
+# Parser resilience — spaCy unavailable or crashing                   #
+# ------------------------------------------------------------------ #
+
+
+def test_spacy_crash_falls_back_to_regex(parser: EmailParser) -> None:
+    """When spaCy's nlp() raises, company extraction still works via regex fallback."""
+    parser._nlp = MagicMock(side_effect=RuntimeError("spacy internal error"))
+    email = _make_email(
+        sender="noreply@naukri.com",
+        subject="Your application to Infosys",
+        snippet="",
+        body_text=None,
+    )
+    result = parser.parse(email, suppress_rules=[])
+    assert result is not None
+    # Company may or may not be extracted by regex, but no exception should propagate
+    assert result.source_portal == "Naukri"
+
+
+def test_spacy_model_not_found_uses_regex_only(tmp_path) -> None:
+    """Parser with _nlp=None (model not installed) still classifies emails via regex."""
+    import spacy
+    with patch.object(spacy, "load", side_effect=OSError("model not found")):
+        p = EmailParser()
+    assert p._nlp is None
+
+    email = _make_email(
+        sender="noreply@naukri.com",
+        subject="Your application to Infosys",
+        snippet="",
+        body_text=None,
+    )
+    result = p.parse(email, suppress_rules=[])
+    assert result is not None
+    assert result.source_portal == "Naukri"
+    # Regex fallback extracts company from subject
+    assert result.company == "Infosys"
+
+
+def test_parse_does_not_store_body_text_when_spacy_fails(parser: EmailParser) -> None:
+    """body_text is always cleared even when spaCy crashes mid-extraction."""
+    parser._nlp = MagicMock(side_effect=RuntimeError("boom"))
+    email = _make_email(
+        sender="noreply@naukri.com",
+        subject="Your application to Infosys",
+        body_text="secret body content",
+    )
+    parser.parse(email, suppress_rules=[])
+    assert email.body_text is None

@@ -128,3 +128,97 @@ def test_extract_text_from_payload_nested_parts(tmp_path: Path) -> None:
     }
     result = poller._extract_text_from_payload(payload)
     assert "hello from nested" in result
+
+
+# ------------------------------------------------------------------ #
+# Per-email resilience — one failure must not abort the poll cycle    #
+# ------------------------------------------------------------------ #
+
+
+def _make_fake_message(msg_id: str) -> dict:
+    return {
+        "id": msg_id,
+        "threadId": f"thread-{msg_id}",
+        "payload": {
+            "headers": [
+                {"name": "From", "value": "noreply@naukri.com"},
+                {"name": "Subject", "value": "Your application to Acme"},
+                {"name": "Date", "value": "Mon, 01 Jan 2024 10:00:00 +0000"},
+            ]
+        },
+        "snippet": "Applied to Acme Corp",
+    }
+
+
+def test_one_email_parse_error_does_not_abort_remaining(tmp_path: Path) -> None:
+    """If one email raises during processing, remaining emails are still processed."""
+    poller = _make_poller(tmp_path)
+
+    # Simulate 3 messages; the second one's metadata fetch raises
+    message_ids = [("msg1", "t1"), ("msg2", "t2"), ("msg3", "t3")]
+
+    call_count = {"n": 0}
+
+    def fake_get_execute(userId, id, format, metadataHeaders):
+        call_count["n"] += 1
+        if id == "msg2":
+            raise RuntimeError("transient failure on msg2")
+        return MagicMock(execute=lambda: _make_fake_message(id))
+
+    mock_messages = MagicMock()
+    mock_messages.get.side_effect = fake_get_execute
+    poller.service = MagicMock()
+    poller.service.users.return_value.messages.return_value = mock_messages
+
+    # Parser returns a parsed result for msg1 and msg3
+    from backend.parser.email_parser import ParsedApplication
+    from backend.db.models import ApplicationStatus
+    from datetime import datetime
+
+    def fake_parse(raw_email, suppress_rules):
+        return ParsedApplication(
+            message_id=raw_email.message_id,
+            thread_id=raw_email.thread_id,
+            company="Acme",
+            role="Engineer",
+            source_portal="Naukri",
+            job_url=None,
+            applied_date=datetime(2024, 1, 1),
+            status_signal=None,
+            raw_sender=raw_email.sender,
+            raw_subject=raw_email.subject,
+            is_classification_confident=True,
+        )
+
+    poller._parser.parse.side_effect = fake_parse
+    poller._parser.refine_company.return_value = None
+    poller._parser.refine_role.return_value = None
+
+    # Patch _fetch_backfill and _fetch_body_text; patch updater.process
+    with patch.object(poller, "_fetch_backfill", return_value=(message_ids, "hist999")), \
+         patch.object(poller, "_fetch_body_text", return_value=""):
+        count = poller._poll_once_locked()
+
+    # msg1 and msg3 should be processed (2 total); msg2 failed but did not abort
+    assert count == 2
+
+
+def test_one_email_parse_error_does_not_prevent_history_update(tmp_path: Path) -> None:
+    """Even when an email fails, the history ID is still saved after the cycle."""
+    poller = _make_poller(tmp_path)
+
+    def explode(userId, id, format, metadataHeaders):
+        raise RuntimeError("all emails fail")
+
+    mock_messages = MagicMock()
+    mock_messages.get.side_effect = explode
+    poller.service = MagicMock()
+    poller.service.users.return_value.messages.return_value = mock_messages
+
+    new_hist = "histABC"
+    with patch.object(poller, "_fetch_backfill", return_value=([("m1", "t1")], new_hist)):
+        count = poller._poll_once_locked()
+
+    assert count == 0
+    # History ID must still be persisted so we don't re-fetch the same window
+    assert poller.last_history_id == new_hist
