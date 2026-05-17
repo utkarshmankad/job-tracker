@@ -13,6 +13,7 @@ A fully local Mac app that reads your Gmail, figures out where you are in every 
 - **Advances application status automatically** through a defined pipeline: `Applied → In Review → Phone Screen → Interview → Offer → Rejected`
 - **Detects duplicates** so one application doesn't show up twelve times because Workday sends a new email every time someone breathes
 - **Surfaces analytics**: Sankey flow diagram, funnel donut, KPI cards, conversion rates
+- **Icon-driven UI** — every action button replaced with a Lucide icon (with proper `aria-label` for accessibility), search has an inline icon, pagination uses chevrons, sort columns show directional arrows
 - **Dark mode** because your eyes matter
 - **Sleep/wake aware** — pauses polling when your Mac is asleep, resumes when it wakes up
 - Runs as **launchd daemons** so it's always on in the background
@@ -44,6 +45,7 @@ A fully local Mac app that reads your Gmail, figures out where you are in every 
 | **Recharts** | Donut and KPI charts |
 | **d3-sankey** | Sankey flow diagram in the analytics panel |
 | **TanStack Table** | Applications table with sorting/filtering |
+| **Lucide React** | Icon set used throughout the UI |
 
 ---
 
@@ -161,8 +163,11 @@ python backend/setup_wizard.py reauth
 tail -f ~/.job-tracker/logs/poller.log
 tail -f ~/.job-tracker/logs/api_error.log
 
-# Run the test suite
+# Run the backend test suite
 pytest tests/ -v
+
+# Run the frontend test suite
+cd frontend && npm test
 
 # Lint and format
 ruff check backend/ tests/

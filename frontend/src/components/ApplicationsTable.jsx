@@ -6,11 +6,24 @@ import {
   getPaginationRowModel,
   flexRender,
 } from "@tanstack/react-table";
+import {
+  Eye, ChevronLeft, ChevronRight,
+  ArrowUp, ArrowDown, ChevronsUpDown,
+} from "lucide-react";
 import { api } from "../api/client";
 import { STATUS_COLORS } from "../utils/constants";
 import { formatDate } from "../utils/formatters";
 
 const PAGE_SIZE = 20;
+
+function SortIcon({ column }) {
+  if (!column.getCanSort()) return null;
+  if (column.getIsSorted() === "asc")
+    return <ArrowUp size={12} className="inline ml-1 text-blue-500" aria-hidden="true" />;
+  if (column.getIsSorted() === "desc")
+    return <ArrowDown size={12} className="inline ml-1 text-blue-500" aria-hidden="true" />;
+  return <ChevronsUpDown size={12} className="inline ml-1 opacity-30" aria-hidden="true" />;
+}
 
 export default function ApplicationsTable({ filters, onSelectId }) {
   const [data, setData] = useState([]);
@@ -78,14 +91,16 @@ export default function ApplicationsTable({ filters, onSelectId }) {
       },
       {
         id: "actions",
-        header: "Actions",
+        header: "",
         enableSorting: false,
         cell: (info) => (
           <button
             onClick={() => onSelectId(info.row.original.id)}
-            className="px-2 py-1 text-xs bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-700 rounded hover:bg-blue-100 dark:hover:bg-blue-900/50"
+            aria-label="View application"
+            title="View"
+            className="p-1.5 text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/30 rounded-md transition-colors"
           >
-            View
+            <Eye size={15} aria-hidden="true" />
           </button>
         ),
       },
@@ -104,8 +119,10 @@ export default function ApplicationsTable({ filters, onSelectId }) {
     initialState: { pagination: { pageSize: PAGE_SIZE } },
   });
 
-  if (loading) return <div className="text-sm text-gray-500 dark:text-gray-400 py-8 text-center">Loading…</div>;
-  if (error) return <div className="text-sm text-red-600 py-8 text-center">Error: {error}</div>;
+  if (loading)
+    return <div className="text-sm text-gray-500 dark:text-gray-400 py-8 text-center">Loading…</div>;
+  if (error)
+    return <div className="text-sm text-red-600 py-8 text-center">Error: {error}</div>;
 
   return (
     <div className="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
@@ -118,12 +135,13 @@ export default function ApplicationsTable({ filters, onSelectId }) {
                   key={header.id}
                   onClick={header.column.getToggleSortingHandler()}
                   className={`px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider ${
-                    header.column.getCanSort() ? "cursor-pointer select-none" : ""
+                    header.column.getCanSort()
+                      ? "cursor-pointer select-none hover:text-gray-700 dark:hover:text-gray-200"
+                      : ""
                   }`}
                 >
                   {flexRender(header.column.columnDef.header, header.getContext())}
-                  {header.column.getIsSorted() === "asc" && " ↑"}
-                  {header.column.getIsSorted() === "desc" && " ↓"}
+                  <SortIcon column={header.column} />
                 </th>
               ))}
             </tr>
@@ -160,20 +178,24 @@ export default function ApplicationsTable({ filters, onSelectId }) {
           Page {table.getState().pagination.pageIndex + 1} of{" "}
           {Math.max(table.getPageCount(), 1)}
         </span>
-        <div className="flex gap-2">
+        <div className="flex items-center gap-1">
           <button
             onClick={() => table.previousPage()}
             disabled={!table.getCanPreviousPage()}
-            className="px-3 py-1 border border-gray-300 dark:border-gray-600 rounded disabled:opacity-40 hover:bg-gray-50 dark:hover:bg-gray-800 dark:text-gray-300"
+            aria-label="Previous page"
+            title="Previous"
+            className="p-1.5 border border-gray-300 dark:border-gray-600 rounded-md disabled:opacity-40 hover:bg-gray-50 dark:hover:bg-gray-800 dark:text-gray-300 transition-colors"
           >
-            Previous
+            <ChevronLeft size={16} aria-hidden="true" />
           </button>
           <button
             onClick={() => table.nextPage()}
             disabled={!table.getCanNextPage()}
-            className="px-3 py-1 border border-gray-300 dark:border-gray-600 rounded disabled:opacity-40 hover:bg-gray-50 dark:hover:bg-gray-800 dark:text-gray-300"
+            aria-label="Next page"
+            title="Next"
+            className="p-1.5 border border-gray-300 dark:border-gray-600 rounded-md disabled:opacity-40 hover:bg-gray-50 dark:hover:bg-gray-800 dark:text-gray-300 transition-colors"
           >
-            Next
+            <ChevronRight size={16} aria-hidden="true" />
           </button>
         </div>
       </div>

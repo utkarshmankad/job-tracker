@@ -9,6 +9,8 @@ export const formatDate = (iso) =>
 
 export const formatPercent = (ratio) => `${(ratio * 100).toFixed(0)}%`;
 
+export const formatStatus = (status) => (status ? String(status) : "—");
+
 // Returns a human-readable "time ago" string for a given ISO timestamp.
 export const formatTimeDiff = (isoTimestamp) => {
   if (!isoTimestamp) return null;

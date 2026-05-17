@@ -1,3 +1,4 @@
+import { Search, X } from "lucide-react";
 import { STATUS_OPTIONS, SOURCE_PORTALS } from "../utils/constants";
 
 const EMPTY = {
@@ -9,7 +10,7 @@ const EMPTY = {
 };
 
 const inputCls =
-  "border border-gray-300 dark:border-gray-600 rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100";
+  "border border-gray-300 dark:border-gray-600 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100";
 
 export default function Filters({ filters, onChange }) {
   const update = (key, value) => onChange({ ...filters, [key]: value });
@@ -19,17 +20,26 @@ export default function Filters({ filters, onChange }) {
     <div className="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700 p-4 mb-4 flex flex-wrap gap-3 items-end">
       <div className="flex flex-col gap-1">
         <label className="text-xs text-gray-500 dark:text-gray-400">Search</label>
-        <input
-          type="text"
-          placeholder="Company or role…"
-          value={filters.search || ""}
-          onChange={(e) => update("search", e.target.value)}
-          className={`${inputCls} w-44`}
-        />
+        <div className="relative">
+          <Search
+            size={13}
+            className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none"
+            aria-hidden="true"
+          />
+          <input
+            type="text"
+            placeholder="Company or role…"
+            value={filters.search || ""}
+            onChange={(e) => update("search", e.target.value)}
+            className={`${inputCls} w-44 pl-8`}
+          />
+        </div>
       </div>
 
       <div className="flex flex-col gap-1">
-        <label htmlFor="status-filter" className="text-xs text-gray-500 dark:text-gray-400">Status</label>
+        <label htmlFor="status-filter" className="text-xs text-gray-500 dark:text-gray-400">
+          Status
+        </label>
         <select
           id="status-filter"
           value={filters.status || ""}
@@ -38,7 +48,9 @@ export default function Filters({ filters, onChange }) {
         >
           <option value="">All</option>
           {STATUS_OPTIONS.map((s) => (
-            <option key={s} value={s}>{s}</option>
+            <option key={s} value={s}>
+              {s}
+            </option>
           ))}
         </select>
       </div>
@@ -52,7 +64,9 @@ export default function Filters({ filters, onChange }) {
         >
           <option value="">All</option>
           {SOURCE_PORTALS.map((s) => (
-            <option key={s} value={s}>{s}</option>
+            <option key={s} value={s}>
+              {s}
+            </option>
           ))}
         </select>
       </div>
@@ -79,9 +93,12 @@ export default function Filters({ filters, onChange }) {
 
       <button
         onClick={clear}
-        className="px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800"
+        title="Clear all filters"
+        aria-label="Clear filters"
+        className="flex items-center gap-1.5 px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded-lg text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
       >
-        Clear Filters
+        <X size={14} aria-hidden="true" />
+        Clear
       </button>
     </div>
   );

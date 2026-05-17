@@ -7,4 +7,9 @@ export default defineConfig({
   server: {
     host: 'jobtracker.localhost',
   },
+  test: {
+    environment: 'jsdom',
+    globals: true,
+    setupFiles: ['./src/test/setup.js'],
+  },
 })

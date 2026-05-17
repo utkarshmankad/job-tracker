@@ -66,7 +66,7 @@ def test_applications_tab_visible(page: Page, frontend_server: str) -> None:
 
 def test_add_application_form(page: Page, frontend_server: str, backend_server: str) -> None:
     page.goto(frontend_server)
-    page.get_by_role("button", name="+ Add Application").click()
+    page.get_by_role("button", name="Add Application").click()
 
     page.get_by_label("Company").fill("TestCorp")
     page.get_by_label("Role").fill("Engineer")

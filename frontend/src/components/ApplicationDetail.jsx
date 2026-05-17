@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { X, ExternalLink } from "lucide-react";
 import { api } from "../api/client";
 import { STATUS_OPTIONS, STATUS_COLORS } from "../utils/constants";
 import { formatDate } from "../utils/formatters";
@@ -48,12 +49,15 @@ export default function ApplicationDetail({ applicationId, onClose }) {
     <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 pt-16">
       <div className="bg-white dark:bg-gray-900 rounded-lg shadow-xl w-full max-w-2xl max-h-[80vh] overflow-y-auto">
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 dark:border-gray-700">
-          <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Application Detail</h2>
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+            Application Detail
+          </h2>
           <button
             onClick={onClose}
-            className="text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 text-xl leading-none"
+            aria-label="Close"
+            className="p-1 rounded-md text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
           >
-            ✕
+            <X size={18} aria-hidden="true" />
           </button>
         </div>
 
@@ -66,19 +70,27 @@ export default function ApplicationDetail({ applicationId, onClose }) {
               <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm mb-6">
                 <div>
                   <dt className="text-gray-500 dark:text-gray-400">Company</dt>
-                  <dd className="font-medium text-gray-900 dark:text-gray-100">{app.company || "—"}</dd>
+                  <dd className="font-medium text-gray-900 dark:text-gray-100">
+                    {app.company || "—"}
+                  </dd>
                 </div>
                 <div>
                   <dt className="text-gray-500 dark:text-gray-400">Role</dt>
-                  <dd className="font-medium text-gray-900 dark:text-gray-100">{app.role || "—"}</dd>
+                  <dd className="font-medium text-gray-900 dark:text-gray-100">
+                    {app.role || "—"}
+                  </dd>
                 </div>
                 <div>
                   <dt className="text-gray-500 dark:text-gray-400">Source</dt>
-                  <dd className="font-medium text-gray-900 dark:text-gray-100">{app.source_portal}</dd>
+                  <dd className="font-medium text-gray-900 dark:text-gray-100">
+                    {app.source_portal}
+                  </dd>
                 </div>
                 <div>
                   <dt className="text-gray-500 dark:text-gray-400">Applied Date</dt>
-                  <dd className="font-medium text-gray-900 dark:text-gray-100">{formatDate(app.applied_date)}</dd>
+                  <dd className="font-medium text-gray-900 dark:text-gray-100">
+                    {formatDate(app.applied_date)}
+                  </dd>
                 </div>
                 <div>
                   <dt className="text-gray-500 dark:text-gray-400">Job URL</dt>
@@ -88,9 +100,10 @@ export default function ApplicationDetail({ applicationId, onClose }) {
                         href={app.job_url}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="text-blue-600 dark:text-blue-400 hover:underline break-all"
+                        className="inline-flex items-center gap-1 text-blue-600 dark:text-blue-400 hover:underline break-all"
                       >
                         {app.job_url}
+                        <ExternalLink size={11} aria-hidden="true" className="flex-shrink-0" />
                       </a>
                     ) : (
                       "—"
@@ -107,7 +120,9 @@ export default function ApplicationDetail({ applicationId, onClose }) {
                       className="border border-gray-300 dark:border-gray-600 rounded px-2 py-1 text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
                     >
                       {STATUS_OPTIONS.map((s) => (
-                        <option key={s} value={s}>{s}</option>
+                        <option key={s} value={s}>
+                          {s}
+                        </option>
                       ))}
                     </select>
                     {saving && <span className="text-xs text-gray-400">Saving…</span>}
@@ -115,13 +130,16 @@ export default function ApplicationDetail({ applicationId, onClose }) {
                 </div>
               </dl>
 
-              <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">Status History</h3>
+              <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">
+                Status History
+              </h3>
               {app.status_history && app.status_history.length > 0 ? (
                 <ol className="relative border-l border-gray-200 dark:border-gray-700 ml-2 space-y-4">
                   {[...app.status_history]
                     .sort((a, b) => new Date(a.changed_at) - new Date(b.changed_at))
                     .map((entry) => {
-                      const colorClass = STATUS_COLORS[entry.to_status] || "bg-gray-100 text-gray-700";
+                      const colorClass =
+                        STATUS_COLORS[entry.to_status] || "bg-gray-100 text-gray-700";
                       return (
                         <li key={entry.id} className="ml-4">
                           <div className="absolute -left-1.5 mt-1 w-3 h-3 rounded-full bg-gray-300 dark:bg-gray-600 border-2 border-white dark:border-gray-900" />
@@ -129,7 +147,11 @@ export default function ApplicationDetail({ applicationId, onClose }) {
                           <p className="text-sm text-gray-700 dark:text-gray-300">
                             {entry.from_status && (
                               <>
-                                <span className={`px-1.5 py-0.5 rounded text-xs ${STATUS_COLORS[entry.from_status] || "bg-gray-100 text-gray-600"}`}>
+                                <span
+                                  className={`px-1.5 py-0.5 rounded text-xs ${
+                                    STATUS_COLORS[entry.from_status] || "bg-gray-100 text-gray-600"
+                                  }`}
+                                >
                                   {entry.from_status}
                                 </span>
                                 {" → "}
@@ -138,7 +160,9 @@ export default function ApplicationDetail({ applicationId, onClose }) {
                             <span className={`px-1.5 py-0.5 rounded text-xs ${colorClass}`}>
                               {entry.to_status}
                             </span>
-                            <span className="ml-2 text-xs text-gray-400">via {entry.trigger}</span>
+                            <span className="ml-2 text-xs text-gray-400">
+                              via {entry.trigger}
+                            </span>
                           </p>
                         </li>
                       );
