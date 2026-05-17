@@ -225,14 +225,6 @@ portals:
       interview_scheduled: ["interview"]
       rejected: ["regret", "not selected"]
 
-  - name: TimesJobs
-    sender_domains: [timesjobs.com, mail.timesjobs.com]
-    subject_patterns: ["application", "applied", "shortlisted", "interview", "profile"]
-    status_signals:
-      shortlisted: ["shortlisted", "selected"]
-      interview_scheduled: ["interview"]
-      rejected: ["regret", "not selected"]
-
   - name: Direct/Unknown
     sender_domains: []
     # These patterns are the ONLY filter for Direct/Unknown (no domain anchor).

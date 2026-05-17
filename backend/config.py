@@ -16,7 +16,7 @@ GMAIL_KEYCHAIN_USERNAME = "oauth-token"
 
 # Poller
 POLL_INTERVAL_SECONDS = 300  # 5 minutes
-BACKFILL_DAYS = 240  # 8 months on first run
+BACKFILL_DAYS = 180  # 6 months on first run
 
 # Dashboard
 API_HOST = "jobtracker.localhost"
