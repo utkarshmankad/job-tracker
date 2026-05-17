@@ -24,6 +24,12 @@ API_PORT = 8000
 FRONTEND_PORT = 5173
 FRONTEND_PORT_ALT = 5174
 
+# LLM parser (Ollama — open-source local inference)
+LLM_ENABLED: bool = os.environ.get("LLM_ENABLED", "true").lower() == "true"
+LLM_MODEL: str = os.environ.get("LLM_MODEL", "llama3.2:3b")
+LLM_BASE_URL: str = os.environ.get("LLM_BASE_URL", "http://localhost:11434")
+LLM_TIMEOUT_SECONDS: int = int(os.environ.get("LLM_TIMEOUT_SECONDS", "30"))
+
 # Insights
 MIN_APPLICATIONS_FOR_INSIGHTS = 10
 STALE_DAYS_THRESHOLD = 14

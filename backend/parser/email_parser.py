@@ -10,8 +10,15 @@ import spacy
 import structlog
 import yaml
 
-from backend.config import PORTAL_RULES_PATH
+from backend.config import (
+    LLM_BASE_URL,
+    LLM_ENABLED,
+    LLM_MODEL,
+    LLM_TIMEOUT_SECONDS,
+    PORTAL_RULES_PATH,
+)
 from backend.db.models import ApplicationStatus, SuppressRule
+from backend.parser.llm_extractor import LLMExtractor
 from backend.parser.status_signals import GLOBAL_STATUS_KEYWORDS
 
 log = structlog.get_logger(__name__)
@@ -73,6 +80,9 @@ class EmailParser:
         except OSError:
             log.warning("spacy_model_not_found_falling_back_to_regex_only")
             self._nlp = None
+        self._llm: LLMExtractor | None = (
+            LLMExtractor(LLM_BASE_URL, LLM_MODEL, LLM_TIMEOUT_SECONDS) if LLM_ENABLED else None
+        )
 
     def parse(self, email: RawEmail, suppress_rules: list[SuppressRule]) -> ParsedApplication | None:
         if self._matches_suppress_rule(email.sender, email.subject, suppress_rules):
@@ -129,16 +139,37 @@ class EmailParser:
         portal_name = matched_portal["name"]
         portal_signals = matched_portal.get("status_signals", {})
 
-        status_signal = self._detect_status_signal(
-            email.subject, email.snippet, portal_name, portal_signals
-        )
-
         snippet_for_extraction = email.snippet or ""
         body_text_for_extraction = email.body_text or ""
         combined_snippet = f"{snippet_for_extraction} {body_text_for_extraction}".strip()
 
-        company = self._extract_company(email.subject, combined_snippet, portal_name, sender_domain)
-        role = self._extract_role(email.subject, snippet_for_extraction)
+        # Try LLM extraction first; fall back to regex/spaCy per field when LLM
+        # returns None (Ollama unavailable, timeout, or unrecognised output).
+        llm_result = None
+        if self._llm is not None:
+            llm_result = self._llm.extract(
+                sender=email.sender,
+                subject=email.subject,
+                snippet=snippet_for_extraction,
+                body_text=email.body_text,
+            )
+
+        if llm_result is not None:
+            company = llm_result.company or self._extract_company(
+                email.subject, combined_snippet, portal_name, sender_domain
+            )
+            role = llm_result.role or self._extract_role(email.subject, snippet_for_extraction)
+            # LLM status=None means "APPLIED" (the default) → also try keyword detection
+            status_signal = llm_result.status if llm_result.status is not None else self._detect_status_signal(
+                email.subject, email.snippet, portal_name, portal_signals
+            )
+        else:
+            status_signal = self._detect_status_signal(
+                email.subject, email.snippet, portal_name, portal_signals
+            )
+            company = self._extract_company(email.subject, combined_snippet, portal_name, sender_domain)
+            role = self._extract_role(email.subject, snippet_for_extraction)
+
         job_url = self._extract_job_url(combined_snippet)
 
         email.body_text = None
