@@ -15,6 +15,11 @@ class RateLimitError(Exception):
     pass
 
 
+class StaleHistoryError(Exception):
+    """Raised when the Gmail history ID is too old to continue incremental sync."""
+    pass
+
+
 def gmail_retry(max_attempts: int = 3):
     """Decorator: retry on 429/5xx, raise AuthError immediately on 401/403."""
 

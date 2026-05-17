@@ -1,3 +1,10 @@
+# AI agent
+anthropic>=0.40.0
+python-dotenv>=1.0.0
+# Testing (agent)
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+# Existing dependencies
 google-api-python-client==2.131.0
 google-auth-httplib2==0.2.0
 google-auth-oauthlib==1.2.0

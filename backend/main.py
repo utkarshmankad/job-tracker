@@ -18,12 +18,26 @@ log = structlog.get_logger()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from datetime import datetime
+    from backend.poller.scheduler import build_poller, PollerScheduler
+
     db = DataStore()
     app.state.db = db
     app.state.updater = StatusUpdater(db, DuplicateDetector(db))
     app.state.started_at = datetime.utcnow()
+
+    poller = build_poller()
+    scheduler = PollerScheduler(poller)
+    app.state.poller_scheduler = scheduler
+    try:
+        poller.authenticate()
+        scheduler.start()
+    except Exception as exc:
+        log.error("poller_start_failed", error=str(exc))
+
     log.info("app_started")
     yield
+
+    scheduler.stop()
     log.info("app_shutdown")
 
 

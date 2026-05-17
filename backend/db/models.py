@@ -4,6 +4,8 @@ import enum
 from datetime import datetime
 from typing import List, Optional
 
+from sqlalchemy import Column
+from sqlalchemy import Enum as SAEnum
 from sqlmodel import Field, Relationship, SQLModel
 
 
@@ -26,7 +28,16 @@ class Application(SQLModel, table=True):
     source_portal: str = Field(index=True)
     job_url: Optional[str] = None
     applied_date: datetime = Field(index=True)
-    current_status: ApplicationStatus = Field(default=ApplicationStatus.APPLIED, index=True)
+    current_status: ApplicationStatus = Field(
+        default=ApplicationStatus.APPLIED,
+        sa_column=Column(
+            "current_status",
+            SAEnum(ApplicationStatus, values_callable=lambda obj: [e.value for e in obj]),
+            default=ApplicationStatus.APPLIED.value,
+            index=True,
+            nullable=False,
+        ),
+    )
     thread_ids: str = "[]"  # JSON-encoded list[str]
     is_false_positive: bool = False
     created_at: datetime = Field(default_factory=datetime.utcnow)

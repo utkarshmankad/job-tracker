@@ -171,6 +171,68 @@ portals:
       interview_scheduled: ["interview"]
       rejected: ["regret", "not selected"]
 
+  - name: Ashby
+    sender_domains: [ashbyhq.com, mail.ashby.io, notifications.ashbyhq.com]
+    subject_patterns: ["application", "interview", "your application", "applied",
+                       "we'd like to move forward", "next steps"]
+    status_signals:
+      shortlisted: ["we'd like to move forward", "next step", "advance"]
+      interview_scheduled: ["interview scheduled", "interview", "schedule"]
+      rejected: ["decided to move forward with other", "not moving forward",
+                 "no longer being considered"]
+      offer: ["offer letter", "offer from", "pleased to extend"]
+
+  - name: Taleo
+    sender_domains: [taleo.net, oraclecloud.com, recruit.oraclecloud.com,
+                     oracle.taleo.net, email.taleo.net]
+    subject_patterns: ["application", "your application", "interview", "applied",
+                       "application received", "application status"]
+    status_signals:
+      interview_scheduled: ["interview scheduled", "interview"]
+      rejected: ["not selected", "no longer under consideration", "decided not"]
+      offer: ["offer letter", "offer from"]
+
+  - name: Workable
+    sender_domains: [workable.com, apply.workable.com, notifications.workable.com]
+    subject_patterns: ["application", "your application", "interview", "applied"]
+    status_signals:
+      shortlisted: ["shortlisted", "next stage", "we'd like to move forward"]
+      interview_scheduled: ["interview"]
+      rejected: ["not selected", "not moving forward", "regret"]
+      offer: ["offer", "pleased to extend"]
+
+  - name: BreezyHR
+    sender_domains: [breezy.hr, mail.breezy.hr, app.breezy.hr]
+    subject_patterns: ["application", "interview", "your application", "applied"]
+    status_signals:
+      shortlisted: ["shortlisted", "next stage"]
+      interview_scheduled: ["interview"]
+      rejected: ["not selected", "regret", "not moving forward"]
+
+  - name: Snaphunt
+    sender_domains: [snaphunt.com, mail.snaphunt.com]
+    subject_patterns: ["application", "applied", "shortlisted", "interview", "profile"]
+    status_signals:
+      shortlisted: ["shortlisted", "selected", "interested in your profile"]
+      interview_scheduled: ["interview"]
+      rejected: ["regret", "not selected", "not shortlisted"]
+
+  - name: Foundit
+    sender_domains: [foundit.in, monsterindia.com, monster.com, mail.foundit.in]
+    subject_patterns: ["application", "applied", "shortlisted", "profile", "job"]
+    status_signals:
+      shortlisted: ["shortlisted", "profile selected", "selected"]
+      interview_scheduled: ["interview"]
+      rejected: ["regret", "not selected"]
+
+  - name: TimesJobs
+    sender_domains: [timesjobs.com, mail.timesjobs.com]
+    subject_patterns: ["application", "applied", "shortlisted", "interview", "profile"]
+    status_signals:
+      shortlisted: ["shortlisted", "selected"]
+      interview_scheduled: ["interview"]
+      rejected: ["regret", "not selected"]
+
   - name: Direct/Unknown
     sender_domains: []
     # These patterns are the ONLY filter for Direct/Unknown (no domain anchor).
@@ -189,19 +251,25 @@ portals:
       - "applied for the position"
       - "application received"
       - "thank you for applying"
+      - "thank you for your application"
       - "thanks for applying"
+      - "thanks for your application"
       - "interview request"
       - "interview scheduled"
       - "schedule an interview"
       - "invite you for an interview"
       - "we reviewed your"
       - "we have reviewed your"
+      - "we've received your"
+      - "we received your application"
       - "job offer"
       - "offer letter"
       - "regarding your application"
       - "regarding your candidature"
       - "shortlisted for the role"
       - "shortlisted for the position"
+      - "you have been shortlisted"
+      - "you've been shortlisted"
       - "your candidature"
       - "application status"
       - "not moving forward with your"
@@ -226,13 +294,36 @@ portals:
       - "we'd like to invite you"
       - "interested in your profile"
       - "we have reviewed your application"
+      - "we are pleased to inform"
+      - "we're pleased to inform"
+      - "we are delighted to inform"
+      - "pleased to inform you"
+      - "you have been selected"
+      - "you've been selected"
+      - "assessment invitation"
+      - "online assessment"
+      - "technical assessment"
+      - "coding challenge"
+      - "coding test"
+      - "congratulations on your application"
+      - "regarding the role"
+      - "regarding the position"
+      - "applied to"
+      - "you applied"
+      - "application confirmation"
+      - "hiring manager"
+      - "your profile"
     status_signals:
-      shortlisted: ["shortlisted", "profile selected", "pleased to inform", "moved forward"]
+      shortlisted: ["shortlisted", "profile selected", "pleased to inform", "moved forward",
+                    "you have been shortlisted", "you've been shortlisted",
+                    "you have been selected", "we are pleased to inform"]
       interview_scheduled: ["interview scheduled", "would like to schedule",
-                            "invite you for an interview", "calendar invite"]
+                            "invite you for an interview", "calendar invite",
+                            "assessment invitation", "online assessment"]
       interview_in_progress: ["following up on your interview", "post interview"]
       offer_negotiation: ["discussing compensation", "negotiation"]
       offer: ["offer letter", "pleased to extend an offer", "formal offer",
               "job offer", "employment offer", "excited to offer"]
       rejected: ["regret to inform", "not selected", "moved forward with other",
-                 "not shortlisted", "unsuccessful", "not moving forward with your"]
+                 "not shortlisted", "unsuccessful", "not moving forward with your",
+                 "not be moving forward", "unable to proceed"]

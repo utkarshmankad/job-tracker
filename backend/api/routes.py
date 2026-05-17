@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict
 from backend.config import DB_PATH
 from backend.db.data_store import ApplicationFilter, DataStore, is_application_stale
 from backend.db.models import Application, ApplicationStatus
+from backend.diagnostics import DiagnosticRunner
 from backend.engine.insights_engine import InsightsEngine
 from backend.engine.status_updater import StatusUpdater
 
@@ -104,6 +105,20 @@ class SystemStatusResponse(BaseModel):
     overall: str  # "operational" | "degraded" | "outage"
     components: list[ComponentStatusResponse]
     stats: dict
+    checked_at: datetime
+
+
+class DiagnosticItemResponse(BaseModel):
+    name: str
+    ok: bool
+    detail: str
+    checked_at: datetime
+
+
+class DiagnosticsResponse(BaseModel):
+    passed: int
+    failed: int
+    results: list[DiagnosticItemResponse]
     checked_at: datetime
 
 
@@ -383,6 +398,15 @@ async def get_poller_status(request: Request) -> PollerStatusResponse:
     )
 
 
+@router.post("/poller/trigger")
+async def trigger_poll(request: Request) -> dict:
+    scheduler = getattr(request.app.state, "poller_scheduler", None)
+    if scheduler is None:
+        raise HTTPException(status_code=503, detail="Poller not running")
+    scheduler.trigger()
+    return {"triggered": True}
+
+
 @router.post("/poller/reauth")
 async def reauth_poller(request: Request) -> dict:
     db: DataStore = request.app.state.db
@@ -436,6 +460,29 @@ async def delete_suppress_rule(id: int, request: Request) -> dict:
 # ------------------------------------------------------------------ #
 
 
+@router.get("/diagnostics", response_model=DiagnosticsResponse)
+async def run_diagnostics(request: Request) -> DiagnosticsResponse:
+    now = datetime.utcnow()
+    runner = DiagnosticRunner()
+    results = runner.run_all()
+    passed = sum(1 for r in results if r.ok)
+    failed = sum(1 for r in results if not r.ok)
+    return DiagnosticsResponse(
+        passed=passed,
+        failed=failed,
+        results=[
+            DiagnosticItemResponse(
+                name=r.name,
+                ok=r.ok,
+                detail=r.detail,
+                checked_at=r.checked_at,
+            )
+            for r in results
+        ],
+        checked_at=now,
+    )
+
+
 @router.get("/status", response_model=SystemStatusResponse)
 async def get_system_status(request: Request) -> SystemStatusResponse:
     db: DataStore = request.app.state.db
@@ -476,7 +523,7 @@ async def get_system_status(request: Request) -> SystemStatusResponse:
     if poller.status in ("AUTH_ERROR", "AUTH_REQUIRED"):
         poller_status = "outage"
         poller_desc = "Authentication error — run: python backend/setup_wizard.py reauth"
-    elif poller.status == "ERROR":
+    elif poller.status == "API_ERROR":
         poller_status = "degraded"
         poller_desc = f"Poller error: {poller.error_message or 'unknown'}"
     elif poller.last_sync_at:
