@@ -354,3 +354,107 @@ def test_suppress_rule_delete_nonexistent_returns_404(seeded_client):
     client, _ = seeded_client
     resp = client.delete(f"{_BASE}/suppress-rules/99999")
     assert resp.status_code == 404
+
+
+# ------------------------------------------------------------------ #
+# Trigger-poll endpoint (new in recent changes)                        #
+# ------------------------------------------------------------------ #
+
+
+def test_trigger_poll_returns_triggered(seeded_client):
+    """POST /poller/trigger must return 200 with triggered=True when scheduler runs."""
+    client, _ = seeded_client
+    resp = client.post(f"{_BASE}/poller/trigger")
+    # Scheduler is started by the lifespan, so it should be present.
+    assert resp.status_code == 200
+    assert resp.json() == {"triggered": True}
+
+
+def test_trigger_poll_no_scheduler_returns_503():
+    """POST /poller/trigger must return 503 when no scheduler is in app state."""
+    from starlette.testclient import TestClient
+    from backend.main import app
+
+    with TestClient(app) as client:
+        # Remove the scheduler from state to simulate missing scheduler.
+        if hasattr(app.state, "poller_scheduler"):
+            del app.state.poller_scheduler
+        resp = client.post(f"{_BASE}/poller/trigger")
+        assert resp.status_code == 503
+        assert "not running" in resp.json()["detail"].lower()
+
+
+# ------------------------------------------------------------------ #
+# System-status endpoint — poller error states                         #
+# ------------------------------------------------------------------ #
+
+
+def test_system_status_api_error_shows_degraded(seeded_client):
+    """When poller.status == 'API_ERROR', /status must report poller as degraded."""
+    client, test_db = seeded_client
+    test_db.update_poller_state(status="API_ERROR", error_message="quota exceeded")
+
+    resp = client.get(f"{_BASE}/status")
+    assert resp.status_code == 200
+    body = resp.json()
+    poller_component = next(
+        (c for c in body["components"] if c["name"] == "Gmail Poller"), None
+    )
+    assert poller_component is not None
+    assert poller_component["status"] == "degraded"
+    assert "quota exceeded" in poller_component["description"]
+
+
+def test_system_status_auth_error_shows_outage(seeded_client):
+    """When poller.status == 'AUTH_ERROR', /status must report poller as outage."""
+    client, test_db = seeded_client
+    test_db.update_poller_state(status="AUTH_ERROR")
+
+    resp = client.get(f"{_BASE}/status")
+    assert resp.status_code == 200
+    body = resp.json()
+    poller_component = next(
+        (c for c in body["components"] if c["name"] == "Gmail Poller"), None
+    )
+    assert poller_component is not None
+    assert poller_component["status"] == "outage"
+
+
+def test_system_status_stale_poll_shows_degraded(seeded_client):
+    """When last_sync_at is >15 min ago, /status must mark poller as degraded."""
+    from datetime import datetime, timedelta
+
+    client, test_db = seeded_client
+    stale_time = datetime.utcnow() - timedelta(minutes=20)
+    test_db.update_poller_state(status="SLEEPING", last_sync_at=stale_time)
+
+    resp = client.get(f"{_BASE}/status")
+    assert resp.status_code == 200
+    body = resp.json()
+    poller_component = next(
+        (c for c in body["components"] if c["name"] == "Gmail Poller"), None
+    )
+    assert poller_component is not None
+    assert poller_component["status"] == "degraded"
+    assert "min ago" in poller_component["description"]
+
+
+# ------------------------------------------------------------------ #
+# Diagnostics endpoint                                                 #
+# ------------------------------------------------------------------ #
+
+
+def test_diagnostics_endpoint_available(seeded_client):
+    """GET /api/v1/diagnostics must return 200 with structured results."""
+    client, _ = seeded_client
+    resp = client.get(f"{_BASE}/diagnostics")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "results" in body
+    assert "passed" in body
+    assert "failed" in body
+    assert isinstance(body["results"], list)
+    for result in body["results"]:
+        assert "name" in result
+        assert "ok" in result
+        assert "detail" in result
