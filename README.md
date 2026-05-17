@@ -1,4 +1,4 @@
-# job-tracker
+# Job Tracker
 
 > *Because copy-pasting job statuses into a spreadsheet at 11 PM is a form of self-harm.*
 
@@ -9,14 +9,23 @@ A fully local Mac app that reads your Gmail, figures out where you are in every 
 ## What it actually does
 
 - **Polls Gmail every 5 minutes** (read-only OAuth, never touches anything) and looks for job-related emails
-- **Parses them with NLP** (spaCy + YAML rules) to extract company names, portals (Greenhouse, Workday, Lever, etc.), and status signals
+- **Parses them with NLP** (spaCy + YAML rules) to extract company names, portals, and status signals — now crash-proof with graceful fallback on malformed emails
 - **Advances application status automatically** through a defined pipeline: `Applied → In Review → Phone Screen → Interview → Offer → Rejected`
 - **Detects duplicates** so one application doesn't show up twelve times because Workday sends a new email every time someone breathes
 - **Surfaces analytics**: Sankey flow diagram, funnel donut, KPI cards, conversion rates
-- **Icon-driven UI** — every action button replaced with a Lucide icon (with proper `aria-label` for accessibility), search has an inline icon, pagination uses chevrons, sort columns show directional arrows
+- **Icon-driven UI** — every action button is a Lucide icon with proper `aria-label`, search has an inline icon, pagination uses chevrons, sort columns show directional arrows
 - **Dark mode** because your eyes matter
-- **Sleep/wake aware** — pauses polling when your Mac is asleep, resumes when it wakes up
+- **Sleep/wake aware** — pauses polling when your Mac is asleep, resumes when it wakes up (macOS `IOPMLib` integration)
+- **Diagnostic utility** — runs a suite of health checks on startup and exposes them at `/api/v1/diagnostics`; catches DB enum-format issues, schema drift, and stale poller state before they become runtime errors
+- **One-shot poll CLI** — run `python -m backend.poller.poll_once_cli` to trigger a single Gmail sync from the terminal (useful for scripting and debugging)
+- **AI agent layer** — `src/ai/` wires up an Anthropic-powered agent with MCP servers for Gmail, Google Drive, and Notion
 - Runs as **launchd daemons** so it's always on in the background
+
+### Supported job portals
+
+Detected automatically from email sender domains and subject-line patterns:
+
+Greenhouse, Workday, Lever, iCIMS, SmartRecruiters, Taleo, Ashby, Workable, BreezyHR, LinkedIn, Indeed, Naukri, Foundit, TimesJobs, Snaphunt — plus a `Direct` catch-all for recruiter emails and a configurable `Unknown` fallback.
 
 ---
 
@@ -29,12 +38,13 @@ A fully local Mac app that reads your Gmail, figures out where you are in every 
 | **FastAPI** | REST API on `jobtracker.localhost:8000` |
 | **SQLModel + SQLite** | ORM + local DB at `~/.job-tracker/applications.db` |
 | **spaCy** (`en_core_web_sm`) | NLP for company/role extraction from email text |
-| **APScheduler** | Runs the Gmail polling loop every 5 minutes |
+| **threading.Event scheduler** | Custom daemon-thread poller (replaced APScheduler) — wakes on timer, Mac wake events, or manual trigger |
 | **google-api-python-client** | Gmail API (read-only) |
 | **structlog** | Structured JSON logging |
 | **tenacity** | Retry logic with exponential backoff |
 | **rapidfuzz** | Fuzzy deduplication of company names |
 | **pyobjc-framework-Cocoa** | Hooks into macOS sleep/wake notifications |
+| **anthropic** | AI agent layer via Anthropic API + MCP |
 
 ### Frontend
 | Thing | What it does |
@@ -56,6 +66,7 @@ job-tracker/
 ├── backend/
 │   ├── api/routes.py          # All FastAPI endpoints
 │   ├── config.py              # Every path, port, and constant lives here
+│   ├── diagnostics.py         # DiagnosticRunner — health checks exposed at /api/v1/diagnostics
 │   ├── db/
 │   │   ├── models.py          # SQLModel table definitions (schema source of truth)
 │   │   └── data_store.py      # All DB access — nothing talks to SQLite directly
@@ -64,23 +75,39 @@ job-tracker/
 │   │   ├── insights_engine.py # Analytics computations
 │   │   └── duplicate_detector.py
 │   ├── parser/
-│   │   ├── email_parser.py    # NLP-based email parsing
+│   │   ├── email_parser.py    # NLP-based email parsing (crash-proof)
 │   │   ├── status_signals.py  # Pattern matching for status extraction
 │   │   └── portal_rules.yaml  # Edit this to add new job portals — no code needed
 │   ├── poller/
 │   │   ├── gmail_poller.py    # Gmail API polling
-│   │   ├── scheduler.py       # APScheduler setup
+│   │   ├── scheduler.py       # Custom threading.Event-based scheduler
+│   │   ├── poll_once_cli.py   # One-shot poll CLI: python -m backend.poller.poll_once_cli
+│   │   ├── error_retry.py     # AuthError, StaleHistoryError, retry helpers
 │   │   └── sleep_watcher.py   # macOS sleep/wake integration
+│   ├── main.py                # FastAPI app + lifespan (starts scheduler, exposes state)
 │   └── setup_wizard.py        # One-time OAuth + launchd setup
-├── frontend/src/
-│   ├── components/            # ApplicationsTable, AnalyticsPanel, Filters, etc.
-│   └── contexts/              # ThemeContext (dark mode)
+├── frontend/
+│   ├── public/favicon.svg     # Custom briefcase+checkmark logo
+│   └── src/
+│       ├── components/        # ApplicationsTable, AnalyticsPanel, StatusPage, Filters, etc.
+│       └── contexts/          # ThemeContext (dark mode)
+├── src/ai/
+│   ├── agent.py               # Anthropic-powered agent entry point
+│   ├── mcp_config.py          # MCP server wiring (Gmail, Google Drive, Notion)
+│   ├── prompts.py             # System prompts
+│   └── exceptions.py          # Agent-specific exception types
 ├── tests/
-│   ├── unit/                  # Parser, engine, poller unit tests
-│   ├── integration/           # API route tests
+│   ├── unit/                  # 9 modules, 167 tests
+│   │   ├── test_diagnostics.py
+│   │   ├── test_email_parser.py
+│   │   ├── test_status_updater.py
+│   │   ├── test_insights_engine.py
+│   │   ├── test_poll_once_cli.py
+│   │   └── ...
+│   ├── integration/           # 33 route tests covering all API endpoints
+│   │   └── test_routes.py
 │   └── e2e/                   # Playwright end-to-end tests
-├── start.sh                   # Quick launcher for both services
-└── portal_rules.yaml          # User-editable portal detection rules
+└── start.sh                   # Quick launcher for both services
 ```
 
 ---
@@ -119,7 +146,7 @@ You need a Gmail API credential. This is free and never expires after you do it 
 4. **APIs & Services → Credentials** → Create → OAuth 2.0 Client ID → Desktop app → Download JSON
 5. Move it into place:
    ```bash
-   mv ~/Downloads/client_secret_*.json ~/Codes/job-tracker/.job-tracker/client_secret.json
+   mv ~/Downloads/client_secret_*.json ~/.job-tracker/client_secret.json
    ```
 
 ### 3. Run the setup wizard
@@ -147,7 +174,9 @@ cd frontend && npm run dev
 
 Open [http://jobtracker.localhost:5173](http://jobtracker.localhost:5173) — you're in.
 
-### Useful commands
+---
+
+## Useful commands
 
 ```bash
 # Stop/start the background daemons
@@ -159,21 +188,28 @@ launchctl start com.jobtracker.poller
 # Re-authenticate if your OAuth token expires
 python backend/setup_wizard.py reauth
 
+# Trigger a one-shot Gmail poll from the terminal
+python -m backend.poller.poll_once_cli
+
+# Run diagnostics to check DB health, enum format, and poller state
+python -m backend.diagnostics
+# Or hit the API endpoint:
+curl http://jobtracker.localhost:8000/api/v1/diagnostics | jq
+
 # Watch the logs
 tail -f ~/.job-tracker/logs/poller.log
 tail -f ~/.job-tracker/logs/api_error.log
 
-# Run the backend test suite
-pytest tests/ -v
+# Run the test suite
+pytest tests/ -v --ignore=tests/e2e        # unit + integration (200 tests)
+pytest tests/e2e/ -v                       # Playwright end-to-end
 
-# Run the frontend test suite
-cd frontend && npm test
+# Coverage
+pytest tests/ --cov=backend --ignore=tests/e2e
 
-# Lint and format
+# Lint, format, type check
 ruff check backend/ tests/
 ruff format backend/ tests/
-
-# Type check
 mypy backend/
 ```
 
@@ -191,7 +227,36 @@ Don't touch Python — just edit `backend/parser/portal_rules.yaml`. Each portal
     rejected: ["not moving forward", "decided to pursue other candidates"]
 ```
 
-Add your portal, restart the poller, done.
+Add your portal, restart the poller (`launchctl stop/start com.jobtracker.poller`), done.
+
+---
+
+## Diagnostic endpoint
+
+`GET /api/v1/diagnostics` returns a JSON report of backend health:
+
+```json
+{
+  "passed": 5,
+  "failed": 0,
+  "checked_at": "2026-05-18T01:00:00",
+  "results": [
+    { "name": "db_file",        "ok": true,  "detail": "Exists (2.4 MB)" },
+    { "name": "db_connectivity","ok": true,  "detail": "Connected" },
+    { "name": "schema_tables",  "ok": true,  "detail": "All tables present" },
+    { "name": "enum_values",    "ok": true,  "detail": "3 distinct values, all valid" },
+    { "name": "poller_state",   "ok": true,  "detail": "SLEEPING, last sync 2 min ago" }
+  ]
+}
+```
+
+The `enum_values` check is the critical one: it detects old databases that stored enum member names (`"APPLIED"`) instead of values (`"Applied"`) — a format mismatch that causes `LookupError` on every read after the SQLAlchemy migration.
+
+You can also manually trigger a poll without waiting for the 5-minute interval:
+
+```bash
+curl -X POST http://jobtracker.localhost:8000/api/v1/poller/trigger
+```
 
 ---
 
@@ -220,7 +285,7 @@ git clone https://github.com/<you>/job-tracker.git
 git checkout -b feat/your-feature-name
 
 # 3. Write tests first if you're touching parsing or status logic
-pytest tests/ -v   # should be green before and after
+pytest tests/ -v --ignore=tests/e2e   # green before and after
 
 # 4. Lint passes
 ruff check backend/ tests/ && mypy backend/
@@ -231,10 +296,11 @@ ruff check backend/ tests/ && mypy backend/
 ### Good first contributions
 
 - Add portal rules to `portal_rules.yaml` for portals not currently detected
-- Improve NLP extraction for edge-case company names
-- Write tests for uncovered parser paths (check coverage with `pytest --cov=backend`)
+- Improve NLP extraction for edge-case company names (especially multi-word Indian company names)
+- Write tests for uncovered parser paths (`pytest --cov=backend --ignore=tests/e2e`)
 - Frontend: add keyboard shortcuts to the applications table
-- Frontend: mobile-responsive layout (it's currently desktop-only)
+- Frontend: mobile-responsive layout (currently desktop-only)
+- Extend the AI agent in `src/ai/` to support natural-language queries over your application history
 
 ---
 
@@ -242,7 +308,9 @@ ruff check backend/ tests/ && mypy backend/
 
 This is intentionally a local-only tool. No backend cloud sync, no user accounts, no analytics phoning home. Your job search data is nobody else's business.
 
-The backend follows strict separation of concerns enforced by convention (see `CLAUDE.md` for the full rules). If you're adding a feature and find yourself wanting to bypass one of the DataStore/StatusUpdater/GmailPoller boundaries — don't. Add a method to the appropriate class instead.
+The backend follows strict separation of concerns enforced by convention (see `CLAUDE.md` for the full ruleset). If you're adding a feature and find yourself wanting to bypass one of the DataStore/StatusUpdater/GmailPoller boundaries — don't. Add a method to the appropriate class instead.
+
+The poller runs on a plain `threading.Event` loop (not APScheduler) so it can be cleanly started and stopped inside the FastAPI lifespan, manually triggered via the API, and woken by macOS sleep/wake events — all without external dependencies.
 
 ---
 
