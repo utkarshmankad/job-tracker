@@ -31,14 +31,6 @@ portals:
       interview_scheduled: ["interview"]
       rejected: ["not selected", "regret"]
 
-  - name: Instahire
-    sender_domains: [instahire.in, mail.instahire.in]
-    subject_patterns: ["application", "profile", "job"]
-    status_signals:
-      shortlisted: ["shortlisted", "selected"]
-      interview_scheduled: ["interview"]
-      rejected: ["regret", "not selected"]
-
   - name: Wellfound
     sender_domains: [wellfound.com, angel.co, mail.wellfound.com]
     subject_patterns: ["application", "intro request", "applied"]
