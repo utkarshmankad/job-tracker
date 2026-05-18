@@ -22,7 +22,7 @@ function SortIcon({ column }) {
     return <ArrowUp size={12} className="inline ml-1 text-blue-500" aria-hidden="true" />;
   if (column.getIsSorted() === "desc")
     return <ArrowDown size={12} className="inline ml-1 text-blue-500" aria-hidden="true" />;
-  return <ChevronsUpDown size={12} className="inline ml-1 opacity-30" aria-hidden="true" />;
+  return <ChevronsUpDown size={12} className="inline ml-1 opacity-50" aria-hidden="true" />;
 }
 
 export default function ApplicationsTable({ filters, onSelectId }) {
@@ -83,7 +83,6 @@ export default function ApplicationsTable({ filters, onSelectId }) {
       {
         accessorKey: "is_stale",
         header: "Stale",
-        enableSorting: false,
         cell: (info) =>
           info.getValue() ? (
             <span title="Stale — no update in 14 days">⚠️</span>
