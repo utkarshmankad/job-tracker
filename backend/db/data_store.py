@@ -160,6 +160,10 @@ class DataStore:
             app = session.get(Application, id)
             if app is None:
                 return False
+            # Delete status history rows first; the FK is NOT NULL so SQLAlchemy
+            # cannot null them out via its default orphan strategy.
+            for row in session.exec(select(StatusHistory).where(StatusHistory.application_id == id)).all():
+                session.delete(row)
             session.delete(app)
             session.commit()
             return True

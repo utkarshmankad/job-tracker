@@ -85,7 +85,7 @@ class EmailParser:
         )
 
     def parse(self, email: RawEmail, suppress_rules: list[SuppressRule]) -> ParsedApplication | None:
-        if self._matches_suppress_rule(email.sender, email.subject, suppress_rules):
+        if self._matches_suppress_rule(email.sender, email.subject, suppress_rules, email.snippet):
             email.body_text = None
             return None
 
@@ -455,17 +455,19 @@ class EmailParser:
         return None
 
     def _matches_suppress_rule(
-        self, sender: str, subject: str, rules: list[SuppressRule]
+        self, sender: str, subject: str, rules: list[SuppressRule], snippet: str = ""
     ) -> bool:
         sender_lower = sender.lower()
         subject_lower = subject.lower()
+        snippet_lower = snippet.lower()
         for rule in rules:
             try:
                 if not re.search(rule.sender_pattern.lower(), sender_lower):
                     continue
                 if rule.subject_pattern is None:
                     return True
-                if re.search(rule.subject_pattern.lower(), subject_lower):
+                pattern = rule.subject_pattern.lower()
+                if re.search(pattern, subject_lower) or re.search(pattern, snippet_lower):
                     return True
             except re.error:
                 log.warning(
