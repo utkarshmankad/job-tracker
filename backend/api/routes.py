@@ -8,6 +8,7 @@ import re
 from datetime import date, datetime
 from typing import Optional
 
+import structlog
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
@@ -18,6 +19,8 @@ from backend.db.models import Application, ApplicationStatus
 from backend.diagnostics import DiagnosticRunner
 from backend.engine.insights_engine import InsightsEngine
 from backend.engine.status_updater import StatusUpdater
+
+log = structlog.get_logger(__name__)
 
 router = APIRouter()
 
@@ -120,6 +123,12 @@ class DiagnosticsResponse(BaseModel):
     failed: int
     results: list[DiagnosticItemResponse]
     checked_at: datetime
+
+
+class ReextractResponse(BaseModel):
+    total: int
+    updated: int
+    skipped: int
 
 
 class SuppressRuleResponse(BaseModel):
@@ -288,6 +297,44 @@ async def export_applications(
     import json as _json
     payload = _json.dumps([_to_response(a).model_dump(mode="json") for a in active])
     return StreamingResponse(iter([payload]), media_type="application/json")
+
+
+# NOTE: /applications/reextract must be registered before /applications/{id}
+# so that "reextract" is not captured as an integer id.
+@router.post("/applications/reextract", response_model=ReextractResponse)
+def reextract_missing_fields(request: Request) -> ReextractResponse:
+    db: DataStore = request.app.state.db
+    scheduler = getattr(request.app.state, "poller_scheduler", None)
+    if scheduler is None:
+        raise HTTPException(status_code=503, detail="Poller not running")
+    poller = scheduler.poller
+    if poller.service is None:
+        raise HTTPException(status_code=503, detail="Gmail not authenticated — run setup_wizard.py reauth")
+
+    apps = db.get_applications_missing_fields()
+    updated = 0
+    skipped = 0
+
+    for app in apps:
+        try:
+            company, role = poller.reextract_fields(app)
+            changed = False
+            if company is not None and app.company is None:
+                app.company = company
+                changed = True
+            if role is not None and app.role is None:
+                app.role = role
+                changed = True
+            if changed:
+                db.upsert_application(app)
+                updated += 1
+            else:
+                skipped += 1
+        except Exception as exc:
+            log.warning("reextract_failed", app_id=app.id, error=str(exc))
+            skipped += 1
+
+    return ReextractResponse(total=len(apps), updated=updated, skipped=skipped)
 
 
 @router.get("/applications/{id}", response_model=ApplicationDetailResponse)

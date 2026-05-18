@@ -140,6 +140,21 @@ class DataStore:
             )
             return session.exec(stmt).first()
 
+    def get_applications_missing_fields(self) -> list[Application]:
+        """Return non-false-positive applications where company or role is NULL."""
+        with Session(self._engine, expire_on_commit=False) as session:
+            stmt = (
+                select(Application)
+                .where(Application.is_false_positive == False)  # noqa: E712
+                .where(
+                    or_(
+                        Application.company == None,  # noqa: E711
+                        Application.role == None,  # noqa: E711
+                    )
+                )
+            )
+            return list(session.exec(stmt).all())
+
     def delete_application(self, id: int) -> bool:
         with Session(self._engine) as session:
             app = session.get(Application, id)

@@ -181,6 +181,40 @@ class GmailPoller:
             self.status = PollerStatus.API_ERROR
             raise
 
+    def reextract_fields(self, app: "Application") -> tuple[str | None, str | None]:
+        """Re-fetch an application's first thread from Gmail and re-run field extraction."""
+        from backend.db.models import Application  # local import to avoid module-level cycle
+        thread_ids_raw: list[str] = json.loads(app.thread_ids)
+        if not thread_ids_raw:
+            return None, None
+
+        try:
+            thread = self.service.users().threads().get(
+                userId="me",
+                id=thread_ids_raw[0],
+                format="metadata",
+                metadataHeaders=["From", "Subject", "Date"],
+            ).execute()
+        except HttpError as exc:
+            log.warning("reextract_thread_fetch_failed", thread_id=thread_ids_raw[0], error=str(exc))
+            return None, None
+
+        messages = thread.get("messages", [])
+        if not messages:
+            return None, None
+
+        msg = messages[0]
+        raw_email = self._build_raw_email(msg)
+        body = self._fetch_body_text(msg["id"])
+
+        return self._parser.extract_fields(
+            sender=raw_email.sender,
+            subject=raw_email.subject,
+            snippet=raw_email.snippet,
+            body_text=body or None,
+            source_portal=app.source_portal,
+        )
+
     def _fetch_backfill(self) -> tuple[list[tuple[str, str]], str | None]:
         q = f"newer_than:{BACKFILL_DAYS}d"
         message_ids: list[tuple[str, str]] = []

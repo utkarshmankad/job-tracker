@@ -32,6 +32,10 @@ class PollerScheduler:
         self._wake_event = threading.Event()
         self._thread: threading.Thread | None = None
 
+    @property
+    def poller(self) -> GmailPoller:
+        return self._poller
+
     def start(self) -> None:
         self._stop_event.clear()
         self._wake_event.set()  # immediate first poll

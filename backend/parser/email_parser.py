@@ -188,6 +188,39 @@ class EmailParser:
             is_classification_confident=is_confident,
         )
 
+    def extract_fields(
+        self,
+        sender: str,
+        subject: str,
+        snippet: str,
+        body_text: str | None,
+        source_portal: str,
+    ) -> tuple[str | None, str | None]:
+        """Run company and role extraction on email content. Used for retroactive backfill."""
+        sender_domain = extract_sender_domain(sender)
+        combined = f"{snippet} {body_text or ''}".strip()
+
+        company: str | None = None
+        role: str | None = None
+
+        if self._llm is not None:
+            llm_result = self._llm.extract(
+                sender=sender,
+                subject=subject,
+                snippet=snippet,
+                body_text=body_text,
+            )
+            if llm_result is not None:
+                company = llm_result.company
+                role = llm_result.role
+
+        if company is None:
+            company = self._extract_company(subject, combined, source_portal, sender_domain)
+        if role is None:
+            role = self._extract_role(subject, combined[:1000])
+
+        return company, role
+
     def refine_company(self, extra_text: str, portal_name: str, sender_domain: str) -> str | None:
         """Re-run company extraction on arbitrary text (e.g. email body fetched lazily)."""
         return self._extract_company("", extra_text[:3000], portal_name, sender_domain)
