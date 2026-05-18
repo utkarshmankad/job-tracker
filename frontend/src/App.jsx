@@ -129,6 +129,10 @@ export default function App() {
           <ApplicationDetail
             applicationId={selectedId}
             onClose={() => setSelectedId(null)}
+            onDelete={() => {
+              setSelectedId(null);
+              setFilters((f) => ({ ...f }));
+            }}
           />
         )}
         {showAddForm && (

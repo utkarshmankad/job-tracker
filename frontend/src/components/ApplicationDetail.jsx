@@ -1,15 +1,17 @@
 import { useState, useEffect } from "react";
-import { X, ExternalLink } from "lucide-react";
+import { X, ExternalLink, Mail, Trash2 } from "lucide-react";
 import { api } from "../api/client";
 import { STATUS_OPTIONS, STATUS_COLORS } from "../utils/constants";
 import { formatDate } from "../utils/formatters";
 
-export default function ApplicationDetail({ applicationId, onClose }) {
+export default function ApplicationDetail({ applicationId, onClose, onDelete }) {
   const [app, setApp] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [statusEdit, setStatusEdit] = useState("");
   const [saving, setSaving] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   const fetchApp = (signal) => {
     setLoading(true);
@@ -32,6 +34,18 @@ export default function ApplicationDetail({ applicationId, onClose }) {
     return () => controller.abort();
   }, [applicationId]);
 
+  const handleDelete = async () => {
+    setDeleting(true);
+    try {
+      await api.deleteApplication(applicationId);
+      onDelete?.();
+    } catch (e) {
+      setError(e.message);
+      setDeleting(false);
+      setConfirmDelete(false);
+    }
+  };
+
   const handleStatusChange = async (newStatus) => {
     setStatusEdit(newStatus);
     setSaving(true);
@@ -52,13 +66,61 @@ export default function ApplicationDetail({ applicationId, onClose }) {
           <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
             Application Detail
           </h2>
-          <button
-            onClick={onClose}
-            aria-label="Close"
-            className="p-1 rounded-md text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
-          >
-            <X size={18} aria-hidden="true" />
-          </button>
+          <div className="flex items-center gap-2">
+            {app && (() => {
+              const ids = JSON.parse(app.thread_ids || "[]");
+              return ids[0] ? (
+                <a
+                  href={`https://mail.google.com/mail/u/0/#all/${ids[0]}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label="View original email in Gmail"
+                  title="View in Gmail"
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/30 border border-blue-200 dark:border-blue-800 transition-colors"
+                >
+                  <Mail size={13} aria-hidden="true" />
+                  View in Gmail
+                </a>
+              ) : null;
+            })()}
+
+            {confirmDelete ? (
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs text-gray-500 dark:text-gray-400">Delete?</span>
+                <button
+                  onClick={handleDelete}
+                  disabled={deleting}
+                  className="px-2.5 py-1 rounded-md text-xs font-medium bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 transition-colors"
+                >
+                  {deleting ? "Deleting…" : "Confirm"}
+                </button>
+                <button
+                  onClick={() => setConfirmDelete(false)}
+                  disabled={deleting}
+                  className="px-2.5 py-1 rounded-md text-xs font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => setConfirmDelete(true)}
+                aria-label="Delete application"
+                title="Delete application"
+                className="p-1 rounded-md text-gray-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+              >
+                <Trash2 size={16} aria-hidden="true" />
+              </button>
+            )}
+
+            <button
+              onClick={onClose}
+              aria-label="Close"
+              className="p-1 rounded-md text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+            >
+              <X size={18} aria-hidden="true" />
+            </button>
+          </div>
         </div>
 
         <div className="px-6 py-4">
