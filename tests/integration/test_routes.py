@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from unittest.mock import MagicMock
 import pytest
 from starlette.testclient import TestClient
 from sqlmodel import Session
@@ -442,6 +443,94 @@ def test_system_status_stale_poll_shows_degraded(seeded_client):
 # ------------------------------------------------------------------ #
 # Diagnostics endpoint                                                 #
 # ------------------------------------------------------------------ #
+
+
+# ------------------------------------------------------------------ #
+# Delete — cascade, suppress-on-delete, and Gmail-unavailable paths    #
+# ------------------------------------------------------------------ #
+
+
+def test_delete_application_with_status_history(seeded_client):
+    """DELETE must cascade through status history rows without IntegrityError."""
+    client, _ = seeded_client
+    created = _create_app(client)
+    app_id = created["id"]
+
+    # Generate status history via a manual patch
+    client.patch(
+        f"{_BASE}/applications/{app_id}",
+        json={"current_status": "Resume Shortlisted"},
+    )
+    detail = client.get(f"{_BASE}/applications/{app_id}").json()
+    assert len(detail["status_history"]) > 0, "precondition: history must exist"
+
+    resp = client.delete(f"{_BASE}/applications/{app_id}")
+    assert resp.status_code == 200
+    assert resp.json() == {"deleted": True}
+    assert client.get(f"{_BASE}/applications/{app_id}").status_code == 404
+
+
+def test_delete_adds_suppress_rule_for_sender_domain(seeded_client):
+    """DELETE must add a sender-domain suppress rule when Gmail service is available."""
+    client, test_db = seeded_client
+
+    # Create application directly so thread_ids is non-empty
+    saved = test_db.upsert_application(Application(
+        company="Acme Corp",
+        role="Engineer",
+        source_portal="Direct/Unknown",
+        applied_date=datetime(2024, 6, 1),
+        thread_ids='["thread-abc123"]',
+    ))
+    app_id = saved.id
+
+    # Mock Gmail service returning a thread with a known sender
+    mock_service = MagicMock()
+    mock_service.users.return_value.threads.return_value.get.return_value.execute.return_value = {
+        "messages": [{
+            "payload": {
+                "headers": [{"name": "From", "value": "recruiter@acme-hiring.com"}]
+            }
+        }]
+    }
+
+    real_poller = app.state.poller_scheduler.poller
+    original_service = real_poller.service
+    real_poller.service = mock_service
+    try:
+        resp = client.delete(f"{_BASE}/applications/{app_id}")
+        assert resp.status_code == 200
+        assert resp.json() == {"deleted": True}
+        assert client.get(f"{_BASE}/applications/{app_id}").status_code == 404
+
+        rules = client.get(f"{_BASE}/suppress-rules").json()
+        patterns = [r["sender_pattern"] for r in rules]
+        assert any("acme\\-hiring\\.com" in p or "acme-hiring" in p for p in patterns), (
+            f"Expected acme-hiring.com suppress rule, got: {patterns}"
+        )
+    finally:
+        real_poller.service = original_service
+
+
+def test_delete_without_gmail_still_succeeds(seeded_client):
+    """DELETE must succeed even when Gmail service is not authenticated (no suppress rule added)."""
+    client, _ = seeded_client
+    created = _create_app(client)
+    app_id = created["id"]
+
+    real_poller = app.state.poller_scheduler.poller
+    original_service = real_poller.service
+    real_poller.service = None  # simulate unauthenticated Gmail
+    try:
+        resp = client.delete(f"{_BASE}/applications/{app_id}")
+        assert resp.status_code == 200
+        assert resp.json() == {"deleted": True}
+        assert client.get(f"{_BASE}/applications/{app_id}").status_code == 404
+
+        rules = client.get(f"{_BASE}/suppress-rules").json()
+        assert rules == [], "No suppress rule should be added when Gmail is unavailable"
+    finally:
+        real_poller.service = original_service
 
 
 def test_diagnostics_endpoint_available(seeded_client):

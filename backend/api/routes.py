@@ -384,12 +384,56 @@ async def patch_application(
 
 
 @router.delete("/applications/{id}")
-async def delete_application(id: int, request: Request) -> dict:
+def delete_application(id: int, request: Request) -> dict:
     db: DataStore = request.app.state.db
-    deleted = db.delete_application(id)
-    if not deleted:
+    application = db.get_application(id)
+    if application is None:
         raise HTTPException(status_code=404, detail="Application not found")
+    _suppress_sender_on_delete(application, db, request)
+    db.delete_application(id)
     return {"deleted": True}
+
+
+def _suppress_sender_on_delete(
+    application: Application, db: DataStore, request: Request
+) -> None:
+    """Re-fetch the application's first Gmail thread and add a sender-domain suppress rule."""
+    import json as _json
+    import re as _re
+    from backend.parser.email_parser import extract_sender_domain
+
+    scheduler = getattr(request.app.state, "poller_scheduler", None)
+    if scheduler is None:
+        return
+    poller = scheduler.poller
+    if poller.service is None:
+        return
+    try:
+        thread_ids = _json.loads(application.thread_ids or "[]")
+        if not thread_ids:
+            return
+        thread = poller.service.users().threads().get(
+            userId="me", id=thread_ids[0],
+            format="metadata", metadataHeaders=["From"],
+        ).execute()
+        messages = thread.get("messages", [])
+        if not messages:
+            return
+        headers = {
+            h["name"]: h["value"]
+            for h in messages[0].get("payload", {}).get("headers", [])
+        }
+        sender = headers.get("From", "")
+        domain = extract_sender_domain(sender)
+        if not domain:
+            return
+        pattern = _re.escape(domain)
+        existing = {r.sender_pattern for r in db.get_suppress_rules()}
+        if pattern not in existing:
+            db.add_suppress_rule(sender_pattern=pattern)
+            log.info("suppress_rule_added_on_delete", app_id=application.id, domain=domain)
+    except Exception as exc:
+        log.warning("suppress_on_delete_failed", app_id=application.id, error=str(exc))
 
 
 # ------------------------------------------------------------------ #
