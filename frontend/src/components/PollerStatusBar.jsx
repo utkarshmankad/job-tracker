@@ -1,12 +1,14 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
+import { RefreshCw } from "lucide-react";
 import { api } from "../api/client";
 import { formatTimeDiff } from "../utils/formatters";
 
 export default function PollerStatusBar() {
   const [pollerData, setPollerData] = useState(null);
   const [fetchError, setFetchError] = useState(false);
+  const [triggering, setTriggering] = useState(false);
 
-  const fetchStatus = async () => {
+  const fetchStatus = useCallback(async () => {
     try {
       const data = await api.getPollerStatus();
       setPollerData(data);
@@ -14,13 +16,30 @@ export default function PollerStatusBar() {
     } catch {
       setFetchError(true);
     }
-  };
+  }, []);
 
   useEffect(() => {
     fetchStatus();
     const interval = setInterval(fetchStatus, 30_000);
     return () => clearInterval(interval);
-  }, []);
+  }, [fetchStatus]);
+
+  const handleTrigger = async () => {
+    if (triggering) return;
+    setTriggering(true);
+    try {
+      await api.triggerPoll();
+      // Poll status a few times until last_sync_at advances
+      for (let i = 0; i < 6; i++) {
+        await new Promise((r) => setTimeout(r, 3_000));
+        await fetchStatus();
+      }
+    } catch {
+      // ignore trigger errors
+    } finally {
+      setTriggering(false);
+    }
+  };
 
   let dot = "bg-orange-400";
   let message = "Poller stopped — check logs";
@@ -32,14 +51,27 @@ export default function PollerStatusBar() {
     } else if (pollerData.status === "RUNNING" || pollerData.last_sync_at) {
       dot = "bg-green-500";
       const lastSync = formatTimeDiff(pollerData.last_sync_at);
-      message = lastSync ? `Last synced: ${lastSync}` : "Syncing…";
+      message = triggering ? "Syncing…" : lastSync ? `Last synced: ${lastSync}` : "Syncing…";
     }
   }
 
   return (
     <div className="bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700 px-4 py-2 flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
       <span className={`inline-block w-2 h-2 rounded-full ${dot}`} />
-      <span>{message}</span>
+      <span className="flex-1">{message}</span>
+      <button
+        onClick={handleTrigger}
+        disabled={triggering}
+        aria-label="Refresh Gmail now"
+        title="Pull Gmail now"
+        className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-40 transition-colors"
+      >
+        <RefreshCw
+          size={14}
+          aria-hidden="true"
+          className={triggering ? "animate-spin" : ""}
+        />
+      </button>
     </div>
   );
 }

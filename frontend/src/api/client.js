@@ -26,6 +26,7 @@ export const api = {
   getFlowData: () => request("/insights/flow"),
 
   getPollerStatus: () => request("/poller/status"),
+  triggerPoll: () => request("/poller/trigger", { method: "POST" }),
   getSystemStatus: () => request("/status"),
 
   listSuppressRules: () => request("/suppress-rules"),
