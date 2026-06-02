@@ -9,7 +9,7 @@ from datetime import date, datetime
 from typing import Optional
 
 import structlog
-from fastapi import APIRouter, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
@@ -19,7 +19,6 @@ from backend.db.models import Application, ApplicationStatus
 from backend.diagnostics import DiagnosticRunner
 from backend.engine.insights_engine import InsightsEngine
 from backend.engine.status_updater import StatusUpdater
-from backend.importer.linkedin_importer import ImportResult, LinkedInImporter, RowResult
 
 log = structlog.get_logger(__name__)
 
@@ -130,35 +129,6 @@ class ReextractResponse(BaseModel):
     total: int
     updated: int
     skipped: int
-
-
-class LinkedInRowResultResponse(BaseModel):
-    action: str
-    company: Optional[str]
-    role: Optional[str]
-    status: str
-    detail: str
-
-
-class LinkedInImportResponse(BaseModel):
-    created: int
-    updated: int
-    skipped: int
-    errors: int
-    warnings: list[str]
-    rows: list[LinkedInRowResultResponse]
-
-
-class LinkedInJsonApp(BaseModel):
-    company: Optional[str] = None
-    role: Optional[str] = None
-    job_url: Optional[str] = None
-    applied_date: Optional[str] = None   # ISO date string from the userscript
-    linkedin_status: str = "Applied"
-
-
-class LinkedInJsonImport(BaseModel):
-    applications: list[LinkedInJsonApp]
 
 
 class SuppressRuleResponse(BaseModel):
@@ -328,97 +298,6 @@ async def export_applications(
     import json as _json
     payload = _json.dumps([_to_response(a).model_dump(mode="json") for a in active])
     return StreamingResponse(iter([payload]), media_type="application/json")
-
-
-# NOTE: /applications/import/linkedin must be registered before /applications/{id}.
-@router.post("/applications/import/linkedin", response_model=LinkedInImportResponse)
-async def import_linkedin_csv(
-    file: UploadFile,
-    request: Request,
-) -> LinkedInImportResponse:
-    """Accept a LinkedIn Jobs CSV export and import it into the database.
-
-    How to obtain the CSV:
-    - Option A (instant): open linkedin.com/jobs-tracker/ → click the export icon
-    - Option B (full export): Settings → Data Privacy → Get a copy of your data
-      → check "Jobs" → wait for download email → extract the ZIP
-    """
-    if not file.filename or not file.filename.lower().endswith(".csv"):
-        raise HTTPException(status_code=400, detail="File must be a .csv")
-    content = await file.read()
-    if len(content) > 10 * 1024 * 1024:  # 10 MB sanity guard
-        raise HTTPException(status_code=413, detail="File too large (max 10 MB)")
-
-    db: DataStore = request.app.state.db
-    importer = LinkedInImporter()
-    rows, warnings = importer.parse_csv(content)
-
-    if not rows and warnings:
-        raise HTTPException(status_code=422, detail="; ".join(warnings))
-
-    result = importer.import_to_db(db, rows)
-    result.warnings = warnings + result.warnings
-
-    log.info(
-        "linkedin_import.done",
-        created=result.created,
-        updated=result.updated,
-        skipped=result.skipped,
-        errors=result.errors,
-    )
-    return LinkedInImportResponse(
-        created=result.created,
-        updated=result.updated,
-        skipped=result.skipped,
-        errors=result.errors,
-        warnings=result.warnings,
-        rows=[
-            LinkedInRowResultResponse(
-                action=r.action,
-                company=r.company,
-                role=r.role,
-                status=r.status,
-                detail=r.detail,
-            )
-            for r in result.rows
-        ],
-    )
-
-
-# Tampermonkey userscript posts JSON here (no multipart needed).
-# Must be registered before /applications/{id} so "import" isn't captured as an id.
-@router.post("/applications/import/linkedin/json", response_model=LinkedInImportResponse)
-async def import_linkedin_json(
-    body: LinkedInJsonImport, request: Request
-) -> LinkedInImportResponse:
-    """Accept JSON from the Tampermonkey userscript and import into the DB."""
-    db: DataStore = request.app.state.db
-    importer = LinkedInImporter()
-    result = importer.import_from_json(db, [a.model_dump() for a in body.applications])
-    log.info(
-        "linkedin_import_json.done",
-        created=result.created,
-        updated=result.updated,
-        skipped=result.skipped,
-        errors=result.errors,
-    )
-    return LinkedInImportResponse(
-        created=result.created,
-        updated=result.updated,
-        skipped=result.skipped,
-        errors=result.errors,
-        warnings=result.warnings,
-        rows=[
-            LinkedInRowResultResponse(
-                action=r.action,
-                company=r.company,
-                role=r.role,
-                status=r.status,
-                detail=r.detail,
-            )
-            for r in result.rows
-        ],
-    )
 
 
 # NOTE: /applications/reextract must be registered before /applications/{id}

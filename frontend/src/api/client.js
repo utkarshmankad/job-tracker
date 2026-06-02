@@ -30,16 +30,6 @@ export const api = {
   triggerPoll: () => request("/poller/trigger", { method: "POST" }),
   getSystemStatus: () => request("/status"),
 
-  importLinkedIn: (csvFile) => {
-    const form = new FormData();
-    form.append("file", csvFile);
-    return fetch(`${BASE}/applications/import/linkedin`, { method: "POST", body: form })
-      .then(async (res) => {
-        if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
-        return res.json();
-      });
-  },
-
   listSuppressRules: () => request("/suppress-rules"),
   createSuppressRule: (body) =>
     request("/suppress-rules", { method: "POST", body: JSON.stringify(body) }),
