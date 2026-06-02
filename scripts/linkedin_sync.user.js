@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Job Tracker — LinkedIn Sync
 // @namespace    https://github.com/utkarshmankad/job-tracker
-// @version      1.2.0
+// @version      1.3.0
 // @description  Sync LinkedIn Jobs Tracker to your local Job Tracker app
 // @match        https://www.linkedin.com/jobs-tracker*
 // @match        https://www.linkedin.com/jobs/tracker*
@@ -309,7 +309,7 @@ const PANEL_HTML = `
 `;
 
 function createPanel() {
-  // The host sits in the real DOM; its shadow root is invisible to LinkedIn's CSS.
+  console.log('[JobTracker] createPanel() called');
   const host = document.createElement('div');
   host.id = 'jt-host';
   // All positioning is on the host via inline style (never touched by LinkedIn).
@@ -325,6 +325,7 @@ function createPanel() {
   document.body.appendChild(host);
 
   const shadow = host.attachShadow({ mode: 'open' });
+  console.log('[JobTracker] Shadow DOM attached');
 
   const styleEl = document.createElement('style');
   styleEl.textContent = PANEL_CSS;
@@ -333,9 +334,8 @@ function createPanel() {
   const wrapper = document.createElement('div');
   wrapper.innerHTML = PANEL_HTML;
   shadow.appendChild(wrapper);
+  console.log('[JobTracker] Panel HTML injected into shadow root');
 
-  // All queries are against the shadow root — document.querySelector() would
-  // not find elements inside a shadow DOM.
   const $ = sel => shadow.querySelector(sel);
 
   const trigger  = $('#trigger');
@@ -346,6 +346,11 @@ function createPanel() {
   const resultEl = $('#result');
   const scanBtn  = $('#scan-btn');
   const sendBtn  = $('#send-btn');
+  console.log('[JobTracker] scanBtn:', scanBtn, '| sendBtn:', sendBtn);
+  if (!scanBtn || !sendBtn) {
+    console.error('[JobTracker] Could not find scan/send buttons in shadow DOM — aborting.');
+    return;
+  }
 
   let jobs = [];
 
@@ -456,18 +461,30 @@ function isTrackerPage() {
 }
 
 function init() {
-  if (!isTrackerPage()) return;
-  if (document.getElementById('jt-host')) return;
-  const check = setInterval(() => {
-    if (document.querySelector('main, .scaffold-layout__main, #main')) {
-      clearInterval(check);
+  if (!isTrackerPage()) {
+    console.log('[JobTracker] Not on jobs-tracker page, skipping. Current path:', window.location.pathname);
+    return;
+  }
+  if (document.getElementById('jt-host')) {
+    console.log('[JobTracker] Panel already exists, skipping.');
+    return;
+  }
+  console.log('[JobTracker] Detected jobs-tracker page, mounting panel in 2s…');
+
+  // Wait 2 s so LinkedIn's SPA has time to render, then mount regardless
+  // of which specific element LinkedIn is currently using as its root.
+  setTimeout(() => {
+    try {
       createPanel();
+      console.log('[JobTracker] Panel mounted successfully.');
+    } catch (err) {
+      console.error('[JobTracker] createPanel threw:', err);
     }
-  }, 500);
+  }, 2000);
 }
 
 const _push = history.pushState.bind(history);
-history.pushState = function (...args) { _push(...args); setTimeout(init, 800); };
-window.addEventListener('popstate', () => setTimeout(init, 800));
+history.pushState = function (...args) { _push(...args); setTimeout(init, 1000); };
+window.addEventListener('popstate', () => setTimeout(init, 1000));
 
 init();
