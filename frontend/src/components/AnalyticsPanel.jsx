@@ -16,6 +16,7 @@ const NODE_COLORS = {
   "Interview":     "#8b5cf6",
   "Offer / Joined":"#22c55e",
   "Rejected":      "#ef4444",
+  "Withdrawn":     "#f97316",
   "Active":        "#3b82f6",
 };
 
@@ -360,9 +361,10 @@ export default function AnalyticsPanel() {
   return (
     <div className="space-y-6">
       {/* KPI row */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
         <KpiCard label="Total Applications" value={kpis.total} />
         <KpiCard label="Active" value={kpis.active} sub="in progress" />
+        <KpiCard label="Withdrawn" value={kpis.withdrawn ?? 0} sub="self-withdrew" accent="text-orange-500 dark:text-orange-400" />
         <KpiCard label="Interview Rate" value={formatPercent(kpis.interview_rate)} sub="of all applications" />
         <KpiCard label="Offer Rate" value={formatPercent(kpis.offer_rate)} sub="of all applications" />
       </div>

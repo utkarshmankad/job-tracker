@@ -144,7 +144,7 @@ class InsightsEngine:
         if total == 0:
             return {
                 "nodes": [], "links": [], "outcomes": [],
-                "kpis": {"total": 0, "interview_rate": 0.0, "offer_rate": 0.0, "active": 0},
+                "kpis": {"total": 0, "interview_rate": 0.0, "offer_rate": 0.0, "active": 0, "withdrawn": 0},
                 "weekly_activity": [],
                 "insufficient_data": True,
             }
@@ -157,80 +157,92 @@ class InsightsEngine:
             if h.application_id is not None:
                 stages_by_app.setdefault(h.application_id, set()).add(h.to_status)
 
-        # Counters per broad stage
-        rejected_direct = active_applied = 0
-        rejected_post_short = active_short = 0
-        rejected_post_int = active_int = 0
+        # Counters per broad stage — Rejected and Withdrawn tracked separately
+        rejected_direct  = withdrawn_direct  = active_applied = 0
+        rejected_post_short = withdrawn_post_short = active_short = 0
+        rejected_post_int   = withdrawn_post_int   = active_int  = 0
         offered = 0
 
         for app in apps:
             stages = stages_by_app.get(app.id, set()) | {app.current_status.value}
             current = app.current_status.value
-            is_terminal = current in self._TERMINAL_VALUES
+            is_rejected  = current == ApplicationStatus.REJECTED.value
+            is_withdrawn = current == ApplicationStatus.WITHDRAWN.value
+            is_terminal  = is_rejected or is_withdrawn
 
-            ever_offered = bool(stages & self._OFFERED_VALUES)
-            ever_interviewed = bool(stages & self._INTERVIEWED_VALUES)
-            ever_shortlisted = bool(stages & self._SHORTLISTED_VALUES)
+            ever_offered      = bool(stages & self._OFFERED_VALUES)
+            ever_interviewed  = bool(stages & self._INTERVIEWED_VALUES)
+            ever_shortlisted  = bool(stages & self._SHORTLISTED_VALUES)
 
             if ever_offered:
                 offered += 1
 
             if ever_interviewed:
-                if is_terminal:
-                    rejected_post_int += 1
-                elif not ever_offered:
-                    active_int += 1
+                if is_rejected:       rejected_post_int  += 1
+                elif is_withdrawn:    withdrawn_post_int += 1
+                elif not ever_offered: active_int        += 1
             elif ever_shortlisted:
-                if is_terminal:
-                    rejected_post_short += 1
-                else:
-                    active_short += 1
+                if is_rejected:       rejected_post_short  += 1
+                elif is_withdrawn:    withdrawn_post_short += 1
+                else:                 active_short         += 1
             else:
-                if is_terminal:
-                    rejected_direct += 1
-                else:
-                    active_applied += 1
+                if is_rejected:       rejected_direct  += 1
+                elif is_withdrawn:    withdrawn_direct += 1
+                else:                 active_applied   += 1
 
+        total_rejected  = rejected_direct  + rejected_post_short  + rejected_post_int
+        total_withdrawn = withdrawn_direct + withdrawn_post_short + withdrawn_post_int
+        total_active    = active_applied   + active_short         + active_int
+
+        # Apps that ever reached each stage (including those that later withdrew/rejected)
         shortlisted_total = (
-            offered + rejected_post_int + active_int + rejected_post_short + active_short
+            offered
+            + rejected_post_int  + withdrawn_post_int  + active_int
+            + rejected_post_short + withdrawn_post_short + active_short
         )
-        interview_total = offered + rejected_post_int + active_int
-        total_active = active_applied + active_short + active_int
-        total_rejected = rejected_direct + rejected_post_short + rejected_post_int
+        interview_total = offered + rejected_post_int + withdrawn_post_int + active_int
 
         nodes = [
-            {"id": "Applied", "count": total},
-            {"id": "Shortlisted", "count": shortlisted_total},
-            {"id": "Interview", "count": interview_total},
-            {"id": "Offer / Joined", "count": offered},
-            {"id": "Rejected", "count": total_rejected},
-            {"id": "Active", "count": total_active},
+            {"id": "Applied",       "count": total},
+            {"id": "Shortlisted",   "count": shortlisted_total},
+            {"id": "Interview",     "count": interview_total},
+            {"id": "Offer / Joined","count": offered},
+            {"id": "Rejected",      "count": total_rejected},
+            {"id": "Withdrawn",     "count": total_withdrawn},
+            {"id": "Active",        "count": total_active},
         ]
 
         links: list[dict] = []
         if shortlisted_total:
-            links.append({"source": "Applied", "target": "Shortlisted", "value": shortlisted_total})
+            links.append({"source": "Applied",     "target": "Shortlisted",   "value": shortlisted_total})
         if rejected_direct:
-            links.append({"source": "Applied", "target": "Rejected", "value": rejected_direct})
+            links.append({"source": "Applied",     "target": "Rejected",      "value": rejected_direct})
+        if withdrawn_direct:
+            links.append({"source": "Applied",     "target": "Withdrawn",     "value": withdrawn_direct})
         if active_applied:
-            links.append({"source": "Applied", "target": "Active", "value": active_applied})
+            links.append({"source": "Applied",     "target": "Active",        "value": active_applied})
         if interview_total:
-            links.append({"source": "Shortlisted", "target": "Interview", "value": interview_total})
+            links.append({"source": "Shortlisted", "target": "Interview",     "value": interview_total})
         if rejected_post_short:
-            links.append({"source": "Shortlisted", "target": "Rejected", "value": rejected_post_short})
+            links.append({"source": "Shortlisted", "target": "Rejected",      "value": rejected_post_short})
+        if withdrawn_post_short:
+            links.append({"source": "Shortlisted", "target": "Withdrawn",     "value": withdrawn_post_short})
         if active_short:
-            links.append({"source": "Shortlisted", "target": "Active", "value": active_short})
+            links.append({"source": "Shortlisted", "target": "Active",        "value": active_short})
         if offered:
-            links.append({"source": "Interview", "target": "Offer / Joined", "value": offered})
+            links.append({"source": "Interview",   "target": "Offer / Joined","value": offered})
         if rejected_post_int:
-            links.append({"source": "Interview", "target": "Rejected", "value": rejected_post_int})
+            links.append({"source": "Interview",   "target": "Rejected",      "value": rejected_post_int})
+        if withdrawn_post_int:
+            links.append({"source": "Interview",   "target": "Withdrawn",     "value": withdrawn_post_int})
         if active_int:
-            links.append({"source": "Interview", "target": "Active", "value": active_int})
+            links.append({"source": "Interview",   "target": "Active",        "value": active_int})
 
         outcomes = [
-            {"name": "Active", "value": total_active, "color": "#3b82f6"},
-            {"name": "Offer / Joined", "value": offered, "color": "#22c55e"},
-            {"name": "Rejected", "value": total_rejected, "color": "#ef4444"},
+            {"name": "Active",        "value": total_active,    "color": "#3b82f6"},
+            {"name": "Offer / Joined","value": offered,          "color": "#22c55e"},
+            {"name": "Rejected",      "value": total_rejected,  "color": "#ef4444"},
+            {"name": "Withdrawn",     "value": total_withdrawn, "color": "#f97316"},
         ]
 
         return {
@@ -242,6 +254,7 @@ class InsightsEngine:
                 "interview_rate": round(interview_total / total, 4) if total else 0.0,
                 "offer_rate": round(offered / total, 4) if total else 0.0,
                 "active": total_active,
+                "withdrawn": total_withdrawn,
             },
             "weekly_activity": self._weekly_activity(apps),
             "insufficient_data": total < MIN_APPLICATIONS_FOR_INSIGHTS,
