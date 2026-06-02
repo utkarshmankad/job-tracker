@@ -43,18 +43,21 @@ function KpiCard({ label, value, sub, accent }) {
 
 function SankeyChart({ nodes: apiNodes, links: apiLinks }) {
   const containerRef = useRef(null);
-  const [dims, setDims] = useState({ width: 700, height: 340 });
+  // Scale height with node count so small nodes never get clipped.
+  // 72px per node gives comfortable padding; floor at 380, cap at 620.
+  const chartH = Math.min(620, Math.max(380, apiNodes.length * 72));
+  const [dims, setDims] = useState({ width: 700, height: chartH });
 
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
     const ro = new ResizeObserver(([entry]) => {
-      setDims({ width: entry.contentRect.width, height: 340 });
+      setDims({ width: entry.contentRect.width, height: chartH });
     });
     ro.observe(el);
-    setDims({ width: el.clientWidth || 700, height: 340 });
+    setDims({ width: el.clientWidth || 700, height: chartH });
     return () => ro.disconnect();
-  }, []);
+  }, [chartH]);
 
   const { width, height } = dims;
 
@@ -72,8 +75,9 @@ function SankeyChart({ nodes: apiNodes, links: apiLinks }) {
 
   const generator = d3Sankey()
     .nodeWidth(18)
-    .nodePadding(14)
-    .extent([[16, 16], [width - 140, height - 16]]);
+    .nodePadding(18)
+    // Right margin 170 → label text has room; bottom margin 36 → count label never clips.
+    .extent([[16, 16], [width - 170, height - 36]]);
 
   let graph;
   try {
@@ -84,7 +88,7 @@ function SankeyChart({ nodes: apiNodes, links: apiLinks }) {
 
   return (
     <div ref={containerRef} style={{ width: "100%" }}>
-      <svg width={width} height={height}>
+      <svg width={width} height={height} style={{ overflow: "visible" }}>
         {graph.links.map((link, i) => (
           <path
             key={i}

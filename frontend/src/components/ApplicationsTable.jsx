@@ -1,20 +1,16 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import {
   useReactTable,
   getCoreRowModel,
   getSortedRowModel,
-  getPaginationRowModel,
   flexRender,
 } from "@tanstack/react-table";
-import {
-  Eye, ChevronLeft, ChevronRight,
-  ArrowUp, ArrowDown, ChevronsUpDown,
-} from "lucide-react";
+import { Eye, ArrowUp, ArrowDown, ChevronsUpDown } from "lucide-react";
 import { api } from "../api/client";
 import { STATUS_COLORS } from "../utils/constants";
 import { formatDate } from "../utils/formatters";
 
-const PAGE_SIZE = 20;
+const BATCH = 30; // rows revealed per scroll trigger
 
 function SortIcon({ column }) {
   if (!column.getCanSort()) return null;
@@ -30,15 +26,17 @@ export default function ApplicationsTable({ filters, onSelectId }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [sorting, setSorting] = useState([]);
-  const [pageIndex, setPageIndex] = useState(0);
+  const [displayCount, setDisplayCount] = useState(BATCH);
+  const sentinelRef = useRef(null);
 
+  // Fetch all data when filters change; reset scroll position.
   useEffect(() => {
     const params = {
       ...Object.fromEntries(Object.entries(filters).filter(([, v]) => v !== "" && v != null)),
       page_size: 500,
     };
     setLoading(true);
-    setPageIndex(0);
+    setDisplayCount(BATCH);
     api
       .listApplications(params)
       .then((res) => {
@@ -48,6 +46,22 @@ export default function ApplicationsTable({ filters, onSelectId }) {
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
   }, [filters]);
+
+  // Reveal the next batch whenever the sentinel scrolls into view.
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          setDisplayCount((c) => Math.min(c + BATCH, data.length));
+        }
+      },
+      { threshold: 0 }
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [data.length]);
 
   const columns = useMemo(
     () => [
@@ -113,19 +127,18 @@ export default function ApplicationsTable({ filters, onSelectId }) {
   const table = useReactTable({
     data,
     columns,
-    state: { sorting, pagination: { pageIndex, pageSize: PAGE_SIZE } },
-    onSortingChange: setSorting,
-    onPaginationChange: (updater) => {
-      const next = typeof updater === "function"
-        ? updater({ pageIndex, pageSize: PAGE_SIZE })
-        : updater;
-      setPageIndex(next.pageIndex);
+    state: { sorting },
+    onSortingChange: (next) => {
+      setSorting(next);
+      setDisplayCount(BATCH); // reset scroll when sort changes
     },
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
-    getPaginationRowModel: getPaginationRowModel(),
-    manualPagination: false,
   });
+
+  const allRows = table.getRowModel().rows;
+  const visibleRows = allRows.slice(0, displayCount);
+  const hasMore = displayCount < allRows.length;
 
   if (loading)
     return <div className="text-sm text-gray-500 dark:text-gray-400 py-8 text-center">Loading…</div>;
@@ -156,18 +169,15 @@ export default function ApplicationsTable({ filters, onSelectId }) {
           ))}
         </thead>
         <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
-          {table.getRowModel().rows.length === 0 ? (
+          {visibleRows.length === 0 ? (
             <tr>
               <td colSpan={columns.length} className="px-4 py-8 text-center text-gray-400">
                 No applications found.
               </td>
             </tr>
           ) : (
-            table.getRowModel().rows.map((row) => (
-              <tr
-                key={row.id}
-                className="hover:bg-gray-50 dark:hover:bg-gray-800"
-              >
+            visibleRows.map((row) => (
+              <tr key={row.id} className="hover:bg-gray-50 dark:hover:bg-gray-800">
                 {row.getVisibleCells().map((cell, cellIdx) => (
                   <td
                     key={cell.id}
@@ -186,34 +196,16 @@ export default function ApplicationsTable({ filters, onSelectId }) {
         </tbody>
       </table>
 
-      <div className="flex items-center justify-between px-4 py-3 border-t border-gray-200 dark:border-gray-700 text-sm text-gray-600 dark:text-gray-400">
-        <span>
-          Page {table.getState().pagination.pageIndex + 1} of{" "}
-          {Math.max(table.getPageCount(), 1)}
-          {data.length > 0 && (
-            <span className="ml-2 text-gray-400">({data.length} total)</span>
-          )}
-        </span>
-        <div className="flex items-center gap-1">
-          <button
-            onClick={() => table.previousPage()}
-            disabled={!table.getCanPreviousPage()}
-            aria-label="Previous page"
-            title="Previous"
-            className="p-1.5 border border-gray-300 dark:border-gray-600 rounded-md disabled:opacity-40 hover:bg-gray-50 dark:hover:bg-gray-800 dark:text-gray-300 transition-colors"
-          >
-            <ChevronLeft size={16} aria-hidden="true" />
-          </button>
-          <button
-            onClick={() => table.nextPage()}
-            disabled={!table.getCanNextPage()}
-            aria-label="Next page"
-            title="Next"
-            className="p-1.5 border border-gray-300 dark:border-gray-600 rounded-md disabled:opacity-40 hover:bg-gray-50 dark:hover:bg-gray-800 dark:text-gray-300 transition-colors"
-          >
-            <ChevronRight size={16} aria-hidden="true" />
-          </button>
-        </div>
+      {/* Sentinel + footer */}
+      <div
+        ref={sentinelRef}
+        className="px-4 py-3 border-t border-gray-200 dark:border-gray-700 text-xs text-gray-400 dark:text-gray-500 text-center"
+      >
+        {data.length === 0
+          ? null
+          : hasMore
+          ? `Showing ${visibleRows.length} of ${data.length} — scroll for more`
+          : `All ${data.length} application${data.length !== 1 ? "s" : ""} shown`}
       </div>
     </div>
   );
