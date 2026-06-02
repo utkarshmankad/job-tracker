@@ -199,6 +199,50 @@ class LinkedInImporter:
         result = importer.import_to_db(db, rows)
     """
 
+    def import_from_json(self, db: DataStore, apps: list[dict]) -> ImportResult:
+        """Convert raw dicts sent by the Tampermonkey userscript into ParsedRows and import.
+
+        Each dict is expected to have the keys the userscript sends:
+          company, role, job_url, applied_date (ISO-date string or None),
+          linkedin_status (LinkedIn label string).
+        """
+        rows: list[ParsedRow] = []
+        warnings: list[str] = []
+
+        for i, app in enumerate(apps, start=1):
+            try:
+                company = (app.get("company") or "").strip() or None
+                role = (app.get("role") or "").strip() or None
+
+                url_raw = (app.get("job_url") or "").strip()
+                job_url = url_raw if url_raw.startswith("http") else None
+
+                date_raw = (app.get("applied_date") or "").strip()
+                parsed_date = _parse_date(date_raw) if date_raw else None
+                date_defaulted = not bool(parsed_date)
+                if date_defaulted and date_raw:
+                    warnings.append(f"Row {i}: unrecognised date '{date_raw}' — defaulting to today")
+                applied_date = parsed_date or datetime.utcnow()
+
+                status_raw = (app.get("linkedin_status") or "Applied").strip()
+                status = _map_status(status_raw)
+
+                rows.append(ParsedRow(
+                    company=company,
+                    role=role,
+                    job_url=job_url,
+                    applied_date=applied_date,
+                    status=status,
+                    date_defaulted=date_defaulted,
+                    raw=app,
+                ))
+            except Exception as exc:
+                warnings.append(f"Row {i}: parse error — {exc}")
+
+        result = self.import_to_db(db, rows)
+        result.warnings = warnings + result.warnings
+        return result
+
     def parse_csv(self, content: bytes) -> tuple[list[ParsedRow], list[str]]:
         """Decode and parse CSV bytes into ParsedRow objects.
 

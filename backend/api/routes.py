@@ -149,6 +149,18 @@ class LinkedInImportResponse(BaseModel):
     rows: list[LinkedInRowResultResponse]
 
 
+class LinkedInJsonApp(BaseModel):
+    company: Optional[str] = None
+    role: Optional[str] = None
+    job_url: Optional[str] = None
+    applied_date: Optional[str] = None   # ISO date string from the userscript
+    linkedin_status: str = "Applied"
+
+
+class LinkedInJsonImport(BaseModel):
+    applications: list[LinkedInJsonApp]
+
+
 class SuppressRuleResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -349,6 +361,42 @@ async def import_linkedin_csv(
 
     log.info(
         "linkedin_import.done",
+        created=result.created,
+        updated=result.updated,
+        skipped=result.skipped,
+        errors=result.errors,
+    )
+    return LinkedInImportResponse(
+        created=result.created,
+        updated=result.updated,
+        skipped=result.skipped,
+        errors=result.errors,
+        warnings=result.warnings,
+        rows=[
+            LinkedInRowResultResponse(
+                action=r.action,
+                company=r.company,
+                role=r.role,
+                status=r.status,
+                detail=r.detail,
+            )
+            for r in result.rows
+        ],
+    )
+
+
+# Tampermonkey userscript posts JSON here (no multipart needed).
+# Must be registered before /applications/{id} so "import" isn't captured as an id.
+@router.post("/applications/import/linkedin/json", response_model=LinkedInImportResponse)
+async def import_linkedin_json(
+    body: LinkedInJsonImport, request: Request
+) -> LinkedInImportResponse:
+    """Accept JSON from the Tampermonkey userscript and import into the DB."""
+    db: DataStore = request.app.state.db
+    importer = LinkedInImporter()
+    result = importer.import_from_json(db, [a.model_dump() for a in body.applications])
+    log.info(
+        "linkedin_import_json.done",
         created=result.created,
         updated=result.updated,
         skipped=result.skipped,
