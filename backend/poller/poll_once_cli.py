@@ -91,8 +91,10 @@ def poll_once(dry_run: bool = False) -> int:
         sys.exit(1)
 
     elapsed = (datetime.now(timezone.utc) - started_at).total_seconds()
-    log.info("poll_complete", new_applications=count, elapsed_seconds=round(elapsed, 1))
-    print(f"Poll complete — {count} new application(s) processed in {elapsed:.1f}s")
+    # new_applications count comes from _poll_once_locked which already logs it;
+    # this line records the elapsed time for the CLI invocation.
+    log.info("poll_once_cli_complete", new_applications=count, elapsed_seconds=round(elapsed, 1))
+    print(f"Poll complete — {count} new application(s) in {elapsed:.1f}s")
     return count
 
 

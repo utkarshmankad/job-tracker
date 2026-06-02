@@ -1,3 +1,4 @@
+import { useState, useEffect, useRef } from "react";
 import { Search, X } from "lucide-react";
 import { STATUS_OPTIONS, SOURCE_PORTALS } from "../utils/constants";
 
@@ -13,8 +14,28 @@ const inputCls =
   "border border-gray-300 dark:border-gray-600 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100";
 
 export default function Filters({ filters, onChange }) {
+  const [searchDraft, setSearchDraft] = useState(filters.search || "");
+  const timerRef = useRef(null);
+  const onChangeRef = useRef(onChange);
+  const filtersRef = useRef(filters);
+  useEffect(() => { onChangeRef.current = onChange; });
+  useEffect(() => { filtersRef.current = filters; });
+
+  // Sync draft when parent clears all filters
+  useEffect(() => {
+    setSearchDraft(filters.search || "");
+  }, [filters.search]);
+
   const update = (key, value) => onChange({ ...filters, [key]: value });
-  const clear = () => onChange({ ...EMPTY });
+  const clear = () => { setSearchDraft(""); onChange({ ...EMPTY }); };
+
+  const handleSearch = (val) => {
+    setSearchDraft(val);
+    clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => {
+      onChangeRef.current({ ...filtersRef.current, search: val });
+    }, 300);
+  };
 
   return (
     <div className="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700 p-4 mb-4 flex flex-wrap gap-3 items-end">
@@ -29,8 +50,8 @@ export default function Filters({ filters, onChange }) {
           <input
             type="text"
             placeholder="Company or role…"
-            value={filters.search || ""}
-            onChange={(e) => update("search", e.target.value)}
+            value={searchDraft}
+            onChange={(e) => handleSearch(e.target.value)}
             className={`${inputCls} w-44 pl-8`}
           />
         </div>

@@ -96,7 +96,8 @@ class GmailPoller:
 
     def _poll_once_locked(self) -> int:
         suppress_rules = self._db.get_suppress_rules()
-        processed_count = 0
+        new_count = 0
+        update_count = 0
 
         try:
             if self.last_history_id is not None:
@@ -142,8 +143,11 @@ class GmailPoller:
                                     )
                                     if refined_role:
                                         parsed = dataclass_replace(parsed, role=refined_role)
-                        self._updater.process(parsed)
-                        processed_count += 1
+                        _, is_new = self._updater.process(parsed)
+                        if is_new:
+                            new_count += 1
+                        else:
+                            update_count += 1
                     else:
                         self._db.mark_processed(msg_id, "suppressed")
                 except HttpError:
@@ -164,7 +168,12 @@ class GmailPoller:
                 last_sync_at=datetime.now(timezone.utc),
             )
             self.status = PollerStatus.RUNNING
-            return processed_count
+            log.info(
+                "poll_cycle_complete",
+                new_applications=new_count,
+                status_updates=update_count,
+            )
+            return new_count
 
         except HttpError as e:
             if e.resp.status in (401, 403):

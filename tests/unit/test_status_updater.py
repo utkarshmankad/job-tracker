@@ -68,8 +68,9 @@ def test_new_application_created_when_no_existing(tmp_path: Path) -> None:
     db = _make_db(tmp_path)
     updater = _make_updater(db)
 
-    app = updater.process(_make_parsed())
+    app, is_new = updater.process(_make_parsed())
 
+    assert is_new is True
     assert app.id is not None
     assert app.company == "Acme"
     assert app.current_status == ApplicationStatus.APPLIED
@@ -78,7 +79,7 @@ def test_new_application_created_when_no_existing(tmp_path: Path) -> None:
 def test_applied_to_shortlisted_valid(tmp_path: Path) -> None:
     db = _make_db(tmp_path)
     updater = _make_updater(db)
-    app = updater.process(_make_parsed(message_id="msg-001"))
+    app, _ = updater.process(_make_parsed(message_id="msg-001"))
 
     updater._advance_status(app, ApplicationStatus.RESUME_SHORTLISTED, "msg-002")
 
@@ -90,7 +91,7 @@ def test_applied_to_shortlisted_valid(tmp_path: Path) -> None:
 def test_shortlisted_to_interview_valid(tmp_path: Path) -> None:
     db = _make_db(tmp_path)
     updater = _make_updater(db)
-    app = updater.process(_make_parsed())
+    app, _ = updater.process(_make_parsed())
 
     updater._advance_status(app, ApplicationStatus.RESUME_SHORTLISTED, "msg-002")
     app = db.get_application(app.id)
@@ -104,7 +105,7 @@ def test_shortlisted_to_interview_valid(tmp_path: Path) -> None:
 def test_offer_to_applied_blocked(tmp_path: Path) -> None:
     db = _make_db(tmp_path)
     updater = _make_updater(db)
-    app = updater.process(_make_parsed())
+    app, _ = updater.process(_make_parsed())
 
     # Advance to OFFER through valid path
     for signal, msg in [
@@ -128,7 +129,7 @@ def test_offer_to_applied_blocked(tmp_path: Path) -> None:
 def test_manual_override_bypasses_state_machine(tmp_path: Path) -> None:
     db = _make_db(tmp_path)
     updater = _make_updater(db)
-    app = updater.process(_make_parsed())
+    app, _ = updater.process(_make_parsed())
     assert app.current_status == ApplicationStatus.APPLIED
 
     updated = updater.manual_update(app.id, ApplicationStatus.JOINED)
@@ -145,7 +146,7 @@ def test_existing_found_by_thread_id(tmp_path: Path) -> None:
     updater = _make_updater(db)
 
     # Create an application that owns thread-001
-    app = updater.process(_make_parsed(thread_id="thread-001", message_id="msg-001"))
+    app, _ = updater.process(_make_parsed(thread_id="thread-001", message_id="msg-001"))
     assert app.id is not None
 
     # _find_existing with the same thread_id should return the same record
@@ -159,7 +160,7 @@ def test_existing_found_by_thread_id(tmp_path: Path) -> None:
 def test_status_history_written_on_transition(tmp_path: Path) -> None:
     db = _make_db(tmp_path)
     updater = _make_updater(db)
-    app = updater.process(_make_parsed(message_id="msg-001"))
+    app, _ = updater.process(_make_parsed(message_id="msg-001"))
 
     updater._advance_status(app, ApplicationStatus.RESUME_SHORTLISTED, "msg-002")
 
@@ -186,7 +187,7 @@ def test_find_existing_uses_thread_id_lookup(tmp_path: Path) -> None:
     updater = _make_updater(db)
 
     # Create app that owns the thread
-    created = updater.process(_make_parsed(thread_id="t-lookup", message_id="msg-1"))
+    created, _ = updater.process(_make_parsed(thread_id="t-lookup", message_id="msg-1"))
     assert created.id is not None
 
     # _find_existing should find it via find_application_by_thread_id
@@ -225,7 +226,8 @@ def test_process_with_status_signal_creates_and_advances(tmp_path: Path) -> None
         status_signal=ApplicationStatus.RESUME_SHORTLISTED,
     )
 
-    app = updater.process(parsed)
+    app, is_new = updater.process(parsed)
+    assert is_new is True
     assert app.current_status == ApplicationStatus.RESUME_SHORTLISTED
 
 
@@ -234,18 +236,20 @@ def test_process_existing_with_status_signal_advances(tmp_path: Path) -> None:
     updater = _make_updater(db)
 
     # First email creates the app on thread-001
-    app = updater.process(_make_parsed(thread_id="thread-001", message_id="msg-001"))
+    app, is_new = updater.process(_make_parsed(thread_id="thread-001", message_id="msg-001"))
+    assert is_new is True
     assert app.current_status == ApplicationStatus.APPLIED
 
     # Second email on same thread carries a status signal
     updater2 = _make_updater(db)
-    updated = updater2.process(
+    updated, is_new2 = updater2.process(
         _make_parsed(
             thread_id="thread-001",
             message_id="msg-002",
             status_signal=ApplicationStatus.RESUME_SHORTLISTED,
         )
     )
+    assert is_new2 is False
     assert updated.current_status == ApplicationStatus.RESUME_SHORTLISTED
 
 
@@ -261,7 +265,7 @@ def test_invalid_transition_is_silently_ignored(tmp_path: Path) -> None:
     """Backward transitions must not raise — they just log a warning and skip."""
     db = _make_db(tmp_path)
     updater = _make_updater(db)
-    app = updater.process(_make_parsed())
+    app, _ = updater.process(_make_parsed())
 
     # Force-advance to OFFER via valid chain
     for signal, msg in [

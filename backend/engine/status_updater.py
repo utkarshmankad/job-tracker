@@ -63,7 +63,8 @@ class StatusUpdater:
         self._db = db
         self._detector = detector
 
-    def process(self, parsed: ParsedApplication) -> Application:
+    def process(self, parsed: ParsedApplication) -> tuple[Application, bool]:
+        """Process a parsed email. Returns (application, is_new_application)."""
         record = self._find_existing(parsed)
         is_new = record is None
 
@@ -82,9 +83,9 @@ class StatusUpdater:
                 if record is None:
                     raise RuntimeError(f"Application {app_id} vanished after status advance")
 
-        result = "applied" if is_new else ("status_update" if parsed.status_signal else "applied")
+        result = "applied" if is_new else ("status_update" if parsed.status_signal else "thread_merged")
         self._db.mark_processed(parsed.message_id, result)
-        return record
+        return record, is_new
 
     def _find_existing(self, parsed: ParsedApplication) -> Application | None:
         found = self._db.find_application_by_thread_id(parsed.thread_id)

@@ -269,6 +269,120 @@ class InsightsEngine:
         return [{"week": w.isoformat(), "count": counts[w]} for w in weeks]
 
     # ------------------------------------------------------------------ #
+    # Rejection analytics                                                  #
+    # ------------------------------------------------------------------ #
+
+    def rejection_data(self) -> dict:
+        apps = self._fetch_active_apps()
+        total = len(apps)
+
+        if total == 0:
+            return {
+                "total": 0, "rejected": 0, "withdrawn": 0, "resolved": 0,
+                "rejection_rate": 0.0, "withdrawal_rate": 0.0, "non_offer_rate": 0.0,
+                "stage_breakdown": {"rejection": {}, "withdrawal": {}},
+                "portal_breakdown": [],
+                "monthly_trend": [],
+                "insufficient_data": True,
+            }
+
+        n_rejected = sum(1 for a in apps if a.current_status == ApplicationStatus.REJECTED)
+        n_withdrawn = sum(1 for a in apps if a.current_status == ApplicationStatus.WITHDRAWN)
+        n_offered = sum(1 for a in apps if a.current_status in _OFFER_STAGES)
+        n_resolved = n_rejected + n_withdrawn + n_offered
+
+        rejection_rate = round(n_rejected / n_resolved, 4) if n_resolved > 0 else 0.0
+        withdrawal_rate = round(n_withdrawn / total, 4)
+        non_offer_rate = round((n_rejected + n_withdrawn) / n_resolved, 4) if n_resolved > 0 else 0.0
+
+        # Stage breakdown using history
+        app_ids = {a.id for a in apps if a.id is not None}
+        all_history = self._db.get_status_history_for_apps(app_ids)
+        stages_by_app: dict[int, set[str]] = {}
+        for h in all_history:
+            if h.application_id is not None:
+                stages_by_app.setdefault(h.application_id, set()).add(h.to_status)
+
+        stage_rejection: dict[str, int] = {"Applied": 0, "Shortlisted": 0, "Interview": 0}
+        stage_withdrawal: dict[str, int] = {"Applied": 0, "Shortlisted": 0, "Interview": 0}
+        for app in apps:
+            if app.current_status not in (ApplicationStatus.REJECTED, ApplicationStatus.WITHDRAWN):
+                continue
+            stages = stages_by_app.get(app.id, set()) | {app.current_status.value}
+            if stages & self._INTERVIEWED_VALUES:
+                bucket = "Interview"
+            elif stages & self._SHORTLISTED_VALUES:
+                bucket = "Shortlisted"
+            else:
+                bucket = "Applied"
+            if app.current_status == ApplicationStatus.REJECTED:
+                stage_rejection[bucket] += 1
+            else:
+                stage_withdrawal[bucket] += 1
+
+        # Portal breakdown
+        portal_map: dict[str, dict] = {}
+        for app in apps:
+            p = app.source_portal
+            if p not in portal_map:
+                portal_map[p] = {"portal": p, "total": 0, "rejected": 0, "withdrawn": 0}
+            portal_map[p]["total"] += 1
+            if app.current_status == ApplicationStatus.REJECTED:
+                portal_map[p]["rejected"] += 1
+            elif app.current_status == ApplicationStatus.WITHDRAWN:
+                portal_map[p]["withdrawn"] += 1
+
+        portal_breakdown = []
+        for stat in portal_map.values():
+            resolved_p = stat["rejected"] + stat["withdrawn"]
+            portal_breakdown.append({
+                "portal": stat["portal"],
+                "total": stat["total"],
+                "rejected": stat["rejected"],
+                "withdrawn": stat["withdrawn"],
+                "rejection_rate": round(stat["rejected"] / resolved_p, 4) if resolved_p > 0 else None,
+            })
+        portal_breakdown.sort(key=lambda x: x["total"], reverse=True)
+
+        # Monthly trend (last 6 months) keyed by updated_at month for terminal apps
+        monthly: dict[str, dict[str, int]] = {}
+        for app in apps:
+            if app.current_status not in (ApplicationStatus.REJECTED, ApplicationStatus.WITHDRAWN):
+                continue
+            key = app.updated_at.strftime("%Y-%m")
+            if key not in monthly:
+                monthly[key] = {"rejected": 0, "withdrawn": 0}
+            if app.current_status == ApplicationStatus.REJECTED:
+                monthly[key]["rejected"] += 1
+            else:
+                monthly[key]["withdrawn"] += 1
+
+        today = date.today()
+        trend = []
+        for i in range(5, -1, -1):
+            raw_month = today.month - i
+            yr = today.year + (raw_month - 1) // 12
+            mo = ((raw_month - 1) % 12) + 1
+            key = f"{yr:04d}-{mo:02d}"
+            label = date(yr, mo, 1).strftime("%b %Y")
+            entry = monthly.get(key, {"rejected": 0, "withdrawn": 0})
+            trend.append({"month": key, "label": label, "rejected": entry["rejected"], "withdrawn": entry["withdrawn"]})
+
+        return {
+            "total": total,
+            "rejected": n_rejected,
+            "withdrawn": n_withdrawn,
+            "resolved": n_resolved,
+            "rejection_rate": rejection_rate,
+            "withdrawal_rate": withdrawal_rate,
+            "non_offer_rate": non_offer_rate,
+            "stage_breakdown": {"rejection": stage_rejection, "withdrawal": stage_withdrawal},
+            "portal_breakdown": portal_breakdown,
+            "monthly_trend": trend,
+            "insufficient_data": (n_rejected + n_withdrawn) < 3,
+        }
+
+    # ------------------------------------------------------------------ #
 
     def _flag_channels(self, stats: list[ChannelStat]) -> list[ChannelInsight]:
         insights: list[ChannelInsight] = []

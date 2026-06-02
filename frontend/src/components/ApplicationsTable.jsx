@@ -30,12 +30,15 @@ export default function ApplicationsTable({ filters, onSelectId }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [sorting, setSorting] = useState([]);
+  const [pageIndex, setPageIndex] = useState(0);
 
   useEffect(() => {
-    const params = Object.fromEntries(
-      Object.entries(filters).filter(([, v]) => v !== "" && v != null)
-    );
+    const params = {
+      ...Object.fromEntries(Object.entries(filters).filter(([, v]) => v !== "" && v != null)),
+      page_size: 500,
+    };
     setLoading(true);
+    setPageIndex(0);
     api
       .listApplications(params)
       .then((res) => {
@@ -110,12 +113,18 @@ export default function ApplicationsTable({ filters, onSelectId }) {
   const table = useReactTable({
     data,
     columns,
-    state: { sorting },
+    state: { sorting, pagination: { pageIndex, pageSize: PAGE_SIZE } },
     onSortingChange: setSorting,
+    onPaginationChange: (updater) => {
+      const next = typeof updater === "function"
+        ? updater({ pageIndex, pageSize: PAGE_SIZE })
+        : updater;
+      setPageIndex(next.pageIndex);
+    },
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
     getPaginationRowModel: getPaginationRowModel(),
-    initialState: { pagination: { pageSize: PAGE_SIZE } },
+    manualPagination: false,
   });
 
   if (loading)
@@ -157,12 +166,17 @@ export default function ApplicationsTable({ filters, onSelectId }) {
             table.getRowModel().rows.map((row) => (
               <tr
                 key={row.id}
-                className={`hover:bg-gray-50 dark:hover:bg-gray-800 ${
-                  row.original.is_stale ? "border-l-4 border-amber-400" : ""
-                }`}
+                className="hover:bg-gray-50 dark:hover:bg-gray-800"
               >
-                {row.getVisibleCells().map((cell) => (
-                  <td key={cell.id} className="px-4 py-3 text-gray-700 dark:text-gray-300">
+                {row.getVisibleCells().map((cell, cellIdx) => (
+                  <td
+                    key={cell.id}
+                    className={`px-4 py-3 text-gray-700 dark:text-gray-300 ${
+                      cellIdx === 0 && row.original.is_stale
+                        ? "border-l-4 border-amber-400"
+                        : ""
+                    }`}
+                  >
                     {flexRender(cell.column.columnDef.cell, cell.getContext())}
                   </td>
                 ))}
@@ -176,6 +190,9 @@ export default function ApplicationsTable({ filters, onSelectId }) {
         <span>
           Page {table.getState().pagination.pageIndex + 1} of{" "}
           {Math.max(table.getPageCount(), 1)}
+          {data.length > 0 && (
+            <span className="ml-2 text-gray-400">({data.length} total)</span>
+          )}
         </span>
         <div className="flex items-center gap-1">
           <button

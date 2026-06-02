@@ -1,7 +1,7 @@
 import { useState } from "react";
 import {
   LayoutList, BarChart2, Activity,
-  Download, PlusCircle, Sun, Moon,
+  Download, PlusCircle, Sun, Moon, FileUp,
 } from "lucide-react";
 import { api } from "./api/client";
 import { useTheme } from "./contexts/ThemeContext";
@@ -12,6 +12,7 @@ import ApplicationDetail from "./components/ApplicationDetail";
 import AddApplicationForm from "./components/AddApplicationForm";
 import AnalyticsPanel from "./components/AnalyticsPanel";
 import StatusPage from "./components/StatusPage";
+import LinkedInImportModal from "./components/LinkedInImportModal";
 
 const NAV_TABS = [
   { id: "applications", label: "Applications", Icon: LayoutList },
@@ -24,6 +25,7 @@ export default function App() {
   const [filters, setFilters] = useState({});
   const [selectedId, setSelectedId] = useState(null);
   const [showAddForm, setShowAddForm] = useState(false);
+  const [showLinkedInImport, setShowLinkedInImport] = useState(false);
   const { dark, toggle } = useTheme();
   const [exportError, setExportError] = useState(null);
 
@@ -94,6 +96,14 @@ export default function App() {
                 <Download size={16} aria-hidden="true" />
               </button>
               <button
+                onClick={() => setShowLinkedInImport(true)}
+                title="Import from LinkedIn"
+                aria-label="Import from LinkedIn"
+                className="p-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+              >
+                <FileUp size={16} aria-hidden="true" />
+              </button>
+              <button
                 onClick={() => setShowAddForm(true)}
                 className="flex items-center gap-1.5 px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
               >
@@ -142,6 +152,12 @@ export default function App() {
               setFilters({ ...filters });
             }}
             onClose={() => setShowAddForm(false)}
+          />
+        )}
+        {showLinkedInImport && (
+          <LinkedInImportModal
+            onClose={() => setShowLinkedInImport(false)}
+            onImported={() => setFilters((f) => ({ ...f }))}
           />
         )}
       </div>

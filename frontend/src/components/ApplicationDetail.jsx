@@ -1,8 +1,11 @@
 import { useState, useEffect } from "react";
-import { X, ExternalLink, Mail, Trash2 } from "lucide-react";
+import { X, ExternalLink, Mail, Trash2, Pencil, Check } from "lucide-react";
 import { api } from "../api/client";
 import { STATUS_OPTIONS, STATUS_COLORS } from "../utils/constants";
 import { formatDate } from "../utils/formatters";
+
+const inputCls =
+  "border border-gray-300 dark:border-gray-600 rounded px-2 py-1 text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 w-full";
 
 export default function ApplicationDetail({ applicationId, onClose, onDelete }) {
   const [app, setApp] = useState(null);
@@ -12,6 +15,11 @@ export default function ApplicationDetail({ applicationId, onClose, onDelete }) 
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+
+  // Edit mode state
+  const [editMode, setEditMode] = useState(false);
+  const [editValues, setEditValues] = useState({ company: "", role: "", job_url: "", applied_date: "" });
+  const [editSaving, setEditSaving] = useState(false);
 
   const fetchApp = (signal) => {
     setLoading(true);
@@ -59,6 +67,41 @@ export default function ApplicationDetail({ applicationId, onClose, onDelete }) 
     }
   };
 
+  const enterEdit = () => {
+    setEditValues({
+      company: app.company || "",
+      role: app.role || "",
+      job_url: app.job_url || "",
+      applied_date: app.applied_date ? app.applied_date.slice(0, 10) : "",
+    });
+    setEditMode(true);
+  };
+
+  const cancelEdit = () => setEditMode(false);
+
+  const saveEdit = async () => {
+    setEditSaving(true);
+    try {
+      const patch = {};
+      if (editValues.company !== (app.company || "")) patch.company = editValues.company || null;
+      if (editValues.role !== (app.role || "")) patch.role = editValues.role || null;
+      if (editValues.job_url !== (app.job_url || "")) patch.job_url = editValues.job_url || null;
+      const originalDate = app.applied_date ? app.applied_date.slice(0, 10) : "";
+      if (editValues.applied_date !== originalDate && editValues.applied_date) {
+        patch.applied_date = editValues.applied_date + "T00:00:00";
+      }
+      if (Object.keys(patch).length > 0) {
+        await api.updateApplication(applicationId, patch);
+      }
+      setEditMode(false);
+      fetchApp();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setEditSaving(false);
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 pt-16">
       <div className="bg-white dark:bg-gray-900 rounded-lg shadow-xl w-full max-w-2xl max-h-[80vh] overflow-y-auto">
@@ -83,6 +126,17 @@ export default function ApplicationDetail({ applicationId, onClose, onDelete }) 
                 </a>
               ) : null;
             })()}
+
+            {app && !editMode && (
+              <button
+                onClick={enterEdit}
+                aria-label="Edit application"
+                title="Edit"
+                className="p-1 rounded-md text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors"
+              >
+                <Pencil size={16} aria-hidden="true" />
+              </button>
+            )}
 
             {confirmDelete ? (
               <div className="flex items-center gap-1.5">
@@ -131,15 +185,33 @@ export default function ApplicationDetail({ applicationId, onClose, onDelete }) 
             <>
               <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm mb-6">
                 <div>
-                  <dt className="text-gray-500 dark:text-gray-400">Company</dt>
+                  <dt className="text-gray-500 dark:text-gray-400 mb-1">Company</dt>
                   <dd className="font-medium text-gray-900 dark:text-gray-100">
-                    {app.company || "—"}
+                    {editMode ? (
+                      <input
+                        className={inputCls}
+                        value={editValues.company}
+                        onChange={(e) => setEditValues((v) => ({ ...v, company: e.target.value }))}
+                        placeholder="Company name"
+                      />
+                    ) : (
+                      app.company || "—"
+                    )}
                   </dd>
                 </div>
                 <div>
-                  <dt className="text-gray-500 dark:text-gray-400">Role</dt>
+                  <dt className="text-gray-500 dark:text-gray-400 mb-1">Role</dt>
                   <dd className="font-medium text-gray-900 dark:text-gray-100">
-                    {app.role || "—"}
+                    {editMode ? (
+                      <input
+                        className={inputCls}
+                        value={editValues.role}
+                        onChange={(e) => setEditValues((v) => ({ ...v, role: e.target.value }))}
+                        placeholder="Role title"
+                      />
+                    ) : (
+                      app.role || "—"
+                    )}
                   </dd>
                 </div>
                 <div>
@@ -149,15 +221,31 @@ export default function ApplicationDetail({ applicationId, onClose, onDelete }) 
                   </dd>
                 </div>
                 <div>
-                  <dt className="text-gray-500 dark:text-gray-400">Applied Date</dt>
+                  <dt className="text-gray-500 dark:text-gray-400 mb-1">Applied Date</dt>
                   <dd className="font-medium text-gray-900 dark:text-gray-100">
-                    {formatDate(app.applied_date)}
+                    {editMode ? (
+                      <input
+                        type="date"
+                        className={inputCls}
+                        value={editValues.applied_date}
+                        onChange={(e) => setEditValues((v) => ({ ...v, applied_date: e.target.value }))}
+                      />
+                    ) : (
+                      formatDate(app.applied_date)
+                    )}
                   </dd>
                 </div>
-                <div>
-                  <dt className="text-gray-500 dark:text-gray-400">Job URL</dt>
+                <div className="col-span-2">
+                  <dt className="text-gray-500 dark:text-gray-400 mb-1">Job URL</dt>
                   <dd>
-                    {app.job_url ? (
+                    {editMode ? (
+                      <input
+                        className={inputCls}
+                        value={editValues.job_url}
+                        onChange={(e) => setEditValues((v) => ({ ...v, job_url: e.target.value }))}
+                        placeholder="https://…"
+                      />
+                    ) : app.job_url ? (
                       <a
                         href={app.job_url}
                         target="_blank"
@@ -191,6 +279,26 @@ export default function ApplicationDetail({ applicationId, onClose, onDelete }) 
                   </dd>
                 </div>
               </dl>
+
+              {editMode && (
+                <div className="flex items-center gap-2 mb-6">
+                  <button
+                    onClick={saveEdit}
+                    disabled={editSaving}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
+                  >
+                    <Check size={14} aria-hidden="true" />
+                    {editSaving ? "Saving…" : "Save"}
+                  </button>
+                  <button
+                    onClick={cancelEdit}
+                    disabled={editSaving}
+                    className="px-3 py-1.5 text-sm text-gray-600 dark:text-gray-300 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
 
               <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">
                 Status History

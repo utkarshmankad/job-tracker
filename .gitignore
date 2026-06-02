@@ -15,3 +15,5 @@ frontend/dist/
 *.log
 .pytest_cache/
 .mypy_cache/
+.coverage
+graphify-out/

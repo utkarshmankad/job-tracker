@@ -21,6 +21,7 @@ def _make_poller(tmp_path: Path) -> GmailPoller:
     parser = MagicMock(spec=EmailParser)
     detector = MagicMock(spec=DuplicateDetector)
     updater = MagicMock(spec=StatusUpdater)
+    updater.process.return_value = (MagicMock(), True)
     return GmailPoller(db=db, parser=parser, updater=updater)
 
 

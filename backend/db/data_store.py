@@ -132,6 +132,32 @@ class DataStore:
         with Session(self._engine, expire_on_commit=False) as session:
             return session.get(Application, id)
 
+    def find_application_by_url(self, job_url: str) -> Application | None:
+        """Return the first Application whose job_url exactly matches, or None."""
+        with Session(self._engine, expire_on_commit=False) as session:
+            stmt = select(Application).where(Application.job_url == job_url)
+            return session.exec(stmt).first()
+
+    def find_similar_application(
+        self,
+        company: str,
+        role: str,
+        applied_date: datetime,
+        window_days: int = 7,
+    ) -> Application | None:
+        """Return an Application with matching company+role within ±window_days of applied_date."""
+        cutoff_from = applied_date - timedelta(days=window_days)
+        cutoff_to = applied_date + timedelta(days=window_days)
+        with Session(self._engine, expire_on_commit=False) as session:
+            stmt = (
+                select(Application)
+                .where(col(Application.company).ilike(company))
+                .where(col(Application.role).ilike(role))
+                .where(col(Application.applied_date) >= cutoff_from)
+                .where(col(Application.applied_date) <= cutoff_to)
+            )
+            return session.exec(stmt).first()
+
     def find_application_by_thread_id(self, thread_id: str) -> Application | None:
         """Return the Application that owns thread_id, or None. Uses SQL LIKE on the JSON blob."""
         with Session(self._engine, expire_on_commit=False) as session:
