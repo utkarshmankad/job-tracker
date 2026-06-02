@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Job Tracker — LinkedIn Sync
 // @namespace    https://github.com/utkarshmankad/job-tracker
-// @version      1.3.0
+// @version      1.4.0
 // @description  Sync LinkedIn Jobs Tracker to your local Job Tracker app
 // @match        https://www.linkedin.com/jobs-tracker*
 // @match        https://www.linkedin.com/jobs/tracker*
@@ -17,8 +17,6 @@
 
 const API_URL = 'http://jobtracker.localhost:8000/api/v1/applications/import/linkedin/json';
 
-// DOM selectors — if LinkedIn breaks extraction, open DevTools on the Jobs
-// Tracker page, find the job card elements, and update these.
 const SEL = {
   jobLink:     'a[href*="/jobs/view/"]',
   cardTags:    ['LI', 'ARTICLE'],
@@ -48,18 +46,38 @@ const KNOWN_STATUSES = [
   'Withdrawn', 'Rejected',
   'Applied', 'Offered', 'Saved',
 ];
-
 const DATE_NOISE = /\b(\d+\s*(day|week|month|year)|ago|applied|saved|just now)/i;
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// Element factory — uses createElement only, zero innerHTML, bypasses
+// LinkedIn's Trusted Types / sanitizeHTML policy.
+function mk(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls)  e.className   = cls;
+  if (text != null) e.textContent = text;
+  return e;
+}
+
+function mkSVG(tag, attrs) {
+  const e = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  return e;
+}
+
+// Build a spinner <span> inside a button without touching innerHTML.
+function setSpinText(btn, label) {
+  btn.textContent = '';
+  btn.appendChild(mk('span', 'spin'));
+  btn.appendChild(document.createTextNode(' ' + label));
+}
+
 function parseRelativeDate(text) {
   const m = text.match(/(\d+)\s+(day|week|month|year)s?\s+ago/i);
   if (!m) return null;
-  const n = parseInt(m[1], 10);
-  const d = new Date();
+  const n = parseInt(m[1], 10), d = new Date();
   switch (m[2].toLowerCase()) {
     case 'day':   d.setDate(d.getDate() - n); break;
     case 'week':  d.setDate(d.getDate() - n * 7); break;
@@ -72,13 +90,13 @@ function parseRelativeDate(text) {
 function apiPost(data) {
   return new Promise((resolve, reject) => {
     GM_xmlhttpRequest({
-      method:  'POST',
-      url:     API_URL,
+      method: 'POST', url: API_URL,
       headers: { 'Content-Type': 'application/json' },
-      data:    JSON.stringify(data),
-      onload(res) {
-        if (res.status >= 200 && res.status < 300) resolve(JSON.parse(res.responseText));
-        else reject(new Error(`Server ${res.status}: ${res.responseText.slice(0, 200)}`));
+      data: JSON.stringify(data),
+      onload(r) {
+        r.status >= 200 && r.status < 300
+          ? resolve(JSON.parse(r.responseText))
+          : reject(new Error(`Server ${r.status}: ${r.responseText.slice(0, 200)}`));
       },
       onerror()   { reject(new Error('Cannot reach Job Tracker — is it running on port 8000?')); },
       ontimeout() { reject(new Error('Request timed out.')); },
@@ -86,7 +104,7 @@ function apiPost(data) {
   });
 }
 
-// ─── DOM extraction (runs on the main document, not shadow DOM) ───────────────
+// ─── DOM extraction ───────────────────────────────────────────────────────────
 
 function findCard(link) {
   let el = link.parentElement;
@@ -100,20 +118,20 @@ function findCard(link) {
   return link.closest('li') || link.parentElement;
 }
 
-function extractCompany(card, titleText) {
+function extractCompany(card, title) {
   if (!card) return null;
   for (const s of SEL.company) {
     const el = card.querySelector(s);
     if (!el) continue;
     const t = el.textContent.trim().split('·')[0].trim();
-    if (t && t !== titleText && t.length >= 2 && t.length <= 120) return t;
+    if (t && t !== title && t.length >= 2 && t.length <= 120) return t;
   }
-  const statusSet = new Set(KNOWN_STATUSES.map(s => s.toLowerCase()));
+  const skip = new Set(KNOWN_STATUSES.map(s => s.toLowerCase()));
   for (const el of card.querySelectorAll('span, p, div')) {
     if (el.children.length > 0) continue;
     const t = el.textContent.trim();
     if (!t || t.length < 2 || t.length > 120) continue;
-    if (t === titleText || DATE_NOISE.test(t) || statusSet.has(t.toLowerCase())) continue;
+    if (t === title || DATE_NOISE.test(t) || skip.has(t.toLowerCase())) continue;
     return t.split('·')[0].trim();
   }
   return null;
@@ -125,8 +143,8 @@ function extractStatus(card) {
     const el = card.querySelector(s);
     if (!el) continue;
     const t = el.textContent.trim();
-    const match = KNOWN_STATUSES.find(ks => ks.toLowerCase() === t.toLowerCase());
-    if (match) return match;
+    const m = KNOWN_STATUSES.find(k => k.toLowerCase() === t.toLowerCase());
+    if (m) return m;
   }
   const text = card.textContent;
   for (const s of KNOWN_STATUSES) { if (text.includes(s)) return s; }
@@ -141,262 +159,229 @@ function extractDate(card) {
 }
 
 function extractJobs() {
-  const seen = new Set();
-  const jobs = [];
+  const seen = new Set(), jobs = [];
   for (const link of document.querySelectorAll(SEL.jobLink)) {
     const url = link.href.replace(/\?.*$/, '').replace(/\/*$/, '/');
-    if (!url.match(/\/jobs\/view\/\d+/)) continue;
-    if (seen.has(url)) continue;
+    if (!url.match(/\/jobs\/view\/\d+/) || seen.has(url)) continue;
     seen.add(url);
     const role = link.textContent.trim();
     if (!role || role.length < 3 || role.length > 200) continue;
     const card = findCard(link);
-    jobs.push({
-      role,
-      company:         extractCompany(card, role),
-      job_url:         url,
-      applied_date:    extractDate(card),
-      linkedin_status: extractStatus(card),
-    });
+    jobs.push({ role, company: extractCompany(card, role), job_url: url,
+                applied_date: extractDate(card), linkedin_status: extractStatus(card) });
   }
   return jobs;
 }
 
 async function loadAllJobs(onProgress) {
-  let lastCount = -1, stable = 0, attempts = 0;
-  while (stable < 3 && attempts < 40) {
-    attempts++;
-    const showMore = document.querySelector(SEL.showMore);
-    if (showMore && !showMore.disabled) { showMore.click(); await sleep(1600); }
+  let last = -1, stable = 0, tries = 0;
+  while (stable < 3 && tries < 40) {
+    tries++;
+    const more = document.querySelector(SEL.showMore);
+    if (more && !more.disabled) { more.click(); await sleep(1600); }
     const next = document.querySelector(SEL.nextPage);
     if (next && !next.disabled) { next.click(); await sleep(1800); }
     window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
     await sleep(1400);
-    const count = document.querySelectorAll(SEL.jobLink).length;
-    onProgress(count);
-    stable = (count === lastCount) ? stable + 1 : 0;
-    lastCount = count;
+    const n = document.querySelectorAll(SEL.jobLink).length;
+    onProgress(n);
+    stable = (n === last) ? stable + 1 : 0;
+    last = n;
   }
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
-// ─── Panel (Shadow DOM — completely isolated from LinkedIn's CSS) ─────────────
+// ─── Panel CSS ────────────────────────────────────────────────────────────────
 
 const PANEL_CSS = `
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:host { all: initial; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
 
-  :host { all: initial; }
+.jt-trigger {
+  display: flex; align-items: center; gap: 8px;
+  background: #0A66C2; color: #fff;
+  border: none; border-radius: 20px; padding: 10px 18px;
+  cursor: pointer; font: 600 13px/1 inherit;
+  box-shadow: 0 2px 12px rgba(0,0,0,.3); white-space: nowrap;
+}
+.jt-trigger:hover { background: #004182; }
 
-  #trigger {
-    display: flex; align-items: center; gap: 8px;
-    background: #0A66C2; color: #fff;
-    border: none; border-radius: 20px; padding: 10px 18px;
-    cursor: pointer; font: 600 13px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    box-shadow: 0 2px 12px rgba(0,0,0,.3);
-    white-space: nowrap;
-  }
-  #trigger:hover { background: #004182; }
+.jt-box {
+  display: none; flex-direction: column;
+  width: 340px; max-height: 560px;
+  background: #fff; border-radius: 12px;
+  box-shadow: 0 6px 28px rgba(0,0,0,.22);
+  font: 13px/1.45 inherit; color: #1a1a1a; overflow: hidden;
+}
+.jt-box.open { display: flex; }
 
-  #box {
-    display: none; flex-direction: column;
-    width: 340px; max-height: 560px;
-    background: #fff; border-radius: 12px;
-    box-shadow: 0 6px 28px rgba(0,0,0,.22);
-    font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    color: #1a1a1a; overflow: hidden;
-  }
-  #box.open { display: flex; }
+.jt-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 13px 15px; background: #0A66C2; color: #fff; flex-shrink: 0;
+}
+.jt-header h3 { font-size: 14px; font-weight: 700; }
+.jt-close {
+  background: none; border: none; color: #fff; cursor: pointer;
+  font-size: 18px; line-height: 1; opacity: .8; padding: 0; font-family: inherit;
+}
+.jt-close:hover { opacity: 1; }
 
-  #header {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 13px 15px; background: #0A66C2; color: #fff; flex-shrink: 0;
-  }
-  #header h3 { font-size: 14px; font-weight: 700; }
-  #close {
-    background: none; border: none; color: #fff; cursor: pointer;
-    font-size: 18px; line-height: 1; opacity: .8; padding: 0;
-    font-family: inherit;
-  }
-  #close:hover { opacity: 1; }
+.jt-body { padding: 14px 15px 10px; overflow-y: auto; flex: 1; }
 
-  #body { padding: 14px 15px 10px; overflow-y: auto; flex: 1; }
+.jt-status { font-size: 12px; color: #555; min-height: 18px; margin-bottom: 10px; }
 
-  #status {
-    font-size: 12px; color: #555; min-height: 18px; margin-bottom: 10px;
-  }
+.jt-list {
+  display: none; max-height: 220px; overflow-y: auto;
+  border: 1px solid #ddd; border-radius: 8px; margin-bottom: 10px;
+}
+.jt-job {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 8px 10px; border-bottom: 1px solid #f0f0f0;
+}
+.jt-job:last-child { border-bottom: none; }
+.jt-job-info { flex: 1; min-width: 0; }
+.jt-job-role { font-weight: 600; font-size: 12px; color: #1a1a1a;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.jt-job-meta { font-size: 11px; color: #666; margin-top: 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.jt-badge { font-size: 10px; font-weight: 600; flex-shrink: 0;
+  background: #e8f4fd; color: #0A66C2; border-radius: 10px; padding: 2px 7px; }
 
-  #list {
-    display: none; max-height: 220px; overflow-y: auto;
-    border: 1px solid #ddd; border-radius: 8px; margin-bottom: 10px;
-  }
-  .job {
-    display: flex; align-items: flex-start; gap: 8px;
-    padding: 8px 10px; border-bottom: 1px solid #f0f0f0;
-  }
-  .job:last-child { border-bottom: none; }
-  .job-info { flex: 1; min-width: 0; }
-  .job-role {
-    font-weight: 600; font-size: 12px; color: #1a1a1a;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-  .job-meta {
-    font-size: 11px; color: #666; margin-top: 2px;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-  .badge {
-    font-size: 10px; font-weight: 600; flex-shrink: 0;
-    background: #e8f4fd; color: #0A66C2; border-radius: 10px;
-    padding: 2px 7px; white-space: nowrap;
-  }
+.jt-result {
+  display: none; border-radius: 8px; padding: 9px 11px;
+  font-size: 12px; margin-bottom: 10px; white-space: pre-line;
+  background: #edfaed; border: 1px solid #b7dfb7; color: #1e5c1e;
+}
+.jt-result.error { background: #fff0f0; border-color: #f5c6cb; color: #721c24; }
 
-  #result {
-    display: none; border-radius: 8px; padding: 9px 11px;
-    font-size: 12px; margin-bottom: 10px; white-space: pre-line;
-    background: #edfaed; border: 1px solid #b7dfb7; color: #1e5c1e;
-  }
-  #result.error { background: #fff0f0; border-color: #f5c6cb; color: #721c24; }
+.jt-footer { display: flex; gap: 8px; padding: 0 15px 14px; flex-shrink: 0; }
+.jt-btn {
+  flex: 1; padding: 9px 0; border-radius: 8px; border: none;
+  font: 600 13px/1 inherit; cursor: pointer;
+}
+.jt-primary { background: #0A66C2; color: #fff; }
+.jt-primary:hover:not(:disabled) { background: #004182; }
+.jt-primary:disabled { opacity: .45; cursor: default; }
+.jt-secondary { background: #f0f0f0; color: #333; }
+.jt-secondary:hover { background: #e2e2e2; }
 
-  #footer {
-    display: flex; gap: 8px; padding: 0 15px 14px; flex-shrink: 0;
-  }
-  button.btn {
-    flex: 1; padding: 9px 0; border-radius: 8px; border: none;
-    font: 600 13px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    cursor: pointer;
-  }
-  button.primary { background: #0A66C2; color: #fff; }
-  button.primary:hover:not(:disabled) { background: #004182; }
-  button.primary:disabled { opacity: .45; cursor: default; }
-  button.secondary { background: #f0f0f0; color: #333; }
-  button.secondary:hover { background: #e2e2e2; }
-
-  .spin {
-    display: inline-block; width: 11px; height: 11px; vertical-align: middle;
-    border: 2px solid currentColor; border-top-color: transparent;
-    border-radius: 50%; animation: spin .6s linear infinite; margin-right: 4px;
-  }
-  @keyframes spin { to { transform: rotate(360deg); } }
+.spin {
+  display: inline-block; width: 11px; height: 11px; vertical-align: middle;
+  border: 2px solid currentColor; border-top-color: transparent;
+  border-radius: 50%; animation: jtSpin .6s linear infinite;
+}
+@keyframes jtSpin { to { transform: rotate(360deg); } }
 `;
 
-const PANEL_HTML = `
-  <button id="trigger">
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-      <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853
-        0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9
-        1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337
-        7.433a2.062 2.062 0 0 1-2.063-2.065 2.064 2.064 0 1 1 2.063
-        2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0
-        .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24
-        23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/>
-    </svg>
-    Sync Jobs
-  </button>
-  <div id="box">
-    <div id="header">
-      <h3>LinkedIn → Job Tracker</h3>
-      <button id="close" title="Collapse">✕</button>
-    </div>
-    <div id="body">
-      <div id="status">Click Scan to load and extract all tracked jobs.</div>
-      <div id="result"></div>
-      <div id="list"></div>
-    </div>
-    <div id="footer">
-      <button class="btn secondary" id="scan-btn">Scan</button>
-      <button class="btn primary"   id="send-btn" disabled>Send</button>
-    </div>
-  </div>
-`;
+// ─── Panel construction (zero innerHTML — bypasses LinkedIn's sanitizeHTML) ───
 
 function createPanel() {
   console.log('[JobTracker] createPanel() called');
+
+  // ── Host + Shadow DOM ──────────────────────────────────────────────────────
   const host = document.createElement('div');
-  host.id = 'jt-host';
-  // All positioning is on the host via inline style (never touched by LinkedIn).
-  host.style.cssText = [
-    'position:fixed',
-    'bottom:24px',
-    'right:24px',
-    // Max z-index — sits above LinkedIn's Messaging widget (~9000) and overlays.
-    'z-index:2147483647',
-    'display:block',
-    'pointer-events:auto',
-  ].join(';');
+  host.style.cssText = 'position:fixed;bottom:24px;right:24px;z-index:2147483647;display:block;pointer-events:auto;';
   document.body.appendChild(host);
 
   const shadow = host.attachShadow({ mode: 'open' });
-  console.log('[JobTracker] Shadow DOM attached');
+  const style  = document.createElement('style');
+  style.textContent = PANEL_CSS;   // <style> textContent is never sanitized
+  shadow.appendChild(style);
+  console.log('[JobTracker] Shadow DOM + styles attached');
 
-  const styleEl = document.createElement('style');
-  styleEl.textContent = PANEL_CSS;
-  shadow.appendChild(styleEl);
+  // ── LinkedIn logo SVG (createElementNS, no innerHTML) ─────────────────────
+  const svg  = mkSVG('svg', { width: '15', height: '15', viewBox: '0 0 24 24', fill: 'currentColor', 'aria-hidden': 'true' });
+  const path = mkSVG('path', { d: 'M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 0 1-2.063-2.065 2.064 2.064 0 1 1 2.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z' });
+  svg.appendChild(path);
 
-  const wrapper = document.createElement('div');
-  wrapper.innerHTML = PANEL_HTML;
-  shadow.appendChild(wrapper);
-  console.log('[JobTracker] Panel HTML injected into shadow root');
+  // ── Build elements with createElement — no innerHTML touches ──────────────
 
-  const $ = sel => shadow.querySelector(sel);
+  // Trigger (collapsed state)
+  const trigger = mk('button', 'jt-trigger');
+  trigger.title = 'Sync to Job Tracker';
+  trigger.appendChild(svg);
+  trigger.appendChild(document.createTextNode(' Sync Jobs'));
 
-  const trigger  = $('#trigger');
-  const box      = $('#box');
-  const closeBtn = $('#close');
-  const statusEl = $('#status');
-  const listEl   = $('#list');
-  const resultEl = $('#result');
-  const scanBtn  = $('#scan-btn');
-  const sendBtn  = $('#send-btn');
-  console.log('[JobTracker] scanBtn:', scanBtn, '| sendBtn:', sendBtn);
-  if (!scanBtn || !sendBtn) {
-    console.error('[JobTracker] Could not find scan/send buttons in shadow DOM — aborting.');
-    return;
+  // Panel box elements — keep direct references, no querySelector needed
+  const h3        = mk('h3',     null,             'LinkedIn → Job Tracker');
+  const closeBtn  = mk('button', 'jt-close',       '✕');
+  closeBtn.title  = 'Collapse';
+
+  const statusEl  = mk('div',    'jt-status',      'Click Scan to load and extract all tracked jobs.');
+  const resultEl  = mk('div',    'jt-result');
+  const listEl    = mk('div',    'jt-list');
+
+  const scanBtn   = mk('button', 'jt-btn jt-secondary', 'Scan');
+  const sendBtn   = mk('button', 'jt-btn jt-primary',   'Send');
+  sendBtn.disabled = true;
+
+  // Assemble tree
+  const header = mk('div', 'jt-header');
+  header.appendChild(h3);
+  header.appendChild(closeBtn);
+
+  const body = mk('div', 'jt-body');
+  body.appendChild(statusEl);
+  body.appendChild(resultEl);
+  body.appendChild(listEl);
+
+  const footer = mk('div', 'jt-footer');
+  footer.appendChild(scanBtn);
+  footer.appendChild(sendBtn);
+
+  const box = mk('div', 'jt-box');
+  box.appendChild(header);
+  box.appendChild(body);
+  box.appendChild(footer);
+
+  shadow.appendChild(trigger);
+  shadow.appendChild(box);
+  console.log('[JobTracker] Panel tree built — scanBtn:', scanBtn, '| sendBtn:', sendBtn);
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+
+  function setStatus(text, spin = false) {
+    statusEl.textContent = '';
+    if (spin) statusEl.appendChild(mk('span', 'spin'));
+    statusEl.appendChild(document.createTextNode(spin ? ' ' + text : text));
   }
 
-  let jobs = [];
-
-  function setStatus(html) { statusEl.innerHTML = html; }
-
-  function renderList(data) {
-    if (!data.length) { listEl.style.display = 'none'; return; }
-    listEl.style.display = 'block';
-    listEl.innerHTML = data.map(j => `
-      <div class="job">
-        <div class="job-info">
-          <div class="job-role">${esc(j.role || '—')}</div>
-          <div class="job-meta">
-            ${esc(j.company || '(company unknown)')}${j.applied_date ? ' · ' + j.applied_date : ''}
-          </div>
-        </div>
-        <span class="badge">${esc(j.linkedin_status)}</span>
-      </div>
-    `).join('');
-  }
-
-  function renderResult(res) {
-    const parts = [
-      res.created && `${res.created} created`,
-      res.updated && `${res.updated} updated`,
-      res.skipped && `${res.skipped} skipped`,
-      res.errors  && `${res.errors} errors`,
-    ].filter(Boolean);
-    let text = parts.join(' · ') || 'Nothing changed.';
-    if (res.warnings?.length) text += '\n⚠ ' + res.warnings.join('\n⚠ ');
+  function setResult(text, isError = false) {
     resultEl.textContent = text;
-    resultEl.className   = res.errors ? 'error' : '';
+    resultEl.className   = 'jt-result' + (isError ? ' error' : '');
     resultEl.style.display = 'block';
   }
 
-  // ── Toggle ─────────────────────────────────────────────────────────────────
+  function renderList(jobs) {
+    listEl.textContent = '';
+    if (!jobs.length) { listEl.style.display = 'none'; return; }
+    listEl.style.display = 'block';
+    for (const j of jobs) {
+      const row  = mk('div',  'jt-job');
+      const info = mk('div',  'jt-job-info');
+      info.appendChild(mk('div', 'jt-job-role', j.role || '—'));
+      info.appendChild(mk('div', 'jt-job-meta',
+        (j.company || 'company unknown') + (j.applied_date ? ' · ' + j.applied_date : '')));
+      row.appendChild(info);
+      row.appendChild(mk('span', 'jt-badge', j.linkedin_status));
+      listEl.appendChild(row);
+    }
+  }
+
+  // ── Event handlers ─────────────────────────────────────────────────────────
+
+  let jobs = [];
+
   trigger.addEventListener('click', () => {
     trigger.style.display = 'none';
     box.classList.add('open');
   });
+
   closeBtn.addEventListener('click', () => {
     box.classList.remove('open');
     trigger.style.display = '';
   });
 
-  // ── Scan ───────────────────────────────────────────────────────────────────
   scanBtn.addEventListener('click', async () => {
     scanBtn.disabled = true;
     sendBtn.disabled = true;
@@ -404,87 +389,83 @@ function createPanel() {
     listEl.style.display   = 'none';
     jobs = [];
 
-    setStatus('<span class="spin"></span>Scrolling to load all jobs…');
-    await loadAllJobs(n => setStatus(`<span class="spin"></span>Found ${n} job${n !== 1 ? 's' : ''}…`));
+    setStatus('Scrolling to load all jobs…', true);
+    await loadAllJobs(n => setStatus(`Found ${n} job${n !== 1 ? 's' : ''}…`, true));
 
     jobs = extractJobs();
     scanBtn.disabled = false;
 
     if (!jobs.length) {
-      setStatus("No jobs found. Make sure you're on the Jobs Tracker tab and the page has fully loaded.");
+      setStatus("No jobs found. Make sure you're on the Jobs Tracker tab and the page has loaded.");
       return;
     }
 
-    const unknownCo = jobs.filter(j => !j.company).length;
-    setStatus(
-      `Found <strong>${jobs.length}</strong> job${jobs.length !== 1 ? 's' : ''}` +
-      (unknownCo ? ` (${unknownCo} with undetected company)` : '') +
-      '. Review below, then click Send.'
-    );
+    const unk = jobs.filter(j => !j.company).length;
+    setStatus(`Found ${jobs.length} job${jobs.length !== 1 ? 's' : ''}${unk ? ` (${unk} with unknown company)` : ''}. Review below, then click Send.`);
     renderList(jobs);
     sendBtn.disabled = false;
   });
 
-  // ── Send ───────────────────────────────────────────────────────────────────
   sendBtn.addEventListener('click', async () => {
     if (!jobs.length) return;
     sendBtn.disabled = true;
     scanBtn.disabled = true;
-    sendBtn.innerHTML = '<span class="spin"></span>Sending…';
+    setSpinText(sendBtn, 'Sending…');
 
     try {
       const res = await apiPost({ applications: jobs });
-      renderResult(res);
+      const parts = [
+        res.created && `${res.created} created`,
+        res.updated && `${res.updated} updated`,
+        res.skipped && `${res.skipped} skipped`,
+        res.errors  && `${res.errors} errors`,
+      ].filter(Boolean);
+      let text = parts.join(' · ') || 'Nothing changed.';
+      if (res.warnings?.length) text += '\n⚠ ' + res.warnings.join('\n⚠ ');
+      setResult(text, !!res.errors);
       setStatus('Done! Your Job Tracker has been updated.');
     } catch (err) {
-      resultEl.textContent = err.message;
-      resultEl.className   = 'error';
-      resultEl.style.display = 'block';
+      setResult(err.message, true);
       setStatus('Send failed — see error above.');
     } finally {
-      sendBtn.innerHTML = 'Send';
+      sendBtn.textContent = 'Send';
       sendBtn.disabled  = false;
       scanBtn.disabled  = false;
     }
   });
+
+  console.log('[JobTracker] Event listeners attached.');
 }
 
-// ─── Tiny HTML escaper ────────────────────────────────────────────────────────
-function esc(s) {
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
-
-// ─── Init (handles SPA navigation) ───────────────────────────────────────────
+// ─── Init ─────────────────────────────────────────────────────────────────────
 
 function isTrackerPage() {
   return /\/jobs[\/-]tracker/i.test(window.location.pathname);
 }
 
 function init() {
-  if (!isTrackerPage()) {
-    console.log('[JobTracker] Not on jobs-tracker page, skipping. Current path:', window.location.pathname);
-    return;
-  }
-  if (document.getElementById('jt-host')) {
-    console.log('[JobTracker] Panel already exists, skipping.');
-    return;
-  }
-  console.log('[JobTracker] Detected jobs-tracker page, mounting panel in 2s…');
+  if (!isTrackerPage()) return;
+  if (document.querySelector('[data-jt-host]')) return;
 
-  // Wait 2 s so LinkedIn's SPA has time to render, then mount regardless
-  // of which specific element LinkedIn is currently using as its root.
+  // Mark intent immediately so concurrent calls don't double-init.
+  const marker = document.createElement('meta');
+  marker.setAttribute('data-jt-host', '1');
+  document.head.appendChild(marker);
+
+  console.log('[JobTracker] Scheduling panel mount…');
   setTimeout(() => {
     try {
       createPanel();
-      console.log('[JobTracker] Panel mounted successfully.');
+      console.log('[JobTracker] Panel mounted.');
     } catch (err) {
       console.error('[JobTracker] createPanel threw:', err);
+      marker.remove();  // allow retry
     }
   }, 2000);
 }
 
 const _push = history.pushState.bind(history);
-history.pushState = function (...args) { _push(...args); setTimeout(init, 1000); };
+history.pushState = function (...a) { _push(...a); setTimeout(init, 1000); };
 window.addEventListener('popstate', () => setTimeout(init, 1000));
 
 init();
