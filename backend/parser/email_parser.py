@@ -67,7 +67,7 @@ class ParsedApplication:
     status_signal: ApplicationStatus | None
     raw_sender: str
     raw_subject: str
-    is_classification_confident: bool  # False for Direct/Unknown matches
+    is_classification_confident: bool  # False for Direct/Consultancy matches
 
 
 class EmailParser:
@@ -98,7 +98,7 @@ class EmailParser:
         # Try domain match; require subject_patterns OR status_signal keyword to also match.
         # This prevents Naukri newsletter domains from matching non-job emails.
         for portal in self._portals:
-            if portal.get("name") == "Direct/Unknown":
+            if portal.get("name") == "Direct/Consultancy":
                 continue
             domain_matched = False
             for domain in portal.get("sender_domains", []):
@@ -118,11 +118,11 @@ class EmailParser:
                 matched_portal = portal
                 break
 
-        # No domain match → check Direct/Unknown via subject_patterns ONLY.
+        # No domain match → check Direct/Consultancy via subject_patterns ONLY.
         # Status-signal keywords alone (e.g. "shortlisted") are too broad without a domain
         # anchor and cause certification-program marketing emails to be classified as job apps.
         if not matched_portal:
-            direct_portal = next((p for p in self._portals if p.get("name") == "Direct/Unknown"), None)
+            direct_portal = next((p for p in self._portals if p.get("name") == "Direct/Consultancy"), None)
             if direct_portal:
                 subject_hit = any(
                     pat.lower() in subject_lower

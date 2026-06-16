@@ -12,6 +12,7 @@ export default function ApplicationDetail({ applicationId, onClose, onDelete }) 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [statusEdit, setStatusEdit] = useState("");
+  const [withdrawReason, setWithdrawReason] = useState("self_withdraw");
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -28,6 +29,7 @@ export default function ApplicationDetail({ applicationId, onClose, onDelete }) 
       .then((data) => {
         setApp(data);
         setStatusEdit(data.current_status);
+        setWithdrawReason(data.withdraw_reason || "self_withdraw");
         setError(null);
       })
       .catch((e) => {
@@ -54,11 +56,13 @@ export default function ApplicationDetail({ applicationId, onClose, onDelete }) 
     }
   };
 
-  const handleStatusChange = async (newStatus) => {
+  const handleStatusChange = async (newStatus, reason) => {
     setStatusEdit(newStatus);
     setSaving(true);
     try {
-      await api.updateApplication(applicationId, { current_status: newStatus });
+      const patch = { current_status: newStatus };
+      if (newStatus === "Withdrawn") patch.withdraw_reason = reason || withdrawReason;
+      await api.updateApplication(applicationId, patch);
       fetchApp();
     } catch (e) {
       setError(e.message);
@@ -262,7 +266,7 @@ export default function ApplicationDetail({ applicationId, onClose, onDelete }) 
                 </div>
                 <div>
                   <dt className="text-gray-500 dark:text-gray-400">Status</dt>
-                  <dd className="flex items-center gap-2">
+                  <dd className="flex flex-wrap items-center gap-2">
                     <select
                       value={statusEdit}
                       onChange={(e) => handleStatusChange(e.target.value)}
@@ -275,6 +279,20 @@ export default function ApplicationDetail({ applicationId, onClose, onDelete }) 
                         </option>
                       ))}
                     </select>
+                    {statusEdit === "Withdrawn" && (
+                      <select
+                        value={withdrawReason}
+                        onChange={(e) => {
+                          setWithdrawReason(e.target.value);
+                          handleStatusChange("Withdrawn", e.target.value);
+                        }}
+                        disabled={saving}
+                        className="border border-gray-300 dark:border-gray-600 rounded px-2 py-1 text-xs bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      >
+                        <option value="self_withdraw">Self Withdraw</option>
+                        <option value="company_closed">Company Closed</option>
+                      </select>
+                    )}
                     {saving && <span className="text-xs text-gray-400">Saving…</span>}
                   </dd>
                 </div>

@@ -15,7 +15,7 @@ def test_list_500_apps_under_300ms(tmp_path) -> None:
         db.upsert_application(Application(
             company=f"Company{i}",
             role="Engineer",
-            source_portal=["Naukri", "LinkedIn", "Direct/Unknown"][i % 3],
+            source_portal=["Naukri", "LinkedIn", "Direct/Consultancy"][i % 3],
             applied_date=datetime.utcnow(),
             current_status=ApplicationStatus.APPLIED,
         ))

@@ -52,6 +52,7 @@ class ApplicationResponse(BaseModel):
     current_status: ApplicationStatus
     thread_ids: str
     is_false_positive: bool
+    withdraw_reason: Optional[str]
     created_at: datetime
     updated_at: datetime
     is_stale: bool
@@ -161,6 +162,16 @@ class ApplicationPatch(BaseModel):
     job_url: Optional[str] = None
     applied_date: Optional[datetime] = None
     is_false_positive: Optional[bool] = None
+    withdraw_reason: Optional[str] = None
+
+
+class BulkWithdrawRequest(BaseModel):
+    companies: list[str]  # company names extracted from LinkedIn paste
+
+
+class BulkWithdrawResponse(BaseModel):
+    updated: int
+    application_ids: list[int]
 
 
 class SuppressRuleCreate(BaseModel):
@@ -185,6 +196,7 @@ def _to_response(app: Application) -> ApplicationResponse:
         current_status=app.current_status,
         thread_ids=app.thread_ids,
         is_false_positive=app.is_false_positive,
+        withdraw_reason=app.withdraw_reason,
         created_at=app.created_at,
         updated_at=app.updated_at,
         is_stale=is_application_stale(app),
@@ -229,6 +241,7 @@ async def list_applications(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     search: Optional[str] = None,
+    is_stale: Optional[bool] = None,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=500),
 ) -> ApplicationListResponse:
@@ -247,6 +260,7 @@ async def list_applications(
         date_from=date_from_dt,
         date_to=date_to_dt,
         search=search,
+        is_stale=is_stale,
         page=page,
         page_size=page_size,
     )
@@ -362,7 +376,7 @@ async def patch_application(
 
     if body.current_status is not None:
         updater: StatusUpdater = request.app.state.updater
-        app = updater.manual_update(id, body.current_status)
+        app = updater.manual_update(id, body.current_status, body.withdraw_reason)
 
     needs_upsert = False
     if body.company is not None:
@@ -385,6 +399,23 @@ async def patch_application(
         app = db.upsert_application(app)
 
     return _to_response(app)
+
+
+@router.post("/applications/bulk-withdraw", response_model=BulkWithdrawResponse)
+async def bulk_withdraw_by_companies(
+    body: BulkWithdrawRequest, request: Request
+) -> BulkWithdrawResponse:
+    """Mark active applications as Withdrawn (company_closed) for given company names."""
+    db: DataStore = request.app.state.db
+    updater: StatusUpdater = request.app.state.updater
+    companies = [c.strip() for c in body.companies if c.strip()]
+    apps = db.find_active_applications_by_companies(companies)
+    ids: list[int] = []
+    for app in apps:
+        assert app.id is not None
+        updater.manual_update(app.id, ApplicationStatus.WITHDRAWN, "company_closed")
+        ids.append(app.id)
+    return BulkWithdrawResponse(updated=len(ids), application_ids=ids)
 
 
 @router.delete("/applications/{id}")

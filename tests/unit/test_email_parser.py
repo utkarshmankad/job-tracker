@@ -64,7 +64,7 @@ def test_direct_hr_detected(parser: EmailParser) -> None:
     )
     result = parser.parse(email, suppress_rules=[])
     assert result is not None
-    assert result.source_portal == "Direct/Unknown"
+    assert result.source_portal == "Direct/Consultancy"
     assert result.is_classification_confident is False
 
 

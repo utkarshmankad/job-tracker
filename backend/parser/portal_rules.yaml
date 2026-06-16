@@ -217,9 +217,9 @@ portals:
       interview_scheduled: ["interview"]
       rejected: ["regret", "not selected"]
 
-  - name: Direct/Unknown
+  - name: Direct/Consultancy
     sender_domains: []
-    # These patterns are the ONLY filter for Direct/Unknown (no domain anchor).
+    # These patterns are the ONLY filter for Direct/Consultancy (no domain anchor).
     # Keep them specific enough to avoid false positives from certification/marketing emails.
     subject_patterns:
       - "your application"

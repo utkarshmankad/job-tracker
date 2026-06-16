@@ -41,6 +41,7 @@ class ApplicationFilter:
     date_from: Optional[datetime] = None
     date_to: Optional[datetime] = None
     search: Optional[str] = None  # matches company or role (case-insensitive)
+    is_stale: Optional[bool] = None
     page: int = 1
     page_size: int = 50
 
@@ -61,7 +62,16 @@ class DataStore:
             cursor.close()
 
         SQLModel.metadata.create_all(self._engine)
+        self._migrate_schema()
         self._ensure_poller_state()
+
+    def _migrate_schema(self) -> None:
+        from sqlalchemy import text
+        with self._engine.connect() as conn:
+            cols = {row[1] for row in conn.execute(text("PRAGMA table_info(application)"))}
+            if "withdraw_reason" not in cols:
+                conn.execute(text("ALTER TABLE application ADD COLUMN withdraw_reason VARCHAR"))
+                conn.commit()
 
     def _ensure_poller_state(self) -> None:
         with Session(self._engine) as session:
@@ -114,6 +124,18 @@ class DataStore:
                         col(Application.role).ilike(term),
                     )
                 )
+            if filters.is_stale is True:
+                stale_cutoff = datetime.utcnow() - timedelta(days=STALE_DAYS_THRESHOLD)
+                conditions.append(Application.current_status == ApplicationStatus.APPLIED)
+                conditions.append(col(Application.updated_at) < stale_cutoff)
+            elif filters.is_stale is False:
+                stale_cutoff = datetime.utcnow() - timedelta(days=STALE_DAYS_THRESHOLD)
+                conditions.append(
+                    ~(
+                        (Application.current_status == ApplicationStatus.APPLIED)
+                        & (col(Application.updated_at) < stale_cutoff)
+                    )
+                )
 
             base_stmt = select(Application)
             for cond in conditions:
@@ -152,6 +174,25 @@ class DataStore:
                         Application.role == None,  # noqa: E711
                     )
                 )
+            )
+            return list(session.exec(stmt).all())
+
+    def find_active_applications_by_companies(self, company_names: list[str]) -> list[Application]:
+        """Return non-Withdrawn, non-false-positive applications whose company matches any name (case-insensitive)."""
+        terminal = {ApplicationStatus.WITHDRAWN, ApplicationStatus.REJECTED, ApplicationStatus.JOINED, ApplicationStatus.OFFER}
+        with Session(self._engine, expire_on_commit=False) as session:
+            conditions = [
+                col(Application.company).ilike(name)
+                for name in company_names
+                if name.strip()
+            ]
+            if not conditions:
+                return []
+            stmt = (
+                select(Application)
+                .where(Application.is_false_positive == False)  # noqa: E712
+                .where(Application.current_status.notin_([s.value for s in terminal]))  # type: ignore[attr-defined]
+                .where(or_(*conditions))
             )
             return list(session.exec(stmt).all())
 

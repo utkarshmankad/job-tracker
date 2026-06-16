@@ -154,7 +154,12 @@ class StatusUpdater:
             saved = result
         return saved
 
-    def manual_update(self, application_id: int, new_status: ApplicationStatus) -> Application:
+    def manual_update(
+        self,
+        application_id: int,
+        new_status: ApplicationStatus,
+        withdraw_reason: str | None = None,
+    ) -> Application:
         record = self._db.get_application(application_id)
         if record is None:
             raise ValueError(f"Application {application_id} not found")
@@ -162,6 +167,10 @@ class StatusUpdater:
         from_val = record.current_status.value
         record.current_status = new_status
         record.updated_at = datetime.utcnow()
+        if new_status == ApplicationStatus.WITHDRAWN:
+            record.withdraw_reason = withdraw_reason or "self_withdraw"
+        elif record.withdraw_reason is not None:
+            record.withdraw_reason = None
         updated = self._db.upsert_application(record)
         self._db.append_status_history(
             application_id=application_id,

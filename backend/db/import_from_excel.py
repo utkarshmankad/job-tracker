@@ -43,7 +43,7 @@ def _status(raw: str | None) -> str:
 
 def _portal(raw: str | None) -> str:
     if not raw:
-        return "Direct/Unknown"
+        return "Direct/Consultancy"
     return raw.strip()
 
 

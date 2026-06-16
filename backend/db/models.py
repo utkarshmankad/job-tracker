@@ -40,6 +40,7 @@ class Application(SQLModel, table=True):
     )
     thread_ids: str = "[]"  # JSON-encoded list[str]
     is_false_positive: bool = False
+    withdraw_reason: Optional[str] = None  # "self_withdraw" | "company_closed"
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow, index=True)
     status_history: List["StatusHistory"] = Relationship(back_populates="application")

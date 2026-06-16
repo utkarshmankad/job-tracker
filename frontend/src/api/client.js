@@ -30,6 +30,9 @@ export const api = {
   triggerPoll: () => request("/poller/trigger", { method: "POST" }),
   getSystemStatus: () => request("/status"),
 
+  bulkWithdraw: (companies) =>
+    request("/applications/bulk-withdraw", { method: "POST", body: JSON.stringify({ companies }) }),
+
   listSuppressRules: () => request("/suppress-rules"),
   createSuppressRule: (body) =>
     request("/suppress-rules", { method: "POST", body: JSON.stringify(body) }),

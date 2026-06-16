@@ -29,5 +29,5 @@ export const SOURCE_PORTALS = [
   "Instahire",
   "Wellfound",
   "Instahyre",
-  "Direct/Unknown",
+  "Direct/Consultancy",
 ];

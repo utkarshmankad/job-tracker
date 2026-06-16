@@ -478,7 +478,7 @@ def test_delete_adds_suppress_rule_for_sender_domain(seeded_client):
     saved = test_db.upsert_application(Application(
         company="Acme Corp",
         role="Engineer",
-        source_portal="Direct/Unknown",
+        source_portal="Direct/Consultancy",
         applied_date=datetime(2024, 6, 1),
         thread_ids='["thread-abc123"]',
     ))

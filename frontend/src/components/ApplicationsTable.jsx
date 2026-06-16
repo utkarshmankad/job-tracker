@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo, startTransition } from "react";
 import {
   useReactTable,
   getCoreRowModel,
@@ -54,7 +54,9 @@ export default function ApplicationsTable({ filters, onSelectId }) {
     const observer = new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting) {
-          setDisplayCount((c) => Math.min(c + BATCH, data.length));
+          startTransition(() => {
+            setDisplayCount((c) => Math.min(c + BATCH, data.length));
+          });
         }
       },
       { threshold: 0 }
@@ -99,10 +101,11 @@ export default function ApplicationsTable({ filters, onSelectId }) {
       },
       {
         accessorKey: "is_stale",
-        header: "Stale",
+        header: "",
+        enableSorting: false,
         cell: (info) =>
           info.getValue() ? (
-            <span title="Stale — no update in 14 days">⚠️</span>
+            <span title="Stale — no update in 14+ days" className="text-amber-400 text-xs">⚠</span>
           ) : null,
       },
       {
@@ -176,22 +179,28 @@ export default function ApplicationsTable({ filters, onSelectId }) {
               </td>
             </tr>
           ) : (
-            visibleRows.map((row) => (
-              <tr key={row.id} className="hover:bg-gray-50 dark:hover:bg-gray-800">
-                {row.getVisibleCells().map((cell, cellIdx) => (
-                  <td
-                    key={cell.id}
-                    className={`px-4 py-3 text-gray-700 dark:text-gray-300 ${
-                      cellIdx === 0 && row.original.is_stale
-                        ? "border-l-4 border-amber-400"
-                        : ""
-                    }`}
-                  >
-                    {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                  </td>
-                ))}
-              </tr>
-            ))
+            visibleRows.map((row) => {
+              const stale = row.original.is_stale;
+              return (
+                <tr
+                  key={row.id}
+                  className={`hover:bg-gray-50 dark:hover:bg-gray-800 ${
+                    stale ? "opacity-50" : ""
+                  }`}
+                >
+                  {row.getVisibleCells().map((cell, cellIdx) => (
+                    <td
+                      key={cell.id}
+                      className={`px-4 py-3 text-gray-700 dark:text-gray-300 ${
+                        cellIdx === 0 && stale ? "border-l-4 border-amber-400" : ""
+                      }`}
+                    >
+                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                    </td>
+                  ))}
+                </tr>
+              );
+            })
           )}
         </tbody>
       </table>
