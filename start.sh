@@ -11,6 +11,7 @@ PID_DIR="$SCRIPT_DIR/.job-tracker"
 PLIST_API="$HOME/Library/LaunchAgents/com.jobtracker.api.plist"
 API_PORT=8000
 FRONTEND_PORT=5173
+OLLAMA_PORT=11434
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; BOLD='\033[1m'; NC='\033[0m'
@@ -91,6 +92,29 @@ start_backend() {
     ok "Backend   PID=$pid   http://jobtracker.localhost:$API_PORT"
 }
 
+# ── Start ollama serve if not already running; skip gracefully if not installed
+start_ollama() {
+    if ! command -v ollama &>/dev/null; then
+        warn "ollama not found in PATH — skipping"
+        return
+    fi
+    if lsof -ti :"$OLLAMA_PORT" &>/dev/null; then
+        ok "Ollama already running on port $OLLAMA_PORT"
+        return
+    fi
+    mkdir -p "$LOG_DIR" "$PID_DIR"
+    ollama serve \
+        >> "$LOG_DIR/ollama.log" 2>> "$LOG_DIR/ollama_error.log" &
+    local pid=$!
+    echo "$pid" > "$PID_DIR/ollama.pid"
+    sleep 2
+    if ! kill -0 "$pid" 2>/dev/null; then
+        warn "Ollama exited immediately — check $LOG_DIR/ollama_error.log"
+        return
+    fi
+    ok "Ollama    PID=$pid   http://localhost:$OLLAMA_PORT"
+}
+
 # ── Start Vite dev server in the background
 start_frontend() {
     mkdir -p "$LOG_DIR" "$PID_DIR"
@@ -119,11 +143,13 @@ check_db
 init_db
 
 step "Starting services"
+start_ollama
 start_backend
 start_frontend
 
 printf "\n${GREEN}${BOLD}All systems up.${NC}\n"
+printf "  Ollama   →  http://localhost:%s\n" "$OLLAMA_PORT"
 printf "  API      →  http://jobtracker.localhost:%s\n" "$API_PORT"
 printf "  Frontend →  http://jobtracker.localhost:%s\n" "$FRONTEND_PORT"
 printf "  Logs     →  %s\n" "$LOG_DIR"
-printf "  PIDs     →  %s/{api,frontend}.pid\n\n" "$PID_DIR"
+printf "  PIDs     →  %s/{ollama,api,frontend}.pid\n\n" "$PID_DIR"
