@@ -179,6 +179,53 @@ class SuppressRuleCreate(BaseModel):
     subject_pattern: Optional[str] = None
 
 
+class LinkedInPreviewRequest(BaseModel):
+    text: str
+    mode: str  # "applied" | "archived" | "interview"
+
+
+class LinkedInPreviewEntry(BaseModel):
+    company: Optional[str]
+    role: Optional[str]
+    applied_date: Optional[datetime]
+    predicted_action: str  # "create" | "skip" | "update" | "no_data"
+    existing_id: Optional[int]
+
+
+class LinkedInPreviewResponse(BaseModel):
+    entries: list[LinkedInPreviewEntry]
+    garbage_lines: list[int]  # 1-indexed line numbers the LLM tagged as noise
+    llm_used: bool
+
+
+class LinkedInConfirmedEntry(BaseModel):
+    company: Optional[str] = None
+    role: Optional[str] = None
+    applied_date: Optional[datetime] = None
+    include: bool = True
+
+
+class LinkedInImportConfirmedRequest(BaseModel):
+    mode: str  # "applied" | "archived" | "interview"
+    entries: list[LinkedInConfirmedEntry]
+
+
+class LinkedInImportEntryResult(BaseModel):
+    company: Optional[str]
+    role: Optional[str]
+    applied_date: Optional[datetime]
+    action: str  # "created" | "updated" | "skipped" | "failed"
+    application_id: Optional[int]
+
+
+class LinkedInImportResponse(BaseModel):
+    created: int
+    updated: int
+    skipped: int
+    failed: int
+    entries: list[LinkedInImportEntryResult]
+
+
 # ------------------------------------------------------------------ #
 # Helpers                                                              #
 # ------------------------------------------------------------------ #
@@ -416,6 +463,196 @@ async def bulk_withdraw_by_companies(
         updater.manual_update(app.id, ApplicationStatus.WITHDRAWN, "company_closed")
         ids.append(app.id)
     return BulkWithdrawResponse(updated=len(ids), application_ids=ids)
+
+
+_LINKEDIN_STATUS_RANK: dict[ApplicationStatus, int] = {
+    ApplicationStatus.APPLIED: 0,
+    ApplicationStatus.RESUME_SHORTLISTED: 1,
+    ApplicationStatus.INTERVIEW_SCHEDULED: 2,
+    ApplicationStatus.INTERVIEW_IN_PROGRESS: 3,
+    ApplicationStatus.OFFER_NEGOTIATION: 4,
+    ApplicationStatus.OFFER: 5,
+    ApplicationStatus.JOINED: 6,
+}
+
+_LINKEDIN_VALID_MODES = {"applied", "archived", "interview"}
+
+
+def _linkedin_predict(
+    db: DataStore,
+    company: Optional[str],
+    role: Optional[str],
+    mode: str,
+) -> tuple[str, Optional[int]]:
+    """Return (predicted_action, existing_id) without touching the DB."""
+    if not company and not role:
+        return "no_data", None
+    existing = db.find_application_by_company_role(company or "", role or "") if (company and role) else None
+    if existing is None:
+        return "create", None
+    assert existing.id is not None
+    if mode == "interview":
+        current_rank = _LINKEDIN_STATUS_RANK.get(existing.current_status, -1)
+        target_rank = _LINKEDIN_STATUS_RANK[ApplicationStatus.INTERVIEW_IN_PROGRESS]
+        return ("update" if 0 <= current_rank < target_rank else "skip"), existing.id
+    return "skip", existing.id
+
+
+# NOTE: /applications/linkedin-import/preview and /confirmed must be registered
+# before /applications/{id} (they are literal path segments, not captured as int id).
+
+@router.post("/applications/linkedin-import/preview", response_model=LinkedInPreviewResponse)
+async def linkedin_import_preview(
+    body: LinkedInPreviewRequest, request: Request
+) -> LinkedInPreviewResponse:
+    """Parse pasted LinkedIn text with LLM (fallback: regex). No DB writes."""
+    from backend.parser.linkedin_paste_parser import parse_linkedin_paste  # noqa: PLC0415
+    from backend.parser.llm_extractor import LLMExtractor  # noqa: PLC0415
+
+    if body.mode not in _LINKEDIN_VALID_MODES:
+        raise HTTPException(status_code=400, detail="mode must be 'applied', 'archived', or 'interview'")
+
+    db: DataStore = request.app.state.db
+    llm: LLMExtractor | None = getattr(request.app.state, "llm_extractor", None)
+    today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+
+    entries: list[LinkedInPreviewEntry] = []
+    garbage_lines: list[int] = []
+    llm_used = False
+
+    # Regex parser is always authoritative for company/role/date extraction.
+    for e in parse_linkedin_paste(body.text):
+        action, existing_id = _linkedin_predict(db, e.company, e.role, body.mode)
+        entries.append(LinkedInPreviewEntry(
+            company=e.company,
+            role=e.role,
+            applied_date=e.applied_date,
+            predicted_action=action,
+            existing_id=existing_id,
+        ))
+
+    # LLM classifies which lines are garbage (noise highlighting only, no DB impact).
+    if llm is not None:
+        llm_result = llm.classify_linkedin_garbage(body.text)
+        if llm_result is not None:
+            llm_used = True
+            garbage_lines = llm_result.garbage_line_numbers
+
+    return LinkedInPreviewResponse(entries=entries, garbage_lines=garbage_lines, llm_used=llm_used)
+
+
+@router.post("/applications/linkedin-import/confirmed", response_model=LinkedInImportResponse)
+async def linkedin_import_confirmed(
+    body: LinkedInImportConfirmedRequest, request: Request
+) -> LinkedInImportResponse:
+    """Write user-confirmed LinkedIn entries to the database."""
+    if body.mode not in _LINKEDIN_VALID_MODES:
+        raise HTTPException(status_code=400, detail="mode must be 'applied', 'archived', or 'interview'")
+
+    db: DataStore = request.app.state.db
+    updater: StatusUpdater = request.app.state.updater
+
+    target_status = (
+        ApplicationStatus.INTERVIEW_IN_PROGRESS
+        if body.mode == "interview"
+        else ApplicationStatus.APPLIED
+    )
+    today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+
+    created = updated = skipped = failed = 0
+    results: list[LinkedInImportEntryResult] = []
+
+    for entry in body.entries:
+        if not entry.include:
+            continue
+        try:
+            applied_date = entry.applied_date or today
+            existing: Application | None = None
+
+            if entry.company and entry.role:
+                existing = db.find_application_by_company_role(entry.company, entry.role)
+
+            if existing is not None:
+                assert existing.id is not None
+                if body.mode == "interview":
+                    current_rank = _LINKEDIN_STATUS_RANK.get(existing.current_status, -1)
+                    target_rank = _LINKEDIN_STATUS_RANK[ApplicationStatus.INTERVIEW_IN_PROGRESS]
+                    if 0 <= current_rank < target_rank:
+                        updater.manual_update(existing.id, ApplicationStatus.INTERVIEW_IN_PROGRESS)
+                        updated += 1
+                        action = "updated"
+                    else:
+                        skipped += 1
+                        action = "skipped"
+                else:
+                    skipped += 1
+                    action = "skipped"
+                results.append(LinkedInImportEntryResult(
+                    company=entry.company,
+                    role=entry.role,
+                    applied_date=applied_date,
+                    action=action,
+                    application_id=existing.id,
+                ))
+            else:
+                app = Application(
+                    company=entry.company,
+                    role=entry.role,
+                    source_portal="LinkedIn",
+                    job_url=None,
+                    applied_date=applied_date,
+                    current_status=target_status,
+                    updated_at=applied_date,
+                )
+                saved = db.upsert_application(app)
+                assert saved.id is not None
+                db.append_status_history(
+                    application_id=saved.id,
+                    from_status=None,
+                    to_status=target_status.value,
+                    trigger="manual",
+                    message_id=None,
+                )
+                created += 1
+                results.append(LinkedInImportEntryResult(
+                    company=entry.company,
+                    role=entry.role,
+                    applied_date=applied_date,
+                    action="created",
+                    application_id=saved.id,
+                ))
+
+        except Exception as exc:
+            log.warning(
+                "linkedin_import_entry_failed",
+                role=entry.role,
+                company=entry.company,
+                error=str(exc),
+            )
+            failed += 1
+            results.append(LinkedInImportEntryResult(
+                company=entry.company,
+                role=entry.role,
+                applied_date=entry.applied_date,
+                action="failed",
+                application_id=None,
+            ))
+
+    log.info(
+        "linkedin_import_confirmed",
+        mode=body.mode,
+        created=created,
+        updated=updated,
+        skipped=skipped,
+        failed=failed,
+    )
+    return LinkedInImportResponse(
+        created=created,
+        updated=updated,
+        skipped=skipped,
+        failed=failed,
+        entries=results,
+    )
 
 
 @router.delete("/applications/{id}")

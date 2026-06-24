@@ -33,6 +33,12 @@ export const api = {
   bulkWithdraw: (companies) =>
     request("/applications/bulk-withdraw", { method: "POST", body: JSON.stringify({ companies }) }),
 
+  linkedinPreview: (text, mode) =>
+    request("/applications/linkedin-import/preview", { method: "POST", body: JSON.stringify({ text, mode }) }),
+
+  linkedinImportConfirmed: (mode, entries) =>
+    request("/applications/linkedin-import/confirmed", { method: "POST", body: JSON.stringify({ mode, entries }) }),
+
   listSuppressRules: () => request("/suppress-rules"),
   createSuppressRule: (body) =>
     request("/suppress-rules", { method: "POST", body: JSON.stringify(body) }),

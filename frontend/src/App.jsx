@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import {
   LayoutList, BarChart2, Activity,
-  Download, PlusCircle, Sun, Moon,
+  Download, PlusCircle, Sun, Moon, ChevronDown,
 } from "lucide-react";
 
 function LinkedInIcon({ size = 16 }) {
@@ -21,6 +21,7 @@ import AddApplicationForm from "./components/AddApplicationForm";
 import AnalyticsPanel from "./components/AnalyticsPanel";
 import StatusPage from "./components/StatusPage";
 import LinkedInWithdrawModal from "./components/LinkedInWithdrawModal";
+import LinkedInImportModal from "./components/LinkedInImportModal";
 
 const NAV_TABS = [
   { id: "applications", label: "Applications", Icon: LayoutList },
@@ -34,7 +35,21 @@ export default function App() {
   const [selectedId, setSelectedId] = useState(null);
   const [showAddForm, setShowAddForm] = useState(false);
   const [showLinkedInModal, setShowLinkedInModal] = useState(false);
+  const [showLinkedInImportModal, setShowLinkedInImportModal] = useState(false);
+  const [showLinkedInDropdown, setShowLinkedInDropdown] = useState(false);
+  const linkedInDropdownRef = useRef(null);
   const { dark, toggle } = useTheme();
+
+  useEffect(() => {
+    if (!showLinkedInDropdown) return;
+    function handleClick(e) {
+      if (linkedInDropdownRef.current && !linkedInDropdownRef.current.contains(e.target)) {
+        setShowLinkedInDropdown(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [showLinkedInDropdown]);
   const [exportError, setExportError] = useState(null);
 
   const handleExport = async () => {
@@ -95,14 +110,33 @@ export default function App() {
             </nav>
 
             <div className="flex items-center gap-2">
-              <button
-                onClick={() => setShowLinkedInModal(true)}
-                title="Mark closed LinkedIn positions as Withdrawn"
-                aria-label="LinkedIn withdraw"
-                className="p-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors"
-              >
-                <LinkedInIcon size={16} />
-              </button>
+              <div className="relative" ref={linkedInDropdownRef}>
+                <button
+                  onClick={() => setShowLinkedInDropdown((v) => !v)}
+                  title="LinkedIn tools"
+                  aria-label="LinkedIn tools"
+                  className="flex items-center gap-1 p-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors"
+                >
+                  <LinkedInIcon size={16} />
+                  <ChevronDown size={11} />
+                </button>
+                {showLinkedInDropdown && (
+                  <div className="absolute right-0 top-full mt-1 w-44 bg-white dark:bg-gray-800 rounded-lg shadow-lg border border-gray-200 dark:border-gray-700 z-50 py-1">
+                    <button
+                      onClick={() => { setShowLinkedInImportModal(true); setShowLinkedInDropdown(false); }}
+                      className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+                    >
+                      Import Jobs
+                    </button>
+                    <button
+                      onClick={() => { setShowLinkedInModal(true); setShowLinkedInDropdown(false); }}
+                      className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+                    >
+                      Mark Closed
+                    </button>
+                  </div>
+                )}
+              </div>
               <button
                 onClick={handleExport}
                 title="Export as CSV"
@@ -165,6 +199,12 @@ export default function App() {
         {showLinkedInModal && (
           <LinkedInWithdrawModal
             onClose={() => setShowLinkedInModal(false)}
+            onSuccess={() => setFilters((f) => ({ ...f }))}
+          />
+        )}
+        {showLinkedInImportModal && (
+          <LinkedInImportModal
+            onClose={() => setShowLinkedInImportModal(false)}
             onSuccess={() => setFilters((f) => ({ ...f }))}
           />
         )}

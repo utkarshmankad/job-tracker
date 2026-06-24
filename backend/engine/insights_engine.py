@@ -8,7 +8,7 @@ from datetime import date, datetime, timedelta
 import structlog
 
 from backend.config import INTERVIEW_RATE_GREEN_THRESHOLD, MIN_APPLICATIONS_FOR_INSIGHTS
-from backend.db.data_store import ApplicationFilter, DataStore
+from backend.db.data_store import ApplicationFilter, DataStore, is_application_stale
 from backend.db.models import Application, ApplicationStatus
 
 log = structlog.get_logger(__name__)
@@ -144,7 +144,7 @@ class InsightsEngine:
         if total == 0:
             return {
                 "nodes": [], "links": [], "outcomes": [],
-                "kpis": {"total": 0, "interview_rate": 0.0, "offer_rate": 0.0, "active": 0, "withdrawn": 0},
+                "kpis": {"total": 0, "interview_rate": 0.0, "offer_rate": 0.0, "active": 0, "withdrawn": 0, "stale": 0},
                 "weekly_activity": [],
                 "insufficient_data": True,
             }
@@ -157,8 +157,8 @@ class InsightsEngine:
             if h.application_id is not None:
                 stages_by_app.setdefault(h.application_id, set()).add(h.to_status)
 
-        # Counters per broad stage — Rejected and Withdrawn tracked separately
-        rejected_direct  = withdrawn_direct  = active_applied = 0
+        # Counters per broad stage — Rejected, Withdrawn, Stale tracked separately
+        rejected_direct  = withdrawn_direct  = active_applied = stale_applied = 0
         rejected_post_short = withdrawn_post_short = active_short = 0
         rejected_post_int   = withdrawn_post_int   = active_int  = 0
         offered = 0
@@ -188,11 +188,13 @@ class InsightsEngine:
             else:
                 if is_rejected:       rejected_direct  += 1
                 elif is_withdrawn:    withdrawn_direct += 1
+                elif is_application_stale(app): stale_applied += 1
                 else:                 active_applied   += 1
 
         total_rejected  = rejected_direct  + rejected_post_short  + rejected_post_int
         total_withdrawn = withdrawn_direct + withdrawn_post_short + withdrawn_post_int
         total_active    = active_applied   + active_short         + active_int
+        total_stale     = stale_applied
 
         # Apps that ever reached each stage (including those that later withdrew/rejected)
         shortlisted_total = (
@@ -210,6 +212,7 @@ class InsightsEngine:
             {"id": "Rejected",      "count": total_rejected},
             {"id": "Withdrawn",     "count": total_withdrawn},
             {"id": "Active",        "count": total_active},
+            {"id": "Stale",         "count": total_stale},
         ]
 
         links: list[dict] = []
@@ -221,6 +224,8 @@ class InsightsEngine:
             links.append({"source": "Applied",     "target": "Withdrawn",     "value": withdrawn_direct})
         if active_applied:
             links.append({"source": "Applied",     "target": "Active",        "value": active_applied})
+        if stale_applied:
+            links.append({"source": "Applied",     "target": "Stale",         "value": stale_applied})
         if interview_total:
             links.append({"source": "Shortlisted", "target": "Interview",     "value": interview_total})
         if rejected_post_short:
@@ -243,6 +248,7 @@ class InsightsEngine:
             {"name": "Offer / Joined","value": offered,          "color": "#22c55e"},
             {"name": "Rejected",      "value": total_rejected,  "color": "#ef4444"},
             {"name": "Withdrawn",     "value": total_withdrawn, "color": "#f97316"},
+            {"name": "Stale",         "value": total_stale,     "color": "#eab308"},
         ]
 
         return {
@@ -255,6 +261,7 @@ class InsightsEngine:
                 "offer_rate": round(offered / total, 4) if total else 0.0,
                 "active": total_active,
                 "withdrawn": total_withdrawn,
+                "stale": total_stale,
             },
             "weekly_activity": self._weekly_activity(apps),
             "insufficient_data": total < MIN_APPLICATIONS_FOR_INSIGHTS,

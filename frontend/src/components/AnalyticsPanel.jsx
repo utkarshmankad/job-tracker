@@ -18,6 +18,7 @@ const NODE_COLORS = {
   "Rejected":      "#ef4444",
   "Withdrawn":     "#f97316",
   "Active":        "#3b82f6",
+  "Stale":         "#eab308",
 };
 
 const DEFAULT_COLOR = "#94a3b8";
@@ -351,7 +352,8 @@ export default function AnalyticsPanel() {
     );
   }
 
-  const { kpis, nodes, links, outcomes, weekly_activity } = flow;
+  const { kpis, nodes, links, weekly_activity } = flow;
+  const outcomes = (flow.outcomes ?? []).filter((o) => o.value > 0);
   const channelData = insights?.channels?.map((c) => ({
     ...c,
     application_count: c.total,
@@ -365,9 +367,10 @@ export default function AnalyticsPanel() {
   return (
     <div className="space-y-6">
       {/* KPI row */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
         <KpiCard label="Total Applications" value={kpis.total} />
         <KpiCard label="Active" value={kpis.active} sub="in progress" />
+        <KpiCard label="Stale" value={kpis.stale ?? 0} sub="no update in 14d" accent="text-yellow-500 dark:text-yellow-400" />
         <KpiCard label="Withdrawn" value={kpis.withdrawn ?? 0} sub="self-withdrew" accent="text-orange-500 dark:text-orange-400" />
         <KpiCard label="Interview Rate" value={formatPercent(kpis.interview_rate)} sub="of all applications" />
         <KpiCard label="Offer Rate" value={formatPercent(kpis.offer_rate)} sub="of all applications" />

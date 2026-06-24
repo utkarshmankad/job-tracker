@@ -1,7 +1,8 @@
-"""LLM-based email field extractor using Ollama local inference."""
+"""LLM-based email field extractor and LinkedIn paste parser using Ollama local inference."""
 
 import json
 from dataclasses import dataclass
+from datetime import datetime
 
 import httpx
 import structlog
@@ -10,7 +11,10 @@ from backend.db.models import ApplicationStatus
 
 log = structlog.get_logger(__name__)
 
-# Canonical status strings the LLM must use (excludes APPLIED — that's the default / None)
+# ──────────────────────────────────────────────────────────────────────────────
+# Email extraction
+# ──────────────────────────────────────────────────────────────────────────────
+
 _STATUS_MAP: dict[str, ApplicationStatus] = {
     "RESUME_SHORTLISTED": ApplicationStatus.RESUME_SHORTLISTED,
     "INTERVIEW_SCHEDULED": ApplicationStatus.INTERVIEW_SCHEDULED,
@@ -22,7 +26,7 @@ _STATUS_MAP: dict[str, ApplicationStatus] = {
     "JOINED": ApplicationStatus.JOINED,
 }
 
-_SYSTEM_PROMPT = """\
+_EMAIL_SYSTEM_PROMPT = """\
 You are a precise job application email parser. Extract structured fields from job-related emails.
 
 Return ONLY a valid JSON object with these exact keys:
@@ -47,6 +51,32 @@ Rules:
 - If the email is a generic newsletter, digest, or unrelated marketing, set all fields to null.\
 """
 
+# ──────────────────────────────────────────────────────────────────────────────
+# LinkedIn paste parser
+# ──────────────────────────────────────────────────────────────────────────────
+
+_LINKEDIN_GARBAGE_PROMPT = """\
+You classify lines from a LinkedIn "My Jobs" page paste as GARBAGE (noise) or CONTENT (useful).
+
+GARBAGE lines — put their line numbers in garbage_line_numbers:
+- "Add note" (LinkedIn UI button text)
+- User note text: arbitrary sentences following "Add note" (e.g. "Got it. We will check back...")
+- Parenthetical metadata: "(Posted Xw ago)", "(Reposted Xw ago)", "(No longer accepting applications)"
+- Location names: city, state, country combinations; "Remote", "Hybrid", "On-site"
+- "Easy Apply", "Promoted", "Actively recruiting", "Be an early applicant"
+- Applicant counts: "200+ applicants", "Over 100 applicants"
+
+NOT garbage (do not include):
+- Company names
+- Job titles / roles
+- "Applied X ago", "Applied today", "Applied yesterday"
+- "Archived", "Interviewing", "In progress"
+- Blank lines (ignore them; do not include in garbage_line_numbers)
+
+Return ONLY valid JSON:
+{"garbage_line_numbers": [5, 7, 8, 9, 10]}\
+"""
+
 
 @dataclass
 class LLMExtractionResult:
@@ -55,11 +85,19 @@ class LLMExtractionResult:
     status: ApplicationStatus | None
 
 
+@dataclass
+class LinkedInGarbageResult:
+    """LLM output: which lines in the paste are noise/garbage."""
+    garbage_line_numbers: list[int]
+
+
 class LLMExtractor:
     def __init__(self, base_url: str, model: str, timeout: int = 30) -> None:
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._timeout = timeout
+
+    # ── Email extraction ──────────────────────────────────────────────────────
 
     def extract(
         self,
@@ -68,7 +106,7 @@ class LLMExtractor:
         snippet: str,
         body_text: str | None = None,
     ) -> LLMExtractionResult | None:
-        """Call Ollama to extract company, role, and status.
+        """Call Ollama to extract company, role, and status from a job email.
 
         Returns None when Ollama is unavailable or returns malformed output so the
         caller can fall back to the deterministic regex/spaCy path.
@@ -79,36 +117,13 @@ class LLMExtractor:
         if body_text:
             parts.append(f"Body excerpt: {body_text[:500]}")
 
-        try:
-            response = httpx.post(
-                f"{self._base_url}/api/chat",
-                json={
-                    "model": self._model,
-                    "messages": [
-                        {"role": "system", "content": _SYSTEM_PROMPT},
-                        {"role": "user", "content": "\n".join(parts)},
-                    ],
-                    "format": "json",
-                    "stream": False,
-                    "options": {"temperature": 0},
-                },
-                timeout=self._timeout,
-            )
-            response.raise_for_status()
-        except httpx.ConnectError:
-            log.warning("ollama_unavailable_falling_back", base_url=self._base_url)
-            return None
-        except httpx.TimeoutException:
-            log.warning("ollama_timeout_falling_back", timeout=self._timeout)
-            return None
-        except httpx.HTTPStatusError as exc:
-            log.warning("ollama_http_error_falling_back", status_code=exc.response.status_code)
+        raw = self._chat(_EMAIL_SYSTEM_PROMPT, "\n".join(parts), log_key="email")
+        if raw is None:
             return None
 
         try:
-            raw = response.json()["message"]["content"]
             parsed = json.loads(raw)
-        except (KeyError, json.JSONDecodeError) as exc:
+        except json.JSONDecodeError as exc:
             log.warning("ollama_parse_error_falling_back", error=str(exc))
             return None
 
@@ -120,6 +135,75 @@ class LLMExtractor:
             role=_clean_str(parsed.get("role")),
             status=status,
         )
+
+    # ── LinkedIn paste parser ─────────────────────────────────────────────────
+
+    def classify_linkedin_garbage(self, text: str) -> LinkedInGarbageResult | None:
+        """Ask Ollama to tag noise/garbage lines in a LinkedIn paste.
+
+        Regex handles company/role/date extraction; LLM only handles the
+        harder garbage classification (user notes, ambiguous metadata).
+        Returns None when Ollama is unavailable — caller omits highlighting.
+        """
+        lines = text.split("\n")
+        # Only send non-blank lines to save tokens; track original indices.
+        indexed = [(i + 1, line) for i, line in enumerate(lines) if line.strip()]
+        if not indexed:
+            return LinkedInGarbageResult(garbage_line_numbers=[])
+
+        numbered = "\n".join(f"{num}| {line}" for num, line in indexed)
+        total_lines = len(lines)
+        valid_nums = {num for num, _ in indexed}
+
+        raw = self._chat(_LINKEDIN_GARBAGE_PROMPT, numbered, log_key="linkedin_garbage")
+        if raw is None:
+            return None
+
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            log.warning("ollama_json_error_linkedin_garbage", error=str(exc))
+            return None
+
+        raw_garbage = parsed.get("garbage_line_numbers", [])
+        garbage = [n for n in raw_garbage if isinstance(n, int) and n in valid_nums]
+
+        log.info("ollama_linkedin_garbage_ok", garbage_lines=len(garbage))
+        return LinkedInGarbageResult(garbage_line_numbers=garbage)
+
+    # ── Shared HTTP helper ────────────────────────────────────────────────────
+
+    def _chat(self, system: str, user: str, *, log_key: str) -> str | None:
+        """POST to Ollama /api/chat. Returns raw message content or None on failure."""
+        try:
+            response = httpx.post(
+                f"{self._base_url}/api/chat",
+                json={
+                    "model": self._model,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                    "format": "json",
+                    "stream": False,
+                    "options": {"temperature": 0},
+                },
+                timeout=self._timeout,
+            )
+            response.raise_for_status()
+            return response.json()["message"]["content"]
+        except httpx.ConnectError:
+            log.warning(f"ollama_unavailable_{log_key}", base_url=self._base_url)
+            return None
+        except httpx.TimeoutException:
+            log.warning(f"ollama_timeout_{log_key}", timeout=self._timeout)
+            return None
+        except httpx.HTTPStatusError as exc:
+            log.warning(f"ollama_http_error_{log_key}", status_code=exc.response.status_code)
+            return None
+        except (KeyError, Exception) as exc:
+            log.warning(f"ollama_unexpected_{log_key}", error=str(exc))
+            return None
 
 
 def _clean_str(value: object) -> str | None:

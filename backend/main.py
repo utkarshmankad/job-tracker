@@ -7,10 +7,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api.routes import router
-from backend.config import API_HOST, API_PORT, FRONTEND_PORT, FRONTEND_PORT_ALT
+from backend.config import (
+    API_HOST, API_PORT, FRONTEND_PORT, FRONTEND_PORT_ALT,
+    LLM_ENABLED, LLM_BASE_URL, LLM_MODEL, LLM_TIMEOUT_SECONDS,
+)
 from backend.db.data_store import DataStore
 from backend.engine.duplicate_detector import DuplicateDetector
 from backend.engine.status_updater import StatusUpdater
+from backend.parser.llm_extractor import LLMExtractor
 
 log = structlog.get_logger()
 
@@ -24,6 +28,9 @@ async def lifespan(app: FastAPI):
     app.state.db = db
     app.state.updater = StatusUpdater(db, DuplicateDetector(db))
     app.state.started_at = datetime.utcnow()
+    app.state.llm_extractor = (
+        LLMExtractor(LLM_BASE_URL, LLM_MODEL, LLM_TIMEOUT_SECONDS) if LLM_ENABLED else None
+    )
 
     poller = build_poller()
     scheduler = PollerScheduler(poller)
