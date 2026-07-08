@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
+import os
+
 import keyring
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
@@ -68,7 +70,9 @@ class GmailPoller:
         log.info("gmail_authenticated")
 
     def _load_token_from_keyring(self) -> Credentials | None:
-        token_json = keyring.get_password(GMAIL_KEYCHAIN_SERVICE, GMAIL_KEYCHAIN_USERNAME)
+        token_json = os.environ.get("GMAIL_TOKEN_JSON") or keyring.get_password(
+            GMAIL_KEYCHAIN_SERVICE, GMAIL_KEYCHAIN_USERNAME
+        )
         if not token_json:
             return None
         try:
@@ -80,6 +84,11 @@ class GmailPoller:
             return None
 
     def _save_token_to_keyring(self, creds: Credentials) -> None:
+        if os.environ.get("GMAIL_TOKEN_JSON"):
+            # Fly.io secrets are read-only at runtime; refreshed token stays
+            # in-memory for this process and re-refreshes on next restart.
+            log.info("gmail_token_refresh_not_persisted_env_backed")
+            return
         keyring.set_password(
             GMAIL_KEYCHAIN_SERVICE, GMAIL_KEYCHAIN_USERNAME, creds.to_json()
         )

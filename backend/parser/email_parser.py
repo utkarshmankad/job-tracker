@@ -11,6 +11,7 @@ import structlog
 import yaml
 
 from backend.config import (
+    LLM_API_KEY,
     LLM_BASE_URL,
     LLM_ENABLED,
     LLM_MODEL,
@@ -81,7 +82,8 @@ class EmailParser:
             log.warning("spacy_model_not_found_falling_back_to_regex_only")
             self._nlp = None
         self._llm: LLMExtractor | None = (
-            LLMExtractor(LLM_BASE_URL, LLM_MODEL, LLM_TIMEOUT_SECONDS) if LLM_ENABLED else None
+            LLMExtractor(LLM_BASE_URL, LLM_MODEL, LLM_TIMEOUT_SECONDS, LLM_API_KEY)
+            if LLM_ENABLED else None
         )
 
     def parse(self, email: RawEmail, suppress_rules: list[SuppressRule]) -> ParsedApplication | None:

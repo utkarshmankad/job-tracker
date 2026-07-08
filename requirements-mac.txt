@@ -1,0 +1,3 @@
+# macOS-only extras — not installable on Linux (Fly.io). Install locally with:
+#   pip install -r requirements.txt -r requirements-mac.txt
+pyobjc-framework-Cocoa==10.3.2

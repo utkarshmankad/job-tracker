@@ -92,10 +92,13 @@ class LinkedInGarbageResult:
 
 
 class LLMExtractor:
-    def __init__(self, base_url: str, model: str, timeout: int = 30) -> None:
+    def __init__(
+        self, base_url: str, model: str, timeout: int = 30, api_key: str | None = None
+    ) -> None:
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._timeout = timeout
+        self._api_key = api_key
 
     # ── Email extraction ──────────────────────────────────────────────────────
 
@@ -174,8 +177,31 @@ class LLMExtractor:
     # ── Shared HTTP helper ────────────────────────────────────────────────────
 
     def _chat(self, system: str, user: str, *, log_key: str) -> str | None:
-        """POST to Ollama /api/chat. Returns raw message content or None on failure."""
+        """POST to the configured LLM backend. Returns raw message content or None on failure.
+
+        Ollama's /api/chat and Groq's OpenAI-compatible /chat/completions have
+        different request/response shapes, so branch on whether an API key is
+        configured (Groq) vs local Ollama.
+        """
         try:
+            if self._api_key:
+                response = httpx.post(
+                    f"{self._base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {self._api_key}"},
+                    json={
+                        "model": self._model,
+                        "messages": [
+                            {"role": "system", "content": system},
+                            {"role": "user", "content": user},
+                        ],
+                        "response_format": {"type": "json_object"},
+                        "temperature": 0,
+                    },
+                    timeout=self._timeout,
+                )
+                response.raise_for_status()
+                return response.json()["choices"][0]["message"]["content"]
+
             response = httpx.post(
                 f"{self._base_url}/api/chat",
                 json={

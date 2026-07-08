@@ -19,15 +19,24 @@ POLL_INTERVAL_SECONDS = 300  # 5 minutes
 BACKFILL_DAYS = 180  # 6 months on first run
 
 # Dashboard
-API_HOST = "jobtracker.localhost"
-API_PORT = 8000
+API_HOST = os.environ.get("API_HOST", "jobtracker.localhost")
+API_PORT = int(os.environ.get("API_PORT", "8000"))
 FRONTEND_PORT = 5173
 FRONTEND_PORT_ALT = 5174
+FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN")  # e.g. https://job-tracker-three-green.vercel.app
 
-# LLM parser (Ollama — open-source local inference)
+# LLM parser — Ollama (local) by default, Groq (free-tier hosted) in prod.
+# Set LLM_PROVIDER=groq + GROQ_API_KEY to use Groq instead of local Ollama.
 LLM_ENABLED: bool = os.environ.get("LLM_ENABLED", "true").lower() == "true"
-LLM_MODEL: str = os.environ.get("LLM_MODEL", "llama3.2:3b")
-LLM_BASE_URL: str = os.environ.get("LLM_BASE_URL", "http://localhost:11434")
+LLM_PROVIDER: str = os.environ.get("LLM_PROVIDER", "ollama")  # "ollama" | "groq"
+LLM_MODEL: str = os.environ.get(
+    "LLM_MODEL", "llama3.2:3b" if LLM_PROVIDER == "ollama" else "llama-3.1-8b-instant"
+)
+LLM_BASE_URL: str = os.environ.get(
+    "LLM_BASE_URL",
+    "http://localhost:11434" if LLM_PROVIDER == "ollama" else "https://api.groq.com/openai/v1",
+)
+LLM_API_KEY: str | None = os.environ.get("GROQ_API_KEY")
 LLM_TIMEOUT_SECONDS: int = int(os.environ.get("LLM_TIMEOUT_SECONDS", "30"))
 
 # Insights

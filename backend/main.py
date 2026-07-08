@@ -8,8 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api.routes import router
 from backend.config import (
-    API_HOST, API_PORT, FRONTEND_PORT, FRONTEND_PORT_ALT,
-    LLM_ENABLED, LLM_BASE_URL, LLM_MODEL, LLM_TIMEOUT_SECONDS,
+    API_HOST, API_PORT, FRONTEND_PORT, FRONTEND_PORT_ALT, FRONTEND_ORIGIN,
+    LLM_ENABLED, LLM_BASE_URL, LLM_MODEL, LLM_TIMEOUT_SECONDS, LLM_API_KEY,
 )
 from backend.db.data_store import DataStore
 from backend.engine.duplicate_detector import DuplicateDetector
@@ -29,7 +29,8 @@ async def lifespan(app: FastAPI):
     app.state.updater = StatusUpdater(db, DuplicateDetector(db))
     app.state.started_at = datetime.utcnow()
     app.state.llm_extractor = (
-        LLMExtractor(LLM_BASE_URL, LLM_MODEL, LLM_TIMEOUT_SECONDS) if LLM_ENABLED else None
+        LLMExtractor(LLM_BASE_URL, LLM_MODEL, LLM_TIMEOUT_SECONDS, LLM_API_KEY)
+        if LLM_ENABLED else None
     )
 
     poller = build_poller()
@@ -50,12 +51,16 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Job Tracker API", version="1.0.0", lifespan=lifespan)
 
+_cors_origins = [
+    f"http://jobtracker.localhost:{FRONTEND_PORT}",
+    f"http://jobtracker.localhost:{FRONTEND_PORT_ALT}",
+]
+if FRONTEND_ORIGIN:
+    _cors_origins.append(FRONTEND_ORIGIN)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        f"http://jobtracker.localhost:{FRONTEND_PORT}",
-        f"http://jobtracker.localhost:{FRONTEND_PORT_ALT}",
-    ],
+    allow_origins=_cors_origins,
     allow_methods=["GET", "POST", "PATCH", "DELETE"],
     allow_headers=["Content-Type", "Authorization"],
 )
@@ -66,4 +71,4 @@ app.include_router(router, prefix="/api/v1")
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("backend.main:app", host=API_HOST, port=API_PORT, reload=True)
+    uvicorn.run("backend.main:app", host=API_HOST, port=API_PORT, reload=API_HOST == "jobtracker.localhost")

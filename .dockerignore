@@ -1,0 +1,10 @@
+.venv/
+frontend/
+.job-tracker/
+graphify-out/
+.git/
+tests/
+*.db
+node_modules/
+__pycache__/
+.pytest_cache/
