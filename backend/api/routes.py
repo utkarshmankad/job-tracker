@@ -5,13 +5,13 @@ from __future__ import annotations
 import csv
 import io
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Optional
 
 import structlog
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from backend.config import DB_PATH
 from backend.db.data_store import ApplicationFilter, DataStore, is_application_stale
@@ -96,6 +96,16 @@ class PollerStatusResponse(BaseModel):
     status: str
     last_sync_at: Optional[datetime]
     error_message: Optional[str]
+
+    @field_validator("last_sync_at")
+    @classmethod
+    def _tag_utc(cls, v: Optional[datetime]) -> Optional[datetime]:
+        # Stored/written as UTC (datetime.now(timezone.utc)) but SQLite drops
+        # tzinfo on the round trip, so the value comes back naive. Without an
+        # explicit offset, browsers parse the ISO string as local time.
+        if v is not None and v.tzinfo is None:
+            return v.replace(tzinfo=timezone.utc)
+        return v
 
 
 class ComponentStatusResponse(BaseModel):
