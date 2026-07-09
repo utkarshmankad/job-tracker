@@ -159,7 +159,13 @@ class GmailPoller:
                             update_count += 1
                     else:
                         self._db.mark_processed(msg_id, "suppressed")
-                except HttpError:
+                except HttpError as e:
+                    if e.resp.status == 404:
+                        # Message deleted/inaccessible on Gmail's side since it was listed;
+                        # skip it rather than aborting the whole poll cycle.
+                        log.warning("message_not_found_skipping", message_id=msg_id)
+                        self._db.mark_processed(msg_id, "not_found")
+                        continue
                     raise  # let the outer handler deal with auth/rate errors
                 except Exception as exc:
                     log.error(
@@ -175,6 +181,7 @@ class GmailPoller:
                 status=PollerStatus.RUNNING.value,
                 last_history_id=self.last_history_id,
                 last_sync_at=datetime.now(timezone.utc),
+                clear_error=True,
             )
             self.status = PollerStatus.RUNNING
             log.info(

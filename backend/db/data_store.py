@@ -311,6 +311,7 @@ class DataStore:
         last_history_id: str | None = None,
         last_sync_at: datetime | None = None,
         error_message: str | None = None,
+        clear_error: bool = False,
     ) -> None:
         with Session(self._engine) as session:
             state = session.get(PollerState, 1)
@@ -321,7 +322,9 @@ class DataStore:
                 state.last_history_id = last_history_id
             if last_sync_at is not None:
                 state.last_sync_at = last_sync_at
-            if error_message is not None:
+            if clear_error:
+                state.error_message = None
+            elif error_message is not None:
                 state.error_message = error_message
             session.add(state)
             session.commit()

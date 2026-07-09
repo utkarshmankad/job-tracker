@@ -4,7 +4,7 @@
 #
 
 app = 'job-tracker-api-verdant-haze-8797'
-primary_region = 'lhr'
+primary_region = 'sin'
 
 [build]
 [http_service]
@@ -16,7 +16,7 @@ primary_region = 'lhr'
   processes = ['app']
 
 [mounts]
-  source = 'job_tracker_data'
+  source = 'job_tracker_data_sin'
   destination = '/data'
 
 [[restart]]
