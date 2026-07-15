@@ -294,6 +294,19 @@ class DataStore:
         with Session(self._engine) as session:
             return session.get(ProcessedMessage, message_id) is not None
 
+    def clear_processed(self, message_id: str) -> None:
+        """Remove a message's processed-marker so it can be re-ingested.
+
+        Used for portal backfills: a message previously skipped (e.g. no
+        matching portal rule existed yet) needs to go through processing
+        again now that a rule covers it.
+        """
+        with Session(self._engine) as session:
+            row = session.get(ProcessedMessage, message_id)
+            if row is not None:
+                session.delete(row)
+                session.commit()
+
     # ------------------------------------------------------------------ #
     # Poller state                                                         #
     # ------------------------------------------------------------------ #

@@ -123,56 +123,11 @@ class GmailPoller:
                 if self._db.is_processed(msg_id):
                     continue
 
-                try:
-                    msg = self.service.users().messages().get(
-                        userId="me",
-                        id=msg_id,
-                        format="metadata",
-                        metadataHeaders=["From", "Subject", "Date"],
-                    ).execute()
-
-                    raw_email = self._build_raw_email(msg)
-                    parsed = self._parser.parse(raw_email, suppress_rules)
-
-                    if parsed is not None:
-                        if parsed.company is None or parsed.role is None:
-                            body = self._fetch_body_text(msg_id)
-                            if body:
-                                if parsed.company is None:
-                                    refined_company = self._parser.refine_company(
-                                        body,
-                                        parsed.source_portal,
-                                        extract_sender_domain(raw_email.sender),
-                                    )
-                                    if refined_company:
-                                        parsed = dataclass_replace(parsed, company=refined_company)
-                                if parsed.role is None:
-                                    refined_role = self._parser.refine_role(
-                                        raw_email.subject, body
-                                    )
-                                    if refined_role:
-                                        parsed = dataclass_replace(parsed, role=refined_role)
-                        _, is_new = self._updater.process(parsed)
-                        if is_new:
-                            new_count += 1
-                        else:
-                            update_count += 1
-                    else:
-                        self._db.mark_processed(msg_id, "suppressed")
-                except HttpError as e:
-                    if e.resp.status == 404:
-                        # Message deleted/inaccessible on Gmail's side since it was listed;
-                        # skip it rather than aborting the whole poll cycle.
-                        log.warning("message_not_found_skipping", message_id=msg_id)
-                        self._db.mark_processed(msg_id, "not_found")
-                        continue
-                    raise  # let the outer handler deal with auth/rate errors
-                except Exception as exc:
-                    log.error(
-                        "email_processing_error_skipping",
-                        message_id=msg_id,
-                        error=str(exc),
-                    )
+                outcome = self._process_message(msg_id, suppress_rules)
+                if outcome == "new":
+                    new_count += 1
+                elif outcome == "update":
+                    update_count += 1
 
             if new_history_id:
                 self.last_history_id = new_history_id
@@ -205,6 +160,126 @@ class GmailPoller:
             )
             self.status = PollerStatus.API_ERROR
             raise
+
+    def _process_message(self, msg_id: str, suppress_rules: list["SuppressRule"]) -> str:
+        """Fetch, parse, and persist a single message. Returns "new", "update",
+        "suppressed", "not_found", or "error"."""
+        try:
+            msg = self.service.users().messages().get(
+                userId="me",
+                id=msg_id,
+                format="metadata",
+                metadataHeaders=["From", "Subject", "Date"],
+            ).execute()
+
+            raw_email = self._build_raw_email(msg)
+            parsed = self._parser.parse(raw_email, suppress_rules)
+
+            if parsed is None:
+                self._db.mark_processed(msg_id, "suppressed")
+                return "suppressed"
+
+            if parsed.company is None or parsed.role is None:
+                body = self._fetch_body_text(msg_id)
+                if body:
+                    if parsed.company is None:
+                        refined_company = self._parser.refine_company(
+                            body,
+                            parsed.source_portal,
+                            extract_sender_domain(raw_email.sender),
+                        )
+                        if refined_company:
+                            parsed = dataclass_replace(parsed, company=refined_company)
+                    if parsed.role is None:
+                        refined_role = self._parser.refine_role(raw_email.subject, body)
+                        if refined_role:
+                            parsed = dataclass_replace(parsed, role=refined_role)
+
+            _, is_new = self._updater.process(parsed)
+            return "new" if is_new else "update"
+        except HttpError as e:
+            if e.resp.status == 404:
+                # Message deleted/inaccessible on Gmail's side since it was listed;
+                # skip it rather than aborting the whole poll cycle.
+                log.warning("message_not_found_skipping", message_id=msg_id)
+                self._db.mark_processed(msg_id, "not_found")
+                return "not_found"
+            raise  # let the outer handler deal with auth/rate errors
+        except Exception as exc:
+            log.error("email_processing_error_skipping", message_id=msg_id, error=str(exc))
+            return "error"
+
+    def backfill_portal(self, sender_domains: list[str], days: int = BACKFILL_DAYS) -> dict[str, int]:
+        """Re-scan Gmail for a portal's domains and pick up applications missed
+        before a portal_rules.yaml entry existed for it.
+
+        Existing applications whose thread already exists in the DB (likely
+        misclassified under Direct/Unknown) get their source_portal corrected.
+        Threads with no existing application get processed as new.
+        """
+        suppress_rules = self._db.get_suppress_rules()
+        domain_query = " OR ".join(f"from:{d}" for d in sender_domains)
+        q = f"({domain_query}) newer_than:{days}d"
+
+        message_ids: list[tuple[str, str]] = []
+        page_token: str | None = None
+        while True:
+            kwargs: dict = {"userId": "me", "q": q, "maxResults": 100}
+            if page_token:
+                kwargs["pageToken"] = page_token
+            response = self.service.users().messages().list(**kwargs).execute()
+            for m in response.get("messages", []):
+                message_ids.append((m["id"], m["threadId"]))
+            page_token = response.get("nextPageToken")
+            if not page_token:
+                break
+
+        reclassified = 0
+        created = 0
+        skipped = 0
+        portal_name = sender_domains[0]
+        for portal in self._parser._portals:  # noqa: SLF001 — read-only lookup
+            if any(d in portal.get("sender_domains", []) for d in sender_domains):
+                portal_name = portal["name"]
+                break
+
+        for msg_id, thread_id in message_ids:
+            existing = self._db.find_application_by_thread_id(thread_id)
+            if existing is not None:
+                if existing.source_portal != portal_name:
+                    existing.source_portal = portal_name
+                    if existing.company is None or existing.role is None:
+                        company, role = self.reextract_fields(existing)
+                        if company:
+                            existing.company = company
+                        if role:
+                            existing.role = role
+                    self._db.upsert_application(existing)
+                    reclassified += 1
+                else:
+                    skipped += 1
+                continue
+
+            if self._db.is_processed(msg_id):
+                # Previously seen with no matching portal rule (e.g. suppressed
+                # or fell through to Direct/Consultancy) — clear the marker so
+                # it goes through processing again now that a rule covers it.
+                self._db.clear_processed(msg_id)
+
+            outcome = self._process_message(msg_id, suppress_rules)
+            if outcome == "new":
+                created += 1
+            else:
+                skipped += 1
+
+        log.info(
+            "portal_backfill_complete",
+            portal=portal_name,
+            reclassified=reclassified,
+            created=created,
+            skipped=skipped,
+        )
+        return {"reclassified": reclassified, "created": created, "skipped": skipped}
 
     def reextract_fields(self, app: "Application") -> tuple[str | None, str | None]:
         """Re-fetch an application's first thread from Gmail and re-run field extraction."""

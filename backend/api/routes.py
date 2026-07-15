@@ -786,6 +786,20 @@ async def trigger_poll(request: Request) -> dict:
     return {"triggered": True}
 
 
+@router.post("/poller/backfill-portal")
+def backfill_portal(sender_domains: list[str], request: Request) -> dict:
+    """Re-scan Gmail for a portal's sender domains to pick up applications missed
+    before a portal_rules.yaml rule existed for it — reclassifies threads already
+    in the DB under the wrong portal, and creates any that were skipped entirely."""
+    scheduler = getattr(request.app.state, "poller_scheduler", None)
+    if scheduler is None:
+        raise HTTPException(status_code=503, detail="Poller not running")
+    poller = scheduler.poller
+    if poller.service is None:
+        raise HTTPException(status_code=503, detail="Gmail not authenticated — run setup_wizard.py reauth")
+    return poller.backfill_portal(sender_domains)
+
+
 @router.post("/poller/reauth")
 async def reauth_poller(request: Request) -> dict:
     db: DataStore = request.app.state.db

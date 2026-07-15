@@ -31,6 +31,19 @@ portals:
       interview_scheduled: ["interview"]
       rejected: ["not selected", "regret"]
 
+  - name: Hirist
+    sender_domains: [hirist.com, mail.hirist.com, hirist.co.in, jobfeed.hirist.com,
+                     notifications.hirist.com]
+    # "jobs matching your profile" / "jobs that match" are recommendation digests,
+    # not application confirmations — deliberately not matched here.
+    subject_patterns: ["application received", "applied for", "profile has been shared",
+                       "profile shared with", "application submitted"]
+    status_signals:
+      shortlisted: ["shortlisted", "profile shortlisted", "profile shared with"]
+      interview_scheduled: ["interview scheduled", "interview invite"]
+      rejected: ["not selected", "regret to inform", "not moving forward"]
+      offer: ["offer letter", "pleased to offer"]
+
   - name: Wellfound
     sender_domains: [wellfound.com, angel.co, mail.wellfound.com]
     subject_patterns: ["application", "intro request", "applied"]
