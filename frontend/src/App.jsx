@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import {
-  LayoutList, BarChart2, Activity,
+  LayoutList, Activity, Home, AlertTriangle,
   Download, PlusCircle, Sun, Moon, ChevronDown,
 } from "lucide-react";
 
@@ -24,13 +24,14 @@ import LinkedInWithdrawModal from "./components/LinkedInWithdrawModal";
 import LinkedInImportModal from "./components/LinkedInImportModal";
 
 const NAV_TABS = [
+  { id: "home", label: "Home", Icon: Home },
   { id: "applications", label: "Applications", Icon: LayoutList },
-  { id: "analytics", label: "Analytics", Icon: BarChart2 },
+  { id: "stale", label: "Stale", Icon: AlertTriangle },
   { id: "status", label: "Status", Icon: Activity },
 ];
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState("applications");
+  const [activeTab, setActiveTab] = useState("home");
   const [filters, setFilters] = useState({});
   const [selectedId, setSelectedId] = useState(null);
   const [showAddForm, setShowAddForm] = useState(false);
@@ -169,13 +170,16 @@ export default function App() {
             Export failed: {exportError}
           </div>
         )}
+        {activeTab === "home" && <AnalyticsPanel />}
         {activeTab === "applications" && (
           <>
             <Filters filters={filters} onChange={setFilters} />
-            <ApplicationsTable filters={filters} onSelectId={setSelectedId} />
+            <ApplicationsTable filters={{ ...filters, is_stale: false }} onSelectId={setSelectedId} />
           </>
         )}
-        {activeTab === "analytics" && <AnalyticsPanel />}
+        {activeTab === "stale" && (
+          <ApplicationsTable filters={{ is_stale: true }} onSelectId={setSelectedId} />
+        )}
         {activeTab === "status" && <StatusPage />}
         {selectedId && (
           <ApplicationDetail

@@ -113,19 +113,6 @@ export default function Filters({ filters, onChange }) {
         />
       </div>
 
-      <div className="flex flex-col gap-1">
-        <label className="text-xs text-gray-500 dark:text-gray-400 invisible">Stale</label>
-        <label className="flex items-center gap-2 cursor-pointer px-3 py-1.5 text-sm border border-amber-300 dark:border-amber-600 rounded-lg text-amber-700 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-900/20 transition-colors select-none">
-          <input
-            type="checkbox"
-            checked={!!filters.is_stale}
-            onChange={(e) => update("is_stale", e.target.checked ? true : null)}
-            className="accent-amber-500"
-          />
-          ⚠ Stale
-        </label>
-      </div>
-
       <button
         onClick={clear}
         title="Clear all filters"
