@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import pytest
 from starlette.testclient import TestClient
 from sqlmodel import Session
@@ -549,3 +549,46 @@ def test_diagnostics_endpoint_available(seeded_client):
         assert "name" in result
         assert "ok" in result
         assert "detail" in result
+
+
+def test_reauth_start_returns_auth_url(seeded_client):
+    client, _ = seeded_client
+    real_poller = app.state.poller_scheduler.poller
+    with patch.object(real_poller, "build_reauth_url", return_value=("https://accounts.google.com/auth?x=1", "state-xyz")):
+        resp = client.get(f"{_BASE}/poller/reauth/start")
+    assert resp.status_code == 200
+    assert resp.json() == {"auth_url": "https://accounts.google.com/auth?x=1"}
+    assert app.state.reauth_state == "state-xyz"
+
+
+def test_reauth_callback_rejects_mismatched_state(seeded_client):
+    client, _ = seeded_client
+    app.state.reauth_state = "expected-state"
+    resp = client.get(f"{_BASE}/poller/reauth/callback", params={"code": "abc", "state": "wrong-state"})
+    assert resp.status_code == 400
+
+
+def test_reauth_callback_succeeds_and_clears_state(seeded_client):
+    client, db = seeded_client
+    app.state.reauth_state = "match-state"
+    real_poller = app.state.poller_scheduler.poller
+    with patch.object(real_poller, "complete_reauth") as mock_complete:
+        resp = client.get(f"{_BASE}/poller/reauth/callback", params={"code": "abc", "state": "match-state"})
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "RUNNING"
+    mock_complete.assert_called_once()
+    assert app.state.reauth_state is None
+    assert db.get_poller_state().status == "RUNNING"
+
+
+def test_reauth_start_requires_admin_token_when_configured(seeded_client):
+    client, _ = seeded_client
+    real_poller = app.state.poller_scheduler.poller
+    with patch.object(real_poller, "build_reauth_url", return_value=("https://accounts.google.com/auth?x=1", "state-xyz")), \
+         patch("backend.api.routes.ADMIN_TOKEN", "secret-token"):
+        resp_no_token = client.get(f"{_BASE}/poller/reauth/start")
+        resp_wrong_token = client.get(f"{_BASE}/poller/reauth/start", params={"token": "wrong"})
+        resp_right_token = client.get(f"{_BASE}/poller/reauth/start", params={"token": "secret-token"})
+    assert resp_no_token.status_code == 403
+    assert resp_wrong_token.status_code == 403
+    assert resp_right_token.status_code == 200

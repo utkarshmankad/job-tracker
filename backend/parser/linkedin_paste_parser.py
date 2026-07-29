@@ -16,6 +16,8 @@ from typing import Optional
 
 import structlog
 
+from backend.db.models import utc_now
+
 log = structlog.get_logger(__name__)
 
 
@@ -94,7 +96,7 @@ def _parse_applied_date(line: str) -> Optional[datetime]:
     m = _APPLIED_DATE_RE.search(line)
     if not m:
         return None
-    today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    today = utc_now().replace(hour=0, minute=0, second=0, microsecond=0)
     if m.group(3):
         return today if m.group(3).lower() == "today" else today - timedelta(days=1)
     n = int(m.group(1))

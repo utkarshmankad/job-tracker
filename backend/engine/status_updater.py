@@ -8,7 +8,7 @@ from datetime import datetime
 import structlog
 
 from backend.db.data_store import DataStore
-from backend.db.models import Application, ApplicationStatus
+from backend.db.models import Application, ApplicationStatus, utc_now
 from backend.engine.duplicate_detector import DuplicateDetector
 from backend.parser.email_parser import ParsedApplication
 
@@ -113,7 +113,7 @@ class StatusUpdater:
 
         from_val = current.value
         record.current_status = signal
-        record.updated_at = datetime.utcnow()
+        record.updated_at = utc_now()
         self._db.upsert_application(record)
         self._db.append_status_history(
             application_id=record.id,
@@ -198,7 +198,7 @@ class StatusUpdater:
 
         from_val = record.current_status.value
         record.current_status = new_status
-        record.updated_at = datetime.utcnow()
+        record.updated_at = utc_now()
         if new_status == ApplicationStatus.WITHDRAWN:
             record.withdraw_reason = withdraw_reason or "self_withdraw"
         elif record.withdraw_reason is not None:

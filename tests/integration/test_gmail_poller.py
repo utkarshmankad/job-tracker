@@ -253,9 +253,9 @@ def test_build_raw_email_with_bad_date_falls_back_to_utcnow(poller):
         },
     }
     raw = poller._build_raw_email(msg)
-    from datetime import datetime, timezone
+    from backend.db.models import utc_now
     # Should not raise and should be close to now
-    assert (datetime.utcnow() - raw.date).total_seconds() < 5
+    assert (utc_now() - raw.date).total_seconds() < 5
 
 
 def test_poll_updates_last_history_id(poller, db):

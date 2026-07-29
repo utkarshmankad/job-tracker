@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from backend.db.data_store import DataStore
-from backend.db.models import Application, ApplicationStatus
+from backend.db.models import Application, ApplicationStatus, utc_now
 from backend.engine.duplicate_detector import DuplicateDetector
 from backend.parser.email_parser import ParsedApplication
 
@@ -35,7 +35,7 @@ def _seed_app(
         company=company,
         role=role,
         source_portal=source_portal,
-        applied_date=datetime.utcnow() - timedelta(days=days_ago),
+        applied_date=utc_now() - timedelta(days=days_ago),
         current_status=ApplicationStatus.APPLIED,
     )
     return db.upsert_application(app)
@@ -55,7 +55,7 @@ def _make_parsed(
         role=role,
         source_portal=source_portal,
         job_url=None,
-        applied_date=datetime.utcnow(),
+        applied_date=utc_now(),
         status_signal=None,
         raw_sender="hr@acme.com",
         raw_subject=f"Your application at {company}",
@@ -192,7 +192,7 @@ def test_merge_updates_applied_date_to_earlier(tmp_path: Path) -> None:
     original_date = existing.applied_date
 
     detector = DuplicateDetector(db)
-    earlier_date = datetime.utcnow() - timedelta(days=10)
+    earlier_date = utc_now() - timedelta(days=10)
     parsed = ParsedApplication(
         message_id="m",
         thread_id="t",
@@ -225,7 +225,7 @@ def test_merge_keeps_applied_date_if_new_is_later(tmp_path: Path) -> None:
         role="Engineer",
         source_portal="LinkedIn",
         job_url=None,
-        applied_date=datetime.utcnow(),  # more recent
+        applied_date=utc_now(),  # more recent
         status_signal=None,
         raw_sender="hr@acme.com",
         raw_subject="Your application",

@@ -25,6 +25,18 @@ FRONTEND_PORT = 5173
 FRONTEND_PORT_ALT = 5174
 FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN")  # e.g. https://job-tracker-three-green.vercel.app
 
+# Public URL the deployed backend is reachable at — used to build the OAuth redirect_uri
+# for the web-based re-auth flow (/poller/reauth/*). Must exactly match a redirect URI
+# registered on the OAuth client in Google Cloud Console. Falls back to localhost for
+# local development, where the interactive setup_wizard.py flow is used instead.
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", f"http://{API_HOST}:{API_PORT}")
+
+# Shared secret gating /poller/reauth/start — this endpoint mints a Google OAuth `state`
+# that /poller/reauth/callback trusts, so anyone who can call it unauthenticated could bind
+# their own Gmail account into this app's keyring. Required on the deployed (non-localhost)
+# backend; unset is only safe for local single-user development.
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN")
+
 # LLM parser — Ollama (local) by default, Groq (free-tier hosted) in prod.
 # Set LLM_PROVIDER=groq + GROQ_API_KEY to use Groq instead of local Ollama.
 LLM_ENABLED: bool = os.environ.get("LLM_ENABLED", "true").lower() == "true"

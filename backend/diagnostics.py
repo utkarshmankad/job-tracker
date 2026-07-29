@@ -14,6 +14,8 @@ from typing import Optional
 
 import structlog
 
+from backend.db.models import utc_now
+
 log = structlog.get_logger(__name__)
 
 
@@ -22,7 +24,7 @@ class DiagnosticResult:
     name: str
     ok: bool
     detail: str
-    checked_at: datetime = field(default_factory=datetime.utcnow)
+    checked_at: datetime = field(default_factory=utc_now)
 
     def __str__(self) -> str:
         symbol = "✓" if self.ok else "✗"
@@ -148,7 +150,7 @@ class DiagnosticRunner:
                     f"API error: {state.error_message or 'unknown'}",
                 )
             if state.last_sync_at:
-                age_min = int((datetime.utcnow() - state.last_sync_at).total_seconds() / 60)
+                age_min = int((utc_now() - state.last_sync_at).total_seconds() / 60)
                 if age_min > 15:
                     return DiagnosticResult(
                         "poller_state", False,
@@ -193,7 +195,7 @@ def run_diagnostics(db_path: Optional[Path] = None) -> bool:
     failed = sum(1 for r in results if not r.ok)
     log.info("diagnostics_complete", passed=passed, failed=failed)
 
-    print(f"\nDiagnostic Report — {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
+    print(f"\nDiagnostic Report — {utc_now().strftime('%Y-%m-%d %H:%M:%S')} UTC")
     print("=" * 60)
     for result in results:
         print(result)

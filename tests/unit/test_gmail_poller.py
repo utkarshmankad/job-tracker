@@ -152,6 +152,37 @@ def test_authenticate_headless_returns_false_when_refresh_fails(tmp_path: Path) 
     assert poller.service is None
 
 
+def test_build_reauth_url_returns_url_and_state(tmp_path: Path) -> None:
+    poller = _make_poller(tmp_path)
+    mock_flow = MagicMock()
+    mock_flow.authorization_url.return_value = ("https://accounts.google.com/o/oauth2/auth?x=1", "state-abc")
+
+    with patch("backend.poller.gmail_poller.Flow.from_client_secrets_file", return_value=mock_flow) as mock_from_secrets:
+        auth_url, state = poller.build_reauth_url("https://example.com/callback")
+
+    mock_from_secrets.assert_called_once()
+    assert mock_from_secrets.call_args.kwargs["redirect_uri"] == "https://example.com/callback"
+    assert auth_url == "https://accounts.google.com/o/oauth2/auth?x=1"
+    assert state == "state-abc"
+
+
+def test_complete_reauth_saves_token_and_sets_service(tmp_path: Path) -> None:
+    poller = _make_poller(tmp_path)
+    mock_flow = MagicMock()
+    mock_creds = MagicMock()
+    mock_flow.credentials = mock_creds
+
+    with patch("backend.poller.gmail_poller.Flow.from_client_secrets_file", return_value=mock_flow), \
+         patch("backend.poller.gmail_poller.keyring.set_password") as mock_set, \
+         patch("backend.poller.gmail_poller.build", return_value=MagicMock()) as mock_build:
+        poller.complete_reauth("auth-code-123", "https://example.com/callback")
+
+    mock_flow.fetch_token.assert_called_once_with(code="auth-code-123")
+    mock_set.assert_called_once()
+    mock_build.assert_called_once()
+    assert poller.service is not None
+
+
 def test_extract_text_from_payload_returns_empty_when_decode_raises(tmp_path: Path) -> None:
     """If base64.urlsafe_b64decode raises, the function returns '' without propagating."""
     poller = _make_poller(tmp_path)

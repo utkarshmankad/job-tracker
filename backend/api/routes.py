@@ -13,9 +13,9 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from backend.config import DB_PATH, REEXTRACT_BATCH_LIMIT
+from backend.config import ADMIN_TOKEN, DB_PATH, PUBLIC_BASE_URL, REEXTRACT_BATCH_LIMIT
 from backend.db.data_store import ApplicationFilter, DataStore, is_application_stale
-from backend.db.models import Application, ApplicationStatus
+from backend.db.models import Application, ApplicationStatus, utc_now
 from backend.diagnostics import DiagnosticRunner
 from backend.engine.insights_engine import InsightsEngine
 from backend.engine.status_updater import StatusUpdater
@@ -140,6 +140,7 @@ class ReextractResponse(BaseModel):
     total: int
     updated: int
     skipped: int
+    remaining: int
 
 
 class SuppressRuleResponse(BaseModel):
@@ -358,7 +359,7 @@ async def export_applications(
     active = [a for a in items if not a.is_false_positive]
 
     if format == "csv":
-        filename = f"job_applications_{date.today()}.csv"
+        filename = f"job_applications_{utc_now().date()}.csv"
         return StreamingResponse(
             iter([_csv_rows(active)]),
             media_type="text/csv",
@@ -374,7 +375,13 @@ async def export_applications(
 # NOTE: /applications/reextract must be registered before /applications/{id}
 # so that "reextract" is not captured as an integer id.
 @router.post("/applications/reextract", response_model=ReextractResponse)
-def reextract_missing_fields(request: Request) -> ReextractResponse:
+def reextract_missing_fields(request: Request, offset: int = Query(0, ge=0)) -> ReextractResponse:
+    """Re-fetch and re-extract company/role for applications missing them.
+
+    Processes at most REEXTRACT_BATCH_LIMIT per call to avoid Gmail rate limits/timeouts
+    on a large backlog. Pass the previous response's `remaining` count as the next
+    `offset` to page through the rest.
+    """
     db: DataStore = request.app.state.db
     scheduler = getattr(request.app.state, "poller_scheduler", None)
     if scheduler is None:
@@ -383,8 +390,7 @@ def reextract_missing_fields(request: Request) -> ReextractResponse:
     if poller.service is None:
         raise HTTPException(status_code=503, detail="Gmail not authenticated — run setup_wizard.py reauth")
 
-    apps = db.get_applications_missing_fields()
-    batch = apps[:REEXTRACT_BATCH_LIMIT]
+    batch = db.get_applications_missing_fields(offset=offset, limit=REEXTRACT_BATCH_LIMIT)
     updated = 0
     skipped = 0
 
@@ -407,7 +413,8 @@ def reextract_missing_fields(request: Request) -> ReextractResponse:
             log.warning("reextract_failed", app_id=app.id, error=str(exc))
             skipped += 1
 
-    return ReextractResponse(total=len(batch), updated=updated, skipped=skipped)
+    remaining = db.count_applications_missing_fields()
+    return ReextractResponse(total=len(batch), updated=updated, skipped=skipped, remaining=remaining)
 
 
 @router.get("/applications/{id}", response_model=ApplicationDetailResponse)
@@ -525,7 +532,7 @@ async def linkedin_import_preview(
 
     db: DataStore = request.app.state.db
     llm: LLMExtractor | None = getattr(request.app.state, "llm_extractor", None)
-    today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    today = utc_now().replace(hour=0, minute=0, second=0, microsecond=0)
 
     entries: list[LinkedInPreviewEntry] = []
     garbage_lines: list[int] = []
@@ -568,7 +575,7 @@ async def linkedin_import_confirmed(
         if body.mode == "interview"
         else ApplicationStatus.APPLIED
     )
-    today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    today = utc_now().replace(hour=0, minute=0, second=0, microsecond=0)
 
     created = updated = skipped = failed = 0
     results: list[LinkedInImportEntryResult] = []
@@ -779,19 +786,70 @@ def backfill_portal(sender_domains: list[str], request: Request) -> dict:
     return poller.backfill_portal(sender_domains)
 
 
+def _reauth_redirect_uri() -> str:
+    return f"{PUBLIC_BASE_URL}/api/v1/poller/reauth/callback"
+
+
 @router.post("/poller/reauth")
 async def reauth_poller(request: Request) -> dict:
-    # Full OAuth re-auth requires an interactive browser flow (google_auth_oauthlib's
-    # InstalledAppFlow.run_local_server), which can't run inside this request handler —
-    # the backend is deployed remotely (Fly.io) with no local browser access. The operator
-    # must run the CLI flow on their own machine, then the poller picks up the refreshed
-    # keychain token on its next cycle.
+    """Mark the poller AUTH_REQUIRED and point the operator at the web re-auth flow."""
     db: DataStore = request.app.state.db
     db.update_poller_state(status="AUTH_REQUIRED", clear_error=True)
     return {
         "status": "AUTH_REQUIRED",
-        "message": "Re-authentication required. Run on your local machine: python backend/setup_wizard.py reauth",
+        "message": "Re-authentication required. Visit GET /api/v1/poller/reauth/start "
+        "to begin, or run locally: python backend/setup_wizard.py reauth",
     }
+
+
+@router.get("/poller/reauth/start")
+async def reauth_start(request: Request, token: str | None = None) -> dict:
+    """Return a Google authorization URL for the operator to open in their own browser.
+
+    This is a redirect-based web OAuth flow, not the InstalledAppFlow local-server flow —
+    it works from a remote deployment (no browser/local port needed on the backend host).
+    redirect_uri must be registered on the OAuth client in Google Cloud Console.
+
+    Gated by ADMIN_TOKEN: this endpoint mints the `state` that /callback trusts, so an
+    unauthenticated caller could otherwise bind their own Gmail account into this app's
+    keyring. /callback itself doesn't need the token — Google's redirect can't carry
+    custom headers/params, so it's protected by the unguessable state alone, which only
+    an authorized /start call can mint.
+    """
+    if ADMIN_TOKEN and token != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Invalid or missing token")
+    scheduler = getattr(request.app.state, "poller_scheduler", None)
+    if scheduler is None:
+        raise HTTPException(status_code=503, detail="Poller not running")
+    try:
+        auth_url, state = scheduler.poller.build_reauth_url(_reauth_redirect_uri())
+    except FileNotFoundError:
+        raise HTTPException(status_code=500, detail="client_secret.json not found on server")
+    request.app.state.reauth_state = state
+    return {"auth_url": auth_url}
+
+
+@router.get("/poller/reauth/callback")
+async def reauth_callback(code: str, state: str, request: Request) -> dict:
+    """Google redirects here after the operator approves access in their browser."""
+    scheduler = getattr(request.app.state, "poller_scheduler", None)
+    if scheduler is None:
+        raise HTTPException(status_code=503, detail="Poller not running")
+    expected_state = getattr(request.app.state, "reauth_state", None)
+    if expected_state is None or state != expected_state:
+        raise HTTPException(status_code=400, detail="Invalid or expired reauth state — start again")
+    request.app.state.reauth_state = None
+
+    db: DataStore = request.app.state.db
+    try:
+        scheduler.poller.complete_reauth(code, _reauth_redirect_uri())
+    except Exception as exc:
+        log.error("reauth_callback_failed", error=str(exc))
+        raise HTTPException(status_code=502, detail="Re-authentication failed. Check server logs.")
+
+    db.update_poller_state(status="RUNNING", clear_error=True)
+    scheduler.trigger()
+    return {"status": "RUNNING", "message": "Re-authentication complete."}
 
 
 # ------------------------------------------------------------------ #
@@ -842,7 +900,7 @@ async def delete_suppress_rule(id: int, request: Request) -> dict:
 
 @router.get("/diagnostics", response_model=DiagnosticsResponse)
 async def run_diagnostics(request: Request) -> DiagnosticsResponse:
-    now = datetime.utcnow()
+    now = utc_now()
     runner = DiagnosticRunner()
     results = runner.run_all()
     passed = sum(1 for r in results if r.ok)
@@ -866,7 +924,7 @@ async def run_diagnostics(request: Request) -> DiagnosticsResponse:
 @router.get("/status", response_model=SystemStatusResponse)
 async def get_system_status(request: Request) -> SystemStatusResponse:
     db: DataStore = request.app.state.db
-    now = datetime.utcnow()
+    now = utc_now()
     started_at: Optional[datetime] = getattr(request.app.state, "started_at", None)
     components: list[ComponentStatusResponse] = []
 

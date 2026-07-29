@@ -9,7 +9,7 @@ import structlog
 
 from backend.config import INTERVIEW_RATE_GREEN_THRESHOLD, MIN_APPLICATIONS_FOR_INSIGHTS
 from backend.db.data_store import ApplicationFilter, DataStore, is_application_stale
-from backend.db.models import Application, ApplicationStatus
+from backend.db.models import Application, ApplicationStatus, utc_now
 
 log = structlog.get_logger(__name__)
 
@@ -84,7 +84,7 @@ class InsightsEngine:
                 insights=[],
                 total_applications=total,
                 insufficient_data=True,
-                generated_at=datetime.utcnow(),
+                generated_at=utc_now(),
             )
 
         channels = self._channel_stats(apps)
@@ -96,7 +96,7 @@ class InsightsEngine:
             insights=insights,
             total_applications=total,
             insufficient_data=False,
-            generated_at=datetime.utcnow(),
+            generated_at=utc_now(),
         )
 
     def _fetch_active_apps(self) -> list[Application]:
@@ -268,7 +268,7 @@ class InsightsEngine:
         }
 
     def _weekly_activity(self, apps: list[Application]) -> list[dict]:
-        today = date.today()
+        today = utc_now().date()
         # Start from Monday of the week 11 weeks ago
         start_monday = today - timedelta(weeks=11, days=today.weekday())
         weeks = [start_monday + timedelta(weeks=i) for i in range(12)]
@@ -377,7 +377,7 @@ class InsightsEngine:
             else:
                 monthly[key]["withdrawn"] += 1
 
-        today = date.today()
+        today = utc_now().date()
         trend = []
         for i in range(5, -1, -1):
             raw_month = today.month - i

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -19,6 +19,7 @@ from backend.db.models import (
     ProcessedMessage,
     StatusHistory,
     SuppressRule,
+    utc_now,
 )
 
 
@@ -28,8 +29,15 @@ def is_application_stale(
     """Return True when an Applied-status application was submitted more than threshold_days ago with no response."""
     if app.current_status != ApplicationStatus.APPLIED:
         return False
-    cutoff = datetime.utcnow() - timedelta(days=threshold_days)
-    applied = app.applied_date if isinstance(app.applied_date, datetime) else datetime(app.applied_date.year, app.applied_date.month, app.applied_date.day)
+    cutoff = utc_now() - timedelta(days=threshold_days)
+    applied = (
+        app.applied_date
+        if isinstance(app.applied_date, datetime)
+        else datetime(
+            app.applied_date.year, app.applied_date.month, app.applied_date.day,
+            tzinfo=timezone.utc,
+        )
+    )
     return applied < cutoff
 
 log = structlog.get_logger(__name__)
@@ -102,7 +110,7 @@ class DataStore:
                 session.refresh(app)
                 return app
             # Update scalar fields only; relationships are left untouched.
-            app.updated_at = datetime.utcnow()
+            app.updated_at = utc_now()
             for field_name in Application.model_fields:
                 if field_name not in ("id", "created_at"):
                     setattr(db_app, field_name, getattr(app, field_name))
@@ -130,11 +138,11 @@ class DataStore:
                     )
                 )
             if filters.is_stale is True:
-                stale_cutoff = datetime.utcnow() - timedelta(days=STALE_DAYS_THRESHOLD)
+                stale_cutoff = utc_now() - timedelta(days=STALE_DAYS_THRESHOLD)
                 conditions.append(Application.current_status == ApplicationStatus.APPLIED)
                 conditions.append(col(Application.applied_date) < stale_cutoff)
             elif filters.is_stale is False:
-                stale_cutoff = datetime.utcnow() - timedelta(days=STALE_DAYS_THRESHOLD)
+                stale_cutoff = utc_now() - timedelta(days=STALE_DAYS_THRESHOLD)
                 conditions.append(
                     ~(
                         (Application.current_status == ApplicationStatus.APPLIED)
@@ -167,8 +175,14 @@ class DataStore:
             )
             return session.exec(stmt).first()
 
-    def get_applications_missing_fields(self) -> list[Application]:
-        """Return non-false-positive applications where company or role is NULL."""
+    def get_applications_missing_fields(
+        self, offset: int = 0, limit: int | None = None
+    ) -> list[Application]:
+        """Return non-false-positive applications where company or role is NULL.
+
+        Ordered by id so repeated paginated calls (offset += limit) see a stable
+        sequence even as fields get filled in between calls.
+        """
         with Session(self._engine, expire_on_commit=False) as session:
             stmt = (
                 select(Application)
@@ -179,8 +193,27 @@ class DataStore:
                         Application.role == None,  # noqa: E711
                     )
                 )
+                .order_by(col(Application.id))
+                .offset(offset)
             )
+            if limit is not None:
+                stmt = stmt.limit(limit)
             return list(session.exec(stmt).all())
+
+    def count_applications_missing_fields(self) -> int:
+        with Session(self._engine) as session:
+            stmt = (
+                select(func.count())
+                .select_from(Application)
+                .where(Application.is_false_positive == False)  # noqa: E712
+                .where(
+                    or_(
+                        Application.company == None,  # noqa: E711
+                        Application.role == None,  # noqa: E711
+                    )
+                )
+            )
+            return session.exec(stmt).one()
 
     def find_application_by_company_role(
         self, company: str, role: str
@@ -454,7 +487,7 @@ class DataStore:
             return list(session.exec(stmt).all())
 
     def get_stale_applications(self, threshold_days: int = STALE_DAYS_THRESHOLD) -> list[Application]:
-        cutoff = datetime.utcnow() - timedelta(days=threshold_days)
+        cutoff = utc_now() - timedelta(days=threshold_days)
         with Session(self._engine, expire_on_commit=False) as session:
             stmt = select(Application).where(
                 Application.current_status == ApplicationStatus.APPLIED,

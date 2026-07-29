@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+from backend.db.models import utc_now
 from backend.parser.linkedin_paste_parser import parse_linkedin_paste
 
 
 def _today() -> datetime:
-    return datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    return utc_now().replace(hour=0, minute=0, second=0, microsecond=0)
 
 
 def test_format_a_company_then_role() -> None:

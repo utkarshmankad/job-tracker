@@ -10,7 +10,7 @@ from rapidfuzz import fuzz
 
 from backend.config import DUPLICATE_FUZZY_THRESHOLD
 from backend.db.data_store import ApplicationFilter, DataStore
-from backend.db.models import Application
+from backend.db.models import Application, utc_now
 from backend.parser.email_parser import ParsedApplication
 
 log = structlog.get_logger(__name__)
@@ -24,7 +24,7 @@ class DuplicateDetector:
         self._threshold = threshold
 
     def find_duplicate(self, parsed: ParsedApplication) -> Application | None:
-        cutoff = datetime.utcnow() - timedelta(days=_LOOKUP_DAYS)
+        cutoff = utc_now() - timedelta(days=_LOOKUP_DAYS)
         candidates, _ = self._db.get_applications(
             ApplicationFilter(
                 date_from=cutoff,

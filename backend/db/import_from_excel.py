@@ -6,7 +6,7 @@ Run from repo root:
 """
 
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import openpyxl
@@ -14,6 +14,7 @@ import structlog
 
 from backend.config import DB_PATH
 from backend.db.data_store import DataStore
+from backend.db.models import utc_now
 
 log = structlog.get_logger(__name__)
 
@@ -51,10 +52,10 @@ def _portal(raw: str | None) -> str:
 
 def _applied_date(val) -> datetime:
     if isinstance(val, datetime):
-        return val
+        return val if val.tzinfo else val.replace(tzinfo=timezone.utc)
     if isinstance(val, str):
         try:
-            return datetime.strptime(val, "%Y-%m-%d")
+            return datetime.strptime(val, "%Y-%m-%d").replace(tzinfo=timezone.utc)
         except ValueError:
             pass
     raise ValueError(f"Cannot parse applied date: {val!r}")
@@ -93,7 +94,7 @@ def run(xlsx_path: Path, db_path: Path = DB_PATH) -> None:
     print(f"\nExisting DB records: {existing}")
     print("Clearing application, statushistory, processedmessage tables…")
 
-    now = datetime.utcnow()
+    now = utc_now()
     inserted = ds.bulk_import_applications(rows, now)
     log.info("excel_import_complete", rows_inserted=inserted)
 

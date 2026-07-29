@@ -12,6 +12,7 @@ from backend.config import (
     LLM_ENABLED, LLM_BASE_URL, LLM_MODEL, LLM_TIMEOUT_SECONDS, LLM_API_KEY,
 )
 from backend.db.data_store import DataStore
+from backend.db.models import utc_now
 from backend.engine.duplicate_detector import DuplicateDetector
 from backend.engine.status_updater import StatusUpdater
 from backend.parser.llm_extractor import LLMExtractor
@@ -21,13 +22,12 @@ log = structlog.get_logger()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from datetime import datetime
     from backend.poller.scheduler import build_poller, PollerScheduler
 
     db = DataStore()
     app.state.db = db
     app.state.updater = StatusUpdater(db, DuplicateDetector(db))
-    app.state.started_at = datetime.utcnow()
+    app.state.started_at = utc_now()
     app.state.llm_extractor = (
         LLMExtractor(LLM_BASE_URL, LLM_MODEL, LLM_TIMEOUT_SECONDS, LLM_API_KEY)
         if LLM_ENABLED else None
@@ -49,14 +49,21 @@ async def lifespan(app: FastAPI):
     log.info("app_shutdown")
 
 
+def _build_cors_origins(
+    frontend_port: int, frontend_port_alt: int, frontend_origin: str | None
+) -> list[str]:
+    origins = [
+        f"http://jobtracker.localhost:{frontend_port}",
+        f"http://jobtracker.localhost:{frontend_port_alt}",
+    ]
+    if frontend_origin:
+        origins.append(frontend_origin)
+    return origins
+
+
 app = FastAPI(title="Job Tracker API", version="1.0.0", lifespan=lifespan)
 
-_cors_origins = [
-    f"http://jobtracker.localhost:{FRONTEND_PORT}",
-    f"http://jobtracker.localhost:{FRONTEND_PORT_ALT}",
-]
-if FRONTEND_ORIGIN:
-    _cors_origins.append(FRONTEND_ORIGIN)
+_cors_origins = _build_cors_origins(FRONTEND_PORT, FRONTEND_PORT_ALT, FRONTEND_ORIGIN)
 
 app.add_middleware(
     CORSMiddleware,

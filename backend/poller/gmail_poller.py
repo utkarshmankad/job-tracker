@@ -5,7 +5,7 @@ import json
 import base64
 import threading
 from dataclasses import replace as dataclass_replace
-from datetime import datetime, timezone
+from datetime import timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
@@ -14,7 +14,7 @@ import os
 import keyring
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google_auth_oauthlib.flow import Flow, InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 import structlog
@@ -27,6 +27,7 @@ from backend.config import (
     GMAIL_SCOPES,
 )
 from backend.db.data_store import DataStore
+from backend.db.models import utc_now
 from backend.parser.email_parser import EmailParser, RawEmail, extract_sender_domain
 from backend.engine.status_updater import StatusUpdater
 from backend.poller.error_retry import gmail_retry, AuthError, StaleHistoryError
@@ -94,6 +95,35 @@ class GmailPoller:
         self.service = build("gmail", "v1", credentials=creds)
         log.info("gmail_authenticated_headless")
         return True
+
+    def build_reauth_url(self, redirect_uri: str) -> tuple[str, str]:
+        """Start the web OAuth flow: return (authorization_url, state).
+
+        Unlike authenticate()'s InstalledAppFlow.run_local_server(), this doesn't open a
+        local browser/port on the backend process — it works from a remote deployment.
+        The operator opens authorization_url in their own browser; Google redirects back
+        to redirect_uri with a code, which complete_reauth() exchanges for a token.
+        redirect_uri must be pre-registered on the OAuth client in Google Cloud Console.
+        """
+        flow = Flow.from_client_secrets_file(
+            str(CREDENTIALS_PATH), GMAIL_SCOPES, redirect_uri=redirect_uri
+        )
+        auth_url, state = flow.authorization_url(
+            access_type="offline", include_granted_scopes="true", prompt="consent"
+        )
+        return auth_url, state
+
+    def complete_reauth(self, code: str, redirect_uri: str) -> None:
+        """Exchange the authorization code from build_reauth_url's redirect for a token,
+        save it to the keychain, and start using it for subsequent Gmail calls."""
+        flow = Flow.from_client_secrets_file(
+            str(CREDENTIALS_PATH), GMAIL_SCOPES, redirect_uri=redirect_uri
+        )
+        flow.fetch_token(code=code)
+        creds = flow.credentials
+        self._save_token_to_keyring(creds)
+        self.service = build("gmail", "v1", credentials=creds)
+        log.info("gmail_reauthenticated_via_web_flow")
 
     def _load_token_from_keyring(self) -> Credentials | None:
         token_json = os.environ.get("GMAIL_TOKEN_JSON") or keyring.get_password(
@@ -165,7 +195,7 @@ class GmailPoller:
             self._db.update_poller_state(
                 status=PollerStatus.RUNNING.value,
                 last_history_id=self.last_history_id,
-                last_sync_at=datetime.utcnow(),
+                last_sync_at=utc_now(),
                 clear_error=True,
             )
             self.status = PollerStatus.RUNNING
@@ -474,12 +504,14 @@ class GmailPoller:
 
         try:
             parsed_date = parsedate_to_datetime(date_str)
-            if parsed_date.tzinfo is not None:
-                parsed_date = parsed_date.astimezone(timezone.utc)
-            date = parsed_date.replace(tzinfo=None)
+            date = (
+                parsed_date.astimezone(timezone.utc)
+                if parsed_date.tzinfo is not None
+                else parsed_date.replace(tzinfo=timezone.utc)
+            )
         except Exception as exc:
             log.warning("email_date_parse_failed", date_header=date_str, error=str(exc))
-            date = datetime.utcnow()
+            date = utc_now()
 
         return RawEmail(
             message_id=msg["id"],
