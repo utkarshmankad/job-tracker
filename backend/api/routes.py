@@ -670,10 +670,9 @@ def delete_application(id: int, request: Request) -> dict:
 def _suppress_sender_on_delete(
     application: Application, db: DataStore, request: Request
 ) -> None:
-    """Re-fetch the application's first Gmail thread and add a sender-domain suppress rule."""
+    """Look up the application's first Gmail thread's sender domain and add a suppress rule."""
     import json as _json
     import re as _re
-    from backend.parser.email_parser import extract_sender_domain
 
     scheduler = getattr(request.app.state, "poller_scheduler", None)
     if scheduler is None:
@@ -685,28 +684,7 @@ def _suppress_sender_on_delete(
         thread_ids = _json.loads(application.thread_ids or "[]")
         if not thread_ids:
             return
-        import concurrent.futures
-
-        request_obj = poller.service.users().threads().get(
-            userId="me", id=thread_ids[0],
-            format="metadata", metadataHeaders=["From"],
-        )
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(request_obj.execute)
-            try:
-                thread = future.result(timeout=10)
-            except concurrent.futures.TimeoutError:
-                log.warning("suppress_on_delete_gmail_timeout", app_id=application.id)
-                return
-        messages = thread.get("messages", [])
-        if not messages:
-            return
-        headers = {
-            h["name"]: h["value"]
-            for h in messages[0].get("payload", {}).get("headers", [])
-        }
-        sender = headers.get("From", "")
-        domain = extract_sender_domain(sender)
+        domain = poller.get_thread_sender_domain(thread_ids[0])
         if not domain:
             return
         pattern = _re.escape(domain)

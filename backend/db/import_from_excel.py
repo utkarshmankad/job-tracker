@@ -5,15 +5,17 @@ Run from repo root:
     python -m backend.db.import_from_excel /path/to/Job_Application_Tracker.xlsx
 """
 
-import json
-import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 import openpyxl
+import structlog
 
 from backend.config import DB_PATH
+from backend.db.data_store import DataStore
+
+log = structlog.get_logger(__name__)
 
 # Row 5 onward in the sheet is real data (rows 1-4 are title / meta / blank / headers)
 DATA_START_ROW = 5
@@ -47,12 +49,12 @@ def _portal(raw: str | None) -> str:
     return raw.strip()
 
 
-def _applied_date(val) -> str:
+def _applied_date(val) -> datetime:
     if isinstance(val, datetime):
-        return val.strftime("%Y-%m-%d %H:%M:%S.000000")
+        return val
     if isinstance(val, str):
         try:
-            return datetime.strptime(val, "%Y-%m-%d").strftime("%Y-%m-%d %H:%M:%S.000000")
+            return datetime.strptime(val, "%Y-%m-%d")
         except ValueError:
             pass
     raise ValueError(f"Cannot parse applied date: {val!r}")
@@ -86,53 +88,16 @@ def run(xlsx_path: Path, db_path: Path = DB_PATH) -> None:
     for r in rows[:5]:
         print(" ", r)
 
-    conn = sqlite3.connect(db_path)
-    c = conn.cursor()
-
-    c.execute("SELECT COUNT(*) FROM application")
-    existing = c.fetchone()[0]
+    ds = DataStore(db_path)
+    existing, _ = ds.count_applications_and_processed()
     print(f"\nExisting DB records: {existing}")
     print("Clearing application, statushistory, processedmessage tables…")
 
-    c.execute("DELETE FROM statushistory")
-    c.execute("DELETE FROM application")
-    c.execute("DELETE FROM processedmessage")
-    c.execute("UPDATE pollerstate SET last_history_id = NULL WHERE id = 1")
+    now = datetime.utcnow()
+    inserted = ds.bulk_import_applications(rows, now)
+    log.info("excel_import_complete", rows_inserted=inserted)
 
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.000000")
-
-    for r in rows:
-        c.execute(
-            """
-            INSERT INTO application
-                (company, role, source_portal, job_url, applied_date,
-                 current_status, thread_ids, is_false_positive, created_at, updated_at)
-            VALUES (?, ?, ?, NULL, ?, ?, '[]', 0, ?, ?)
-            """,
-            (
-                r["company"],
-                r["role"],
-                r["source_portal"],
-                r["applied_date"],
-                r["current_status"],
-                now,
-                now,
-            ),
-        )
-        app_id = c.lastrowid
-        c.execute(
-            """
-            INSERT INTO statushistory
-                (application_id, from_status, to_status, trigger, changed_at, message_id)
-            VALUES (?, NULL, ?, 'manual', ?, NULL)
-            """,
-            (app_id, r["current_status"], r["applied_date"]),
-        )
-
-    conn.commit()
-    conn.close()
-
-    print(f"\nDone — inserted {len(rows)} applications.")
+    print(f"\nDone — inserted {inserted} applications.")
 
 
 if __name__ == "__main__":

@@ -67,6 +67,10 @@ class DataStore:
         self._ensure_poller_state()
 
     def _migrate_schema(self) -> None:
+        # Deliberate exception to "no raw SQL strings": SQLModel/SQLAlchemy ORM has no
+        # portable API for column introspection (PRAGMA table_info) or ALTER TABLE ADD
+        # COLUMN — both require raw SQL via SQLAlchemy Core's text(), kept local to
+        # DataStore so it's still the single point of DB access.
         from sqlalchemy import text
         with self._engine.connect() as conn:
             cols = {row[1] for row in conn.execute(text("PRAGMA table_info(application)"))}
@@ -255,6 +259,94 @@ class DataStore:
             return list(session.exec(stmt).all())
 
     # ------------------------------------------------------------------ #
+    # Diagnostics / maintenance                                            #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def inspect_schema_tables(db_path: Path) -> set[str]:
+        """Return table names actually present on disk, without creating missing ones.
+
+        Deliberately bypasses DataStore's normal constructor — that calls
+        SQLModel.metadata.create_all(), which would silently create the missing tables
+        this check exists to detect. Uses a throwaway engine for inspection only.
+        """
+        from sqlalchemy import inspect
+        engine = create_engine(f"sqlite:///{db_path}")
+        try:
+            return set(inspect(engine).get_table_names())
+        finally:
+            engine.dispose()
+
+    def get_raw_status_values(self) -> list[str]:
+        """Return distinct current_status values exactly as stored on disk, bypassing
+        the SAEnum column's coercion — reading through the ORM column would itself raise
+        LookupError on legacy NAME-format data, which is precisely the corruption this
+        check exists to detect."""
+        from sqlalchemy import text
+        with self._engine.connect() as conn:
+            rows = conn.execute(text("SELECT DISTINCT current_status FROM application"))
+            return [row[0] for row in rows]
+
+    def count_applications_and_processed(self) -> tuple[int, int]:
+        """Return (n_applications, n_processed_messages) without deleting anything."""
+        with Session(self._engine) as session:
+            n_apps = session.exec(select(func.count()).select_from(Application)).one()
+            n_proc = session.exec(select(func.count()).select_from(ProcessedMessage)).one()
+            return n_apps, n_proc
+
+    def reset_for_rebackfill(self) -> tuple[int, int]:
+        """Delete all applications, status history, and processed-message records, and
+        clear last_history_id so the next poll re-backfills the full BACKFILL_DAYS window.
+        Returns (n_applications_deleted, n_processed_messages_deleted)."""
+        with Session(self._engine) as session:
+            n_apps = session.exec(select(func.count()).select_from(Application)).one()
+            n_proc = session.exec(select(func.count()).select_from(ProcessedMessage)).one()
+            for entry in session.exec(select(StatusHistory)).all():
+                session.delete(entry)
+            for app in session.exec(select(Application)).all():
+                session.delete(app)
+            for msg in session.exec(select(ProcessedMessage)).all():
+                session.delete(msg)
+            session.commit()
+        state = self.get_poller_state()
+        self.update_poller_state(status=state.status, clear_last_history_id=True)
+        return n_apps, n_proc
+
+    def bulk_import_applications(
+        self, rows: list[dict], now: datetime
+    ) -> int:
+        """Clear existing applications and insert rows from an external source (e.g. an
+        Excel export), each with an initial status-history entry. Returns rows inserted."""
+        self.reset_for_rebackfill()
+        with Session(self._engine) as session:
+            for r in rows:
+                app = Application(
+                    company=r["company"],
+                    role=r["role"],
+                    source_portal=r["source_portal"],
+                    job_url=None,
+                    applied_date=r["applied_date"],
+                    current_status=ApplicationStatus(r["current_status"]),
+                    thread_ids="[]",
+                    is_false_positive=False,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(app)
+                session.commit()
+                session.refresh(app)
+                session.add(StatusHistory(
+                    application_id=app.id,
+                    from_status=None,
+                    to_status=r["current_status"],
+                    trigger="manual",
+                    changed_at=r["applied_date"],
+                    message_id=None,
+                ))
+                session.commit()
+        return len(rows)
+
+    # ------------------------------------------------------------------ #
     # Suppress rules                                                       #
     # ------------------------------------------------------------------ #
 
@@ -325,13 +417,16 @@ class DataStore:
         last_sync_at: datetime | None = None,
         error_message: str | None = None,
         clear_error: bool = False,
+        clear_last_history_id: bool = False,
     ) -> None:
         with Session(self._engine) as session:
             state = session.get(PollerState, 1)
             if state is None:
                 raise RuntimeError("PollerState row missing — DB may be corrupted")
             state.status = status
-            if last_history_id is not None:
+            if clear_last_history_id:
+                state.last_history_id = None
+            elif last_history_id is not None:
                 state.last_history_id = last_history_id
             if last_sync_at is not None:
                 state.last_sync_at = last_sync_at

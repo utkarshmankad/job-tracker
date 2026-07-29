@@ -10,10 +10,14 @@ Run from the repo root:
 """
 
 import sys
-import sqlite3
 from pathlib import Path
 
+import structlog
+
 from backend.config import DB_PATH
+from backend.db.data_store import DataStore
+
+log = structlog.get_logger(__name__)
 
 
 def reset(db_path: Path = DB_PATH) -> None:
@@ -21,13 +25,8 @@ def reset(db_path: Path = DB_PATH) -> None:
         print(f"DB not found at {db_path}")
         sys.exit(1)
 
-    conn = sqlite3.connect(db_path)
-    c = conn.cursor()
-
-    c.execute("SELECT COUNT(*) FROM application")
-    n_apps = c.fetchone()[0]
-    c.execute("SELECT COUNT(*) FROM processedmessage")
-    n_proc = c.fetchone()[0]
+    ds = DataStore(db_path)
+    n_apps, n_proc = ds.count_applications_and_processed()
 
     print(f"This will delete {n_apps} application(s) and {n_proc} processed-message record(s).")
     print("The next poll will re-backfill everything from scratch.")
@@ -36,13 +35,10 @@ def reset(db_path: Path = DB_PATH) -> None:
         print("Aborted.")
         sys.exit(0)
 
-    c.execute("DELETE FROM statushistory")
-    c.execute("DELETE FROM application")
-    c.execute("DELETE FROM processedmessage")
-    c.execute("UPDATE pollerstate SET last_history_id = NULL WHERE id = 1")
-    conn.commit()
-    conn.close()
+    n_apps, n_proc = ds.reset_for_rebackfill()
+    log.info("db_reset_for_rebackfill", applications_deleted=n_apps, processed_messages_deleted=n_proc)
 
+    print(f"Deleted {n_apps} application(s) and {n_proc} processed-message record(s).")
     print("Done. Start the backend — the poller will re-backfill on the next poll cycle.")
 
 

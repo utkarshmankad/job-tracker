@@ -106,6 +106,52 @@ def test_load_token_from_keyring_returns_none_on_corrupt_json(tmp_path: Path) ->
     assert result is None
 
 
+def test_authenticate_headless_returns_false_when_no_keyring_entry(tmp_path: Path) -> None:
+    poller = _make_poller(tmp_path)
+    with patch("backend.poller.gmail_poller.keyring.get_password", return_value=None):
+        assert poller.authenticate_headless() is False
+    assert poller.service is None
+
+
+def test_authenticate_headless_returns_false_on_corrupt_json(tmp_path: Path) -> None:
+    poller = _make_poller(tmp_path)
+    with patch("backend.poller.gmail_poller.keyring.get_password", return_value="not-json"):
+        assert poller.authenticate_headless() is False
+    assert poller.service is None
+
+
+def test_authenticate_headless_refreshes_expired_token(tmp_path: Path) -> None:
+    poller = _make_poller(tmp_path)
+    mock_creds = MagicMock()
+    mock_creds.expired = True
+    mock_creds.refresh_token = "1//fake"
+    mock_creds.valid = True
+
+    with patch("backend.poller.gmail_poller.keyring.get_password", return_value="{}"), \
+         patch("backend.poller.gmail_poller.Credentials.from_authorized_user_info", return_value=mock_creds), \
+         patch("backend.poller.gmail_poller.keyring.set_password"), \
+         patch("backend.poller.gmail_poller.build", return_value=MagicMock()) as mock_build:
+        result = poller.authenticate_headless()
+
+    assert result is True
+    mock_creds.refresh.assert_called_once()
+    mock_build.assert_called_once()
+    assert poller.service is not None
+
+
+def test_authenticate_headless_returns_false_when_refresh_fails(tmp_path: Path) -> None:
+    poller = _make_poller(tmp_path)
+    mock_creds = MagicMock()
+    mock_creds.expired = True
+    mock_creds.refresh_token = "1//fake"
+    mock_creds.refresh.side_effect = Exception("network error")
+
+    with patch("backend.poller.gmail_poller.keyring.get_password", return_value="{}"), \
+         patch("backend.poller.gmail_poller.Credentials.from_authorized_user_info", return_value=mock_creds):
+        assert poller.authenticate_headless() is False
+    assert poller.service is None
+
+
 def test_extract_text_from_payload_returns_empty_when_decode_raises(tmp_path: Path) -> None:
     """If base64.urlsafe_b64decode raises, the function returns '' without propagating."""
     poller = _make_poller(tmp_path)

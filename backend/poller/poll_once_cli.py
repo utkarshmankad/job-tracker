@@ -13,47 +13,16 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from datetime import datetime, timezone
 
-import keyring
 import structlog
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build as _build
 from googleapiclient.errors import HttpError
 
-from backend.config import (
-    GMAIL_KEYCHAIN_SERVICE,
-    GMAIL_KEYCHAIN_USERNAME,
-    GMAIL_SCOPES,
-)
 from backend.poller.error_retry import AuthError
 from backend.poller.scheduler import build_poller
 
 log = structlog.get_logger(__name__)
-
-
-def _load_headless_credentials() -> Credentials | None:
-    """Load stored OAuth token from keychain without opening a browser."""
-    token_json = keyring.get_password(GMAIL_KEYCHAIN_SERVICE, GMAIL_KEYCHAIN_USERNAME)
-    if not token_json:
-        return None
-    try:
-        creds = Credentials.from_authorized_user_info(json.loads(token_json), GMAIL_SCOPES)
-    except Exception as exc:
-        log.error("keyring_token_corrupt", error=str(exc))
-        return None
-    if creds.expired and creds.refresh_token:
-        try:
-            creds.refresh(Request())
-            # Save refreshed token back to keychain
-            keyring.set_password(GMAIL_KEYCHAIN_SERVICE, GMAIL_KEYCHAIN_USERNAME, creds.to_json())
-        except Exception as exc:
-            log.error("token_refresh_failed", error=str(exc))
-            return None
-    return creds if creds.valid else None
 
 
 def poll_once(dry_run: bool = False) -> int:
@@ -63,8 +32,8 @@ def poll_once(dry_run: bool = False) -> int:
     Returns the number of new applications processed.
     Raises SystemExit with code 2 on auth failure, code 1 on API error.
     """
-    creds = _load_headless_credentials()
-    if creds is None:
+    poller = build_poller()
+    if not poller.authenticate_headless():
         log.error(
             "no_valid_credentials",
             hint="Run: python backend/setup_wizard.py  to complete initial OAuth setup",
@@ -75,10 +44,6 @@ def poll_once(dry_run: bool = False) -> int:
         log.info("dry_run_auth_ok")
         print("Auth OK — credentials are valid.")
         return 0
-
-    poller = build_poller()
-    # Inject headless credentials directly instead of running the interactive flow
-    poller.service = _build("gmail", "v1", credentials=creds)
 
     started_at = datetime.now(timezone.utc)
     try:

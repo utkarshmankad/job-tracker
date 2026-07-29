@@ -69,6 +69,32 @@ class GmailPoller:
         self.service = build("gmail", "v1", credentials=creds)
         log.info("gmail_authenticated")
 
+    def authenticate_headless(self) -> bool:
+        """Authenticate from the stored keychain/env token only — never opens a browser.
+
+        For headless/cron use (poll_once_cli.py). Returns False if there's no valid,
+        refreshable token, in which case the caller should direct the operator to run
+        the interactive `authenticate()` flow once via setup_wizard.py.
+        """
+        creds = self._load_token_from_keyring()
+        if creds is None:
+            return False
+
+        if creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(Request())
+                self._save_token_to_keyring(creds)
+            except Exception as exc:
+                log.error("token_refresh_failed", error=str(exc))
+                return False
+
+        if not creds.valid:
+            return False
+
+        self.service = build("gmail", "v1", credentials=creds)
+        log.info("gmail_authenticated_headless")
+        return True
+
     def _load_token_from_keyring(self) -> Credentials | None:
         token_json = os.environ.get("GMAIL_TOKEN_JSON") or keyring.get_password(
             GMAIL_KEYCHAIN_SERVICE, GMAIL_KEYCHAIN_USERNAME
@@ -212,6 +238,38 @@ class GmailPoller:
         except Exception as exc:
             log.error("email_processing_error_skipping", message_id=msg_id, error=str(exc))
             return "error"
+
+    def get_thread_sender_domain(self, thread_id: str, timeout: int = 10) -> str | None:
+        """Fetch a thread's first message From header and return its sender domain.
+
+        Runs the blocking Gmail call in a worker thread with a bounded timeout so a
+        slow/hanging Gmail API can't stall the caller indefinitely. Returns None if the
+        thread has no messages, the sender domain can't be extracted, or the call times out.
+        """
+        if self.service is None:
+            return None
+        import concurrent.futures
+
+        request_obj = self.service.users().threads().get(
+            userId="me", id=thread_id,
+            format="metadata", metadataHeaders=["From"],
+        )
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(request_obj.execute)
+            try:
+                thread = future.result(timeout=timeout)
+            except concurrent.futures.TimeoutError:
+                log.warning("gmail_thread_fetch_timeout", thread_id=thread_id)
+                return None
+
+        messages = thread.get("messages", [])
+        if not messages:
+            return None
+        headers = {
+            h["name"]: h["value"]
+            for h in messages[0].get("payload", {}).get("headers", [])
+        }
+        return extract_sender_domain(headers.get("From", ""))
 
     def backfill_portal(self, sender_domains: list[str], days: int = BACKFILL_DAYS) -> dict[str, int]:
         """Re-scan Gmail for a portal's domains and pick up applications missed

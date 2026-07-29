@@ -10,6 +10,8 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 sys.path.append(str(Path(__file__).parent.parent))
 
 from backend.config import (
+    API_HOST,
+    API_PORT,
     CREDENTIALS_PATH,
     GMAIL_KEYCHAIN_SERVICE,
     GMAIL_KEYCHAIN_USERNAME,
@@ -50,8 +52,8 @@ def _install_launchd_plists() -> None:
     <key>ProgramArguments</key>
     <array>
         <string>{PYTHON}</string><string>-m</string><string>uvicorn</string>
-        <string>backend.main:app</string><string>--host</string><string>jobtracker.localhost</string>
-        <string>--port</string><string>8000</string>
+        <string>backend.main:app</string><string>--host</string><string>{API_HOST}</string>
+        <string>--port</string><string>{API_PORT}</string>
     </array>
     <key>WorkingDirectory</key><string>{PROJECT_ROOT}</string>
     <key>RunAtLoad</key><true/>

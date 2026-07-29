@@ -80,14 +80,10 @@ class DiagnosticRunner:
             return DiagnosticResult("db_connectivity", False, f"Cannot connect: {exc}")
 
     def _check_schema_tables(self) -> DiagnosticResult:
-        import sqlite3
+        from backend.db.data_store import DataStore
         required = {"application", "statushistory", "suppressrule", "pollerstate", "processedmessage"}
         try:
-            conn = sqlite3.connect(str(self._db_path))
-            cur = conn.cursor()
-            cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
-            found = {row[0] for row in cur.fetchall()}
-            conn.close()
+            found = DataStore.inspect_schema_tables(self._db_path)
             missing = required - found
             if missing:
                 return DiagnosticResult(
@@ -104,18 +100,15 @@ class DiagnosticRunner:
         The SAEnum definition uses values_callable to store e.g. 'Applied' not 'APPLIED'.
         If old data was stored using member names, reads would raise LookupError.
         """
-        import sqlite3
+        from backend.db.data_store import DataStore
         from backend.db.models import ApplicationStatus
 
         valid_values = {e.value for e in ApplicationStatus}
         valid_names = {e.name for e in ApplicationStatus}
 
         try:
-            conn = sqlite3.connect(str(self._db_path))
-            cur = conn.cursor()
-            cur.execute("SELECT DISTINCT current_status FROM application")
-            rows = [row[0] for row in cur.fetchall()]
-            conn.close()
+            ds = DataStore(self._db_path)
+            rows = ds.get_raw_status_values()
 
             name_format = [r for r in rows if r in valid_names and r not in valid_values]
             unknown = [r for r in rows if r not in valid_values and r not in valid_names]
@@ -185,12 +178,20 @@ class DiagnosticRunner:
 
 
 def run_diagnostics(db_path: Optional[Path] = None) -> bool:
-    """Run all diagnostics and print results. Returns True if all checks passed."""
+    """Run all diagnostics and print a human-readable report to the terminal.
+
+    print() here is intentional — this is the CLI's own report output for a human
+    operator, not application logging. structlog.log.info still records the
+    machine-readable summary below for anything that parses backend logs.
+
+    Returns True if all checks passed.
+    """
     runner = DiagnosticRunner(db_path)
     results = runner.run_all()
 
     passed = sum(1 for r in results if r.ok)
     failed = sum(1 for r in results if not r.ok)
+    log.info("diagnostics_complete", passed=passed, failed=failed)
 
     print(f"\nDiagnostic Report — {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
     print("=" * 60)
