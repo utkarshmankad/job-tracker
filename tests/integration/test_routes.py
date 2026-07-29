@@ -368,7 +368,9 @@ def test_trigger_poll_returns_triggered(seeded_client):
     resp = client.post(f"{_BASE}/poller/trigger")
     # Scheduler is started by the lifespan, so it should be present.
     assert resp.status_code == 200
-    assert resp.json() == {"triggered": True}
+    body = resp.json()
+    assert body["triggered"] is True
+    assert "skipped" in body
 
 
 def test_trigger_poll_no_scheduler_returns_503():

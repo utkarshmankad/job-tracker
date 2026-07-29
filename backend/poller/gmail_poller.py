@@ -93,6 +93,10 @@ class GmailPoller:
             GMAIL_KEYCHAIN_SERVICE, GMAIL_KEYCHAIN_USERNAME, creds.to_json()
         )
 
+    @property
+    def is_polling(self) -> bool:
+        return self._poll_lock.locked()
+
     @gmail_retry()
     def poll_once(self) -> int:
         if not self._poll_lock.acquire(blocking=False):
@@ -135,7 +139,7 @@ class GmailPoller:
             self._db.update_poller_state(
                 status=PollerStatus.RUNNING.value,
                 last_history_id=self.last_history_id,
-                last_sync_at=datetime.now(timezone.utc),
+                last_sync_at=datetime.utcnow(),
                 clear_error=True,
             )
             self.status = PollerStatus.RUNNING
@@ -411,8 +415,12 @@ class GmailPoller:
         date_str = headers.get("Date", "")
 
         try:
-            date = parsedate_to_datetime(date_str).replace(tzinfo=None)
-        except Exception:
+            parsed_date = parsedate_to_datetime(date_str)
+            if parsed_date.tzinfo is not None:
+                parsed_date = parsed_date.astimezone(timezone.utc)
+            date = parsed_date.replace(tzinfo=None)
+        except Exception as exc:
+            log.warning("email_date_parse_failed", date_header=date_str, error=str(exc))
             date = datetime.utcnow()
 
         return RawEmail(

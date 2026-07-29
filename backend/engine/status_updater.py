@@ -154,6 +154,38 @@ class StatusUpdater:
             saved = result
         return saved
 
+    def create_manual(
+        self,
+        company: str | None,
+        role: str | None,
+        source_portal: str,
+        job_url: str | None,
+        applied_date: datetime,
+        target_status: ApplicationStatus,
+    ) -> Application:
+        """Create a new application from a manual (non-email) source, e.g. LinkedIn import."""
+        app = Application(
+            company=company,
+            role=role,
+            source_portal=source_portal,
+            job_url=job_url,
+            applied_date=applied_date,
+            current_status=ApplicationStatus.APPLIED,
+            updated_at=applied_date,
+        )
+        saved = self._db.upsert_application(app)
+        assert saved.id is not None
+        self._db.append_status_history(
+            application_id=saved.id,
+            from_status=None,
+            to_status=ApplicationStatus.APPLIED.value,
+            trigger="manual",
+            message_id=None,
+        )
+        if target_status != ApplicationStatus.APPLIED:
+            saved = self.manual_update(saved.id, target_status)
+        return saved
+
     def manual_update(
         self,
         application_id: int,

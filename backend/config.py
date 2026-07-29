@@ -40,6 +40,7 @@ LLM_API_KEY: str | None = os.environ.get("GROQ_API_KEY")
 LLM_TIMEOUT_SECONDS: int = int(os.environ.get("LLM_TIMEOUT_SECONDS", "30"))
 
 # Insights
+REEXTRACT_BATCH_LIMIT = 50  # cap per /applications/reextract call to avoid Gmail rate limits/timeouts
 MIN_APPLICATIONS_FOR_INSIGHTS = 10
 STALE_DAYS_THRESHOLD = 14
 INTERVIEW_RATE_GREEN_THRESHOLD = 0.20  # 20%+ = green

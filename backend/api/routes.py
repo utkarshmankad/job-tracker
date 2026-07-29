@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from backend.config import DB_PATH
+from backend.config import DB_PATH, REEXTRACT_BATCH_LIMIT
 from backend.db.data_store import ApplicationFilter, DataStore, is_application_stale
 from backend.db.models import Application, ApplicationStatus
 from backend.diagnostics import DiagnosticRunner
@@ -384,10 +384,11 @@ def reextract_missing_fields(request: Request) -> ReextractResponse:
         raise HTTPException(status_code=503, detail="Gmail not authenticated — run setup_wizard.py reauth")
 
     apps = db.get_applications_missing_fields()
+    batch = apps[:REEXTRACT_BATCH_LIMIT]
     updated = 0
     skipped = 0
 
-    for app in apps:
+    for app in batch:
         try:
             company, role = poller.reextract_fields(app)
             changed = False
@@ -406,7 +407,7 @@ def reextract_missing_fields(request: Request) -> ReextractResponse:
             log.warning("reextract_failed", app_id=app.id, error=str(exc))
             skipped += 1
 
-    return ReextractResponse(total=len(apps), updated=updated, skipped=skipped)
+    return ReextractResponse(total=len(batch), updated=updated, skipped=skipped)
 
 
 @router.get("/applications/{id}", response_model=ApplicationDetailResponse)
@@ -605,23 +606,13 @@ async def linkedin_import_confirmed(
                     application_id=existing.id,
                 ))
             else:
-                app = Application(
+                saved = updater.create_manual(
                     company=entry.company,
                     role=entry.role,
                     source_portal="LinkedIn",
                     job_url=None,
                     applied_date=applied_date,
-                    current_status=target_status,
-                    updated_at=applied_date,
-                )
-                saved = db.upsert_application(app)
-                assert saved.id is not None
-                db.append_status_history(
-                    application_id=saved.id,
-                    from_status=None,
-                    to_status=target_status.value,
-                    trigger="manual",
-                    message_id=None,
+                    target_status=target_status,
                 )
                 created += 1
                 results.append(LinkedInImportEntryResult(
@@ -694,10 +685,19 @@ def _suppress_sender_on_delete(
         thread_ids = _json.loads(application.thread_ids or "[]")
         if not thread_ids:
             return
-        thread = poller.service.users().threads().get(
+        import concurrent.futures
+
+        request_obj = poller.service.users().threads().get(
             userId="me", id=thread_ids[0],
             format="metadata", metadataHeaders=["From"],
-        ).execute()
+        )
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(request_obj.execute)
+            try:
+                thread = future.result(timeout=10)
+            except concurrent.futures.TimeoutError:
+                log.warning("suppress_on_delete_gmail_timeout", app_id=application.id)
+                return
         messages = thread.get("messages", [])
         if not messages:
             return
@@ -782,8 +782,9 @@ async def trigger_poll(request: Request) -> dict:
     scheduler = getattr(request.app.state, "poller_scheduler", None)
     if scheduler is None:
         raise HTTPException(status_code=503, detail="Poller not running")
+    already_running = scheduler.poller.is_polling
     scheduler.trigger()
-    return {"triggered": True}
+    return {"triggered": True, "skipped": already_running}
 
 
 @router.post("/poller/backfill-portal")
@@ -802,9 +803,17 @@ def backfill_portal(sender_domains: list[str], request: Request) -> dict:
 
 @router.post("/poller/reauth")
 async def reauth_poller(request: Request) -> dict:
+    # Full OAuth re-auth requires an interactive browser flow (google_auth_oauthlib's
+    # InstalledAppFlow.run_local_server), which can't run inside this request handler —
+    # the backend is deployed remotely (Fly.io) with no local browser access. The operator
+    # must run the CLI flow on their own machine, then the poller picks up the refreshed
+    # keychain token on its next cycle.
     db: DataStore = request.app.state.db
-    db.update_poller_state(status="AUTH_REQUIRED")
-    return {"message": "Re-authentication required. Run: python backend/setup_wizard.py reauth"}
+    db.update_poller_state(status="AUTH_REQUIRED", clear_error=True)
+    return {
+        "status": "AUTH_REQUIRED",
+        "message": "Re-authentication required. Run on your local machine: python backend/setup_wizard.py reauth",
+    }
 
 
 # ------------------------------------------------------------------ #

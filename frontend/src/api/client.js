@@ -19,8 +19,11 @@ export const api = {
     request(`/applications/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteApplication: (id) =>
     request(`/applications/${id}`, { method: "DELETE" }),
-  exportApplications: (format = "csv") =>
-    fetch(`${BASE}/applications/export?format=${format}`),
+  exportApplications: async (format = "csv") => {
+    const res = await fetch(`${BASE}/applications/export?format=${format}`);
+    if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+    return res;
+  },
 
   getInsights: () => request("/insights"),
   getFlowData: () => request("/insights/flow"),

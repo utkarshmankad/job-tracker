@@ -7,6 +7,7 @@ export default function PollerStatusBar() {
   const [pollerData, setPollerData] = useState(null);
   const [fetchError, setFetchError] = useState(false);
   const [triggering, setTriggering] = useState(false);
+  const [triggerError, setTriggerError] = useState(false);
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -27,15 +28,20 @@ export default function PollerStatusBar() {
   const handleTrigger = async () => {
     if (triggering) return;
     setTriggering(true);
+    setTriggerError(false);
     try {
-      await api.triggerPoll();
+      const result = await api.triggerPoll();
+      if (result?.skipped) {
+        setTriggerError("Poll already in progress — try again shortly");
+        return;
+      }
       // Poll status a few times until last_sync_at advances
       for (let i = 0; i < 6; i++) {
         await new Promise((r) => setTimeout(r, 3_000));
         await fetchStatus();
       }
-    } catch {
-      // ignore trigger errors
+    } catch (e) {
+      setTriggerError(e.message || "Trigger failed");
     } finally {
       setTriggering(false);
     }
@@ -53,6 +59,11 @@ export default function PollerStatusBar() {
       const lastSync = formatTimeDiff(pollerData.last_sync_at);
       message = triggering ? "Syncing…" : lastSync ? `Last synced: ${lastSync}` : "Syncing…";
     }
+  }
+
+  if (triggerError) {
+    dot = "bg-red-500";
+    message = triggerError;
   }
 
   return (
