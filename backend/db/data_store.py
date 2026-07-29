@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -15,6 +16,7 @@ from backend.config import DB_PATH, STALE_DAYS_THRESHOLD
 from backend.db.models import (
     Application,
     ApplicationStatus,
+    ApplicationThreadId,
     PollerState,
     ProcessedMessage,
     StatusHistory,
@@ -73,6 +75,7 @@ class DataStore:
         SQLModel.metadata.create_all(self._engine)
         self._migrate_schema()
         self._ensure_poller_state()
+        self._backfill_thread_id_index()
 
     def _migrate_schema(self) -> None:
         # Deliberate exception to "no raw SQL strings": SQLModel/SQLAlchemy ORM has no
@@ -85,6 +88,27 @@ class DataStore:
             if "withdraw_reason" not in cols:
                 conn.execute(text("ALTER TABLE application ADD COLUMN withdraw_reason VARCHAR"))
                 conn.commit()
+
+    def _backfill_thread_id_index(self) -> None:
+        """One-time backfill for DBs created before ApplicationThreadId existed — populates
+        it from each Application's thread_ids JSON blob. No-op once every row is indexed
+        (checked via a cheap count comparison, not re-parsing JSON on every startup).
+
+        Selects only (id, thread_ids) — not the full Application entity — so a legacy DB
+        with corrupted current_status data (enum NAMES instead of values, the exact case
+        backend.diagnostics's enum check exists to catch) can't make DataStore's own
+        constructor crash via the ORM's enum coercion on load.
+        """
+        with Session(self._engine) as session:
+            app_count = session.exec(select(func.count()).select_from(Application)).one()
+            indexed_app_count = session.exec(
+                select(func.count(col(ApplicationThreadId.application_id).distinct()))
+            ).one()
+            if indexed_app_count >= app_count:
+                return
+            rows = session.exec(select(Application.id, Application.thread_ids)).all()
+            for app_id, thread_ids_json in rows:
+                self._sync_thread_ids(session, app_id, thread_ids_json)
 
     def _ensure_poller_state(self) -> None:
         with Session(self._engine) as session:
@@ -102,12 +126,14 @@ class DataStore:
                 session.add(app)
                 session.commit()
                 session.refresh(app)
+                self._sync_thread_ids(session, app.id, app.thread_ids)
                 return app
             db_app = session.get(Application, app.id)
             if db_app is None:
                 session.add(app)
                 session.commit()
                 session.refresh(app)
+                self._sync_thread_ids(session, app.id, app.thread_ids)
                 return app
             # Update scalar fields only; relationships are left untouched.
             app.updated_at = utc_now()
@@ -116,7 +142,31 @@ class DataStore:
                     setattr(db_app, field_name, getattr(app, field_name))
             session.commit()
             session.refresh(db_app)
+            self._sync_thread_ids(session, db_app.id, db_app.thread_ids)
             return db_app
+
+    def _sync_thread_ids(
+        self, session: Session, application_id: int | None, thread_ids_json: str | None
+    ) -> None:
+        """Keep ApplicationThreadId in sync with Application.thread_ids (the JSON source
+        of truth) — cheap since a job's thread count is always small (1-few).
+
+        Takes the id/JSON scalars rather than an Application so callers can populate it
+        (e.g. the startup backfill) via a column-scoped select that never touches the
+        current_status column — see _backfill_thread_id_index for why that matters.
+        """
+        assert application_id is not None
+        thread_ids: list[str] = json.loads(thread_ids_json or "[]")
+        existing = {
+            row.thread_id
+            for row in session.exec(
+                select(ApplicationThreadId).where(ApplicationThreadId.application_id == application_id)
+            ).all()
+        }
+        for thread_id in thread_ids:
+            if thread_id not in existing:
+                session.add(ApplicationThreadId(application_id=application_id, thread_id=thread_id))
+        session.commit()
 
     def get_applications(self, filters: ApplicationFilter) -> tuple[list[Application], int]:
         with Session(self._engine, expire_on_commit=False) as session:
@@ -168,12 +218,18 @@ class DataStore:
             return session.get(Application, id)
 
     def find_application_by_thread_id(self, thread_id: str) -> Application | None:
-        """Return the Application that owns thread_id, or None. Uses SQL LIKE on the JSON blob."""
+        """Return the Application that owns thread_id, or None.
+
+        Indexed equality lookup via ApplicationThreadId — replaces an unindexed LIKE
+        scan over the Application.thread_ids JSON blob, which got slower as the table grew.
+        """
         with Session(self._engine, expire_on_commit=False) as session:
-            stmt = select(Application).where(
-                Application.thread_ids.contains(f'"{thread_id}"')
-            )
-            return session.exec(stmt).first()
+            link = session.exec(
+                select(ApplicationThreadId).where(ApplicationThreadId.thread_id == thread_id)
+            ).first()
+            if link is None:
+                return None
+            return session.get(Application, link.application_id)
 
     def get_applications_missing_fields(
         self, offset: int = 0, limit: int | None = None
@@ -253,10 +309,17 @@ class DataStore:
             app = session.get(Application, id)
             if app is None:
                 return False
-            # Delete status history rows first; the FK is NOT NULL so SQLAlchemy
-            # cannot null them out via its default orphan strategy.
+            # Delete dependent rows first; the FKs are NOT NULL so SQLAlchemy cannot
+            # null them out via its default orphan strategy.
             for row in session.exec(select(StatusHistory).where(StatusHistory.application_id == id)).all():
                 session.delete(row)
+            for row in session.exec(select(ApplicationThreadId).where(ApplicationThreadId.application_id == id)).all():
+                session.delete(row)
+            # Flush child deletes before deleting the parent — SQLAlchemy's unit-of-work
+            # dependency sort doesn't reliably order these plain foreign_key=... columns
+            # (no relationship()) ahead of the parent delete in the same flush, which trips
+            # SQLite's FK enforcement (PRAGMA foreign_keys=ON, set per-connection above).
+            session.flush()
             session.delete(app)
             session.commit()
             return True
@@ -336,6 +399,9 @@ class DataStore:
             n_proc = session.exec(select(func.count()).select_from(ProcessedMessage)).one()
             for entry in session.exec(select(StatusHistory)).all():
                 session.delete(entry)
+            for link in session.exec(select(ApplicationThreadId)).all():
+                session.delete(link)
+            session.flush()  # child deletes before parent — see delete_application for why
             for app in session.exec(select(Application)).all():
                 session.delete(app)
             for msg in session.exec(select(ProcessedMessage)).all():

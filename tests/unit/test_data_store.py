@@ -210,6 +210,44 @@ def test_find_application_by_thread_id_does_not_match_partial(tmp_path: Path) ->
     assert ds.find_application_by_thread_id("thread-12") is None
 
 
+def test_find_application_by_thread_id_after_append(tmp_path: Path) -> None:
+    """A thread_id added to an existing application via a second upsert must be findable."""
+    ds = DataStore(tmp_path / "test.db")
+    app = _make_app(company="AppendCo")
+    app.thread_ids = json.dumps(["thread-one"])
+    saved = ds.upsert_application(app)
+
+    saved.thread_ids = json.dumps(["thread-one", "thread-two"])
+    ds.upsert_application(saved)
+
+    found = ds.find_application_by_thread_id("thread-two")
+    assert found is not None
+    assert found.id == saved.id
+
+
+def test_thread_id_index_backfills_from_existing_json_blobs(tmp_path: Path) -> None:
+    """Reopening a DB whose ApplicationThreadId rows are missing/incomplete must
+    backfill them from Application.thread_ids without the caller doing anything."""
+    from sqlmodel import Session, select
+    from backend.db.models import ApplicationThreadId
+
+    db_path = tmp_path / "test.db"
+    ds = DataStore(db_path)
+    app = _make_app(company="BackfillCo")
+    app.thread_ids = json.dumps(["legacy-thread"])
+    saved = ds.upsert_application(app)
+
+    with Session(ds._engine) as session:
+        for row in session.exec(select(ApplicationThreadId)).all():
+            session.delete(row)
+        session.commit()
+
+    ds2 = DataStore(db_path)  # constructor runs the backfill
+    found = ds2.find_application_by_thread_id("legacy-thread")
+    assert found is not None
+    assert found.id == saved.id
+
+
 def test_get_status_history_for_apps_filters_correctly(tmp_path: Path) -> None:
     ds = DataStore(tmp_path / "test.db")
     app1 = ds.upsert_application(_make_app(company="Alpha"))

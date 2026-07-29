@@ -84,6 +84,16 @@ class StatusHistory(SQLModel, table=True):
     application: Optional[Application] = Relationship(back_populates="status_history")
 
 
+class ApplicationThreadId(SQLModel, table=True):
+    """Indexed lookup table for Application.thread_ids (still the JSON source of truth on
+    Application itself). Kept in sync by DataStore.upsert_application — replaces an
+    unindexed LIKE scan over the JSON blob with an indexed equality lookup."""
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    application_id: int = Field(foreign_key="application.id", index=True)
+    thread_id: str = Field(index=True)
+
+
 class SuppressRule(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     sender_pattern: str
