@@ -28,19 +28,19 @@ from backend.db.models import (
 def is_application_stale(
     app: Application, threshold_days: int = STALE_DAYS_THRESHOLD
 ) -> bool:
-    """Return True when an Applied-status application was submitted more than threshold_days ago with no response."""
+    """Return True when an Applied-status application has had no update in threshold_days."""
     if app.current_status != ApplicationStatus.APPLIED:
         return False
     cutoff = utc_now() - timedelta(days=threshold_days)
-    applied = (
-        app.applied_date
-        if isinstance(app.applied_date, datetime)
+    updated = (
+        app.updated_at
+        if isinstance(app.updated_at, datetime)
         else datetime(
-            app.applied_date.year, app.applied_date.month, app.applied_date.day,
+            app.updated_at.year, app.updated_at.month, app.updated_at.day,
             tzinfo=timezone.utc,
         )
     )
-    return applied < cutoff
+    return updated < cutoff
 
 log = structlog.get_logger(__name__)
 
