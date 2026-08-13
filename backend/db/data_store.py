@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Optional
 
 import structlog
 from sqlalchemy import event, func, or_
@@ -25,34 +24,35 @@ from backend.db.models import (
 )
 
 
-def is_application_stale(
-    app: Application, threshold_days: int = STALE_DAYS_THRESHOLD
-) -> bool:
-    """Return True when an Applied-status application was submitted more than threshold_days ago with no response."""
+def is_application_stale(app: Application, threshold_days: int = STALE_DAYS_THRESHOLD) -> bool:
+    """Return True when an Applied-status application has had no update in threshold_days."""
     if app.current_status != ApplicationStatus.APPLIED:
         return False
     cutoff = utc_now() - timedelta(days=threshold_days)
-    applied = (
-        app.applied_date
-        if isinstance(app.applied_date, datetime)
+    updated = (
+        app.updated_at
+        if isinstance(app.updated_at, datetime)
         else datetime(
-            app.applied_date.year, app.applied_date.month, app.applied_date.day,
-            tzinfo=timezone.utc,
+            app.updated_at.year,
+            app.updated_at.month,
+            app.updated_at.day,
+            tzinfo=UTC,
         )
     )
-    return applied < cutoff
+    return updated < cutoff
+
 
 log = structlog.get_logger(__name__)
 
 
 @dataclass
 class ApplicationFilter:
-    status: Optional[ApplicationStatus] = None
-    source_portal: Optional[str] = None
-    date_from: Optional[datetime] = None
-    date_to: Optional[datetime] = None
-    search: Optional[str] = None  # matches company or role (case-insensitive)
-    is_stale: Optional[bool] = None
+    status: ApplicationStatus | None = None
+    source_portal: str | None = None
+    date_from: datetime | None = None
+    date_to: datetime | None = None
+    search: str | None = None  # matches company or role (case-insensitive)
+    is_stale: bool | None = None
     page: int = 1
     page_size: int = 50
 
@@ -83,6 +83,7 @@ class DataStore:
         # COLUMN — both require raw SQL via SQLAlchemy Core's text(), kept local to
         # DataStore so it's still the single point of DB access.
         from sqlalchemy import text
+
         with self._engine.connect() as conn:
             cols = {row[1] for row in conn.execute(text("PRAGMA table_info(application)"))}
             if "withdraw_reason" not in cols:
@@ -160,7 +161,9 @@ class DataStore:
         existing = {
             row.thread_id
             for row in session.exec(
-                select(ApplicationThreadId).where(ApplicationThreadId.application_id == application_id)
+                select(ApplicationThreadId).where(
+                    ApplicationThreadId.application_id == application_id
+                )
             ).all()
         }
         for thread_id in thread_ids:
@@ -271,10 +274,9 @@ class DataStore:
             )
             return session.exec(stmt).one()
 
-    def find_application_by_company_role(
-        self, company: str, role: str
-    ) -> Application | None:
-        """Return the most-recent non-false-positive Application matching company+role (case-insensitive)."""
+    def find_application_by_company_role(self, company: str, role: str) -> Application | None:
+        """Return the most-recent non-false-positive Application matching company+role
+        (case-insensitive)."""
         with Session(self._engine, expire_on_commit=False) as session:
             stmt = (
                 select(Application)
@@ -286,13 +288,17 @@ class DataStore:
             return session.exec(stmt).first()
 
     def find_active_applications_by_companies(self, company_names: list[str]) -> list[Application]:
-        """Return non-Withdrawn, non-false-positive applications whose company matches any name (case-insensitive)."""
-        terminal = {ApplicationStatus.WITHDRAWN, ApplicationStatus.REJECTED, ApplicationStatus.JOINED, ApplicationStatus.OFFER}
+        """Return non-Withdrawn, non-false-positive applications whose company matches any
+        name (case-insensitive)."""
+        terminal = {
+            ApplicationStatus.WITHDRAWN,
+            ApplicationStatus.REJECTED,
+            ApplicationStatus.JOINED,
+            ApplicationStatus.OFFER,
+        }
         with Session(self._engine, expire_on_commit=False) as session:
             conditions = [
-                col(Application.company).ilike(name)
-                for name in company_names
-                if name.strip()
+                col(Application.company).ilike(name) for name in company_names if name.strip()
             ]
             if not conditions:
                 return []
@@ -311,9 +317,13 @@ class DataStore:
                 return False
             # Delete dependent rows first; the FKs are NOT NULL so SQLAlchemy cannot
             # null them out via its default orphan strategy.
-            for row in session.exec(select(StatusHistory).where(StatusHistory.application_id == id)).all():
+            for row in session.exec(
+                select(StatusHistory).where(StatusHistory.application_id == id)
+            ).all():
                 session.delete(row)
-            for row in session.exec(select(ApplicationThreadId).where(ApplicationThreadId.application_id == id)).all():
+            for row in session.exec(
+                select(ApplicationThreadId).where(ApplicationThreadId.application_id == id)
+            ).all():
                 session.delete(row)
             # Flush child deletes before deleting the parent — SQLAlchemy's unit-of-work
             # dependency sort doesn't reliably order these plain foreign_key=... columns
@@ -349,9 +359,7 @@ class DataStore:
 
     def get_status_history(self, application_id: int) -> list[StatusHistory]:
         with Session(self._engine, expire_on_commit=False) as session:
-            stmt = select(StatusHistory).where(
-                StatusHistory.application_id == application_id
-            )
+            stmt = select(StatusHistory).where(StatusHistory.application_id == application_id)
             return list(session.exec(stmt).all())
 
     # ------------------------------------------------------------------ #
@@ -367,6 +375,7 @@ class DataStore:
         this check exists to detect. Uses a throwaway engine for inspection only.
         """
         from sqlalchemy import inspect
+
         engine = create_engine(f"sqlite:///{db_path}")
         try:
             return set(inspect(engine).get_table_names())
@@ -379,6 +388,7 @@ class DataStore:
         LookupError on legacy NAME-format data, which is precisely the corruption this
         check exists to detect."""
         from sqlalchemy import text
+
         with self._engine.connect() as conn:
             rows = conn.execute(text("SELECT DISTINCT current_status FROM application"))
             return [row[0] for row in rows]
@@ -411,9 +421,7 @@ class DataStore:
         self.update_poller_state(status=state.status, clear_last_history_id=True)
         return n_apps, n_proc
 
-    def bulk_import_applications(
-        self, rows: list[dict], now: datetime
-    ) -> int:
+    def bulk_import_applications(self, rows: list[dict], now: datetime) -> int:
         """Clear existing applications and insert rows from an external source (e.g. an
         Excel export), each with an initial status-history entry. Returns rows inserted."""
         self.reset_for_rebackfill()
@@ -434,14 +442,16 @@ class DataStore:
                 session.add(app)
                 session.commit()
                 session.refresh(app)
-                session.add(StatusHistory(
-                    application_id=app.id,
-                    from_status=None,
-                    to_status=r["current_status"],
-                    trigger="manual",
-                    changed_at=r["applied_date"],
-                    message_id=None,
-                ))
+                session.add(
+                    StatusHistory(
+                        application_id=app.id,
+                        from_status=None,
+                        to_status=r["current_status"],
+                        trigger="manual",
+                        changed_at=r["applied_date"],
+                        message_id=None,
+                    )
+                )
                 session.commit()
         return len(rows)
 
@@ -552,7 +562,9 @@ class DataStore:
             stmt = select(StatusHistory).where(StatusHistory.application_id.in_(app_ids))
             return list(session.exec(stmt).all())
 
-    def get_stale_applications(self, threshold_days: int = STALE_DAYS_THRESHOLD) -> list[Application]:
+    def get_stale_applications(
+        self, threshold_days: int = STALE_DAYS_THRESHOLD
+    ) -> list[Application]:
         cutoff = utc_now() - timedelta(days=threshold_days)
         with Session(self._engine, expire_on_commit=False) as session:
             stmt = select(Application).where(

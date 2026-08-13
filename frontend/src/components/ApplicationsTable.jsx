@@ -25,7 +25,7 @@ export default function ApplicationsTable({ filters, onSelectId }) {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [sorting, setSorting] = useState([]);
+  const [sorting, setSorting] = useState([{ id: "applied_date", desc: true }]);
   const [displayCount, setDisplayCount] = useState(BATCH);
   const sentinelRef = useRef(null);
 
