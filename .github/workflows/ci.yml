@@ -126,7 +126,7 @@ jobs:
           kill $SERVER_PID
 
   coverage-gate:
-    name: Coverage Check (55%)
+    name: Coverage Check (80%)
     runs-on: ubuntu-latest
     needs: [integration-tests]
     steps:
@@ -136,14 +136,15 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - run: pip install -r requirements.txt -r requirements-dev.txt
-      # Target rule is 85%; actual coverage from tests/integration alone is ~55%
-      # (large untested surface: CLI scripts, LLM extractor, gmail poller). Gate set
-      # to the current real baseline so CI is meaningful now — ratchet this up as
-      # tests are added, rather than leaving a permanently-red required check.
+      # tests/integration alone only reaches ~55% (large surface — CLI scripts, LLM
+      # extractor, gmail poller — is only exercised at the unit level). Coverage is
+      # measured across tests/unit + tests/integration together to get an accurate
+      # number; this doesn't reintroduce a standalone "Unit Tests" validation job,
+      # it just runs unit tests here so their coverage counts toward the gate.
       - run: >
-          pytest tests/integration
+          pytest tests/unit tests/integration
           --cov=backend --cov-report=term-missing
-          --cov-fail-under=55
+          --cov-fail-under=80
 
   all-checks:
     name: All Checks Passed
