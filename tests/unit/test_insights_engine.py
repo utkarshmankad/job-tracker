@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
 
 from backend.db.data_store import DataStore
-from backend.db.models import Application, ApplicationStatus
+from backend.db.models import Application, ApplicationStatus, utc_now
 from backend.engine.insights_engine import ChannelStat, InsightsEngine
 
 # --------------------------------------------------------------------------- #
@@ -28,7 +27,7 @@ def _seed_app(
         company="TestCo",
         role="Engineer",
         source_portal=source_portal,
-        applied_date=datetime.utcnow(),
+        applied_date=utc_now(),
         current_status=status,
     )
     return db.upsert_application(app)
