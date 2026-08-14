@@ -25,11 +25,19 @@ const NAV_TABS = [
 
 export default function App() {
   const [activeTab, setActiveTab] = useState("home");
+  // Tabs mount lazily on first visit, then stay mounted (kept alive, hidden via CSS)
+  // so revisiting one is instant instead of re-fetching from scratch every time.
+  const [visitedTabs, setVisitedTabs] = useState(() => new Set(["home"]));
   const [filters, setFilters] = useState({});
   const [selectedId, setSelectedId] = useState(null);
   const [showAddForm, setShowAddForm] = useState(false);
   const { dark, toggle } = useTheme();
   const [exportError, setExportError] = useState(null);
+
+  const selectTab = (id) => {
+    setActiveTab(id);
+    setVisitedTabs((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
+  };
 
   const handleExport = async () => {
     setExportError(null);
@@ -55,7 +63,7 @@ export default function App() {
         <div className="flex items-center justify-between mb-6 gap-4 flex-wrap">
           <button
             type="button"
-            onClick={() => setActiveTab("home")}
+            onClick={() => selectTab("home")}
             className="flex items-center gap-2.5"
             aria-label="Go to home"
           >
@@ -80,7 +88,7 @@ export default function App() {
               {NAV_TABS.map(({ id, label, Icon }) => (
                 <button
                   key={id}
-                  onClick={() => setActiveTab(id)}
+                  onClick={() => selectTab(id)}
                   className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
                     activeTab === id
                       ? "bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 shadow-sm"
@@ -126,17 +134,40 @@ export default function App() {
             Export failed: {exportError}
           </div>
         )}
-        {activeTab === "home" && <AnalyticsPanel />}
-        {activeTab === "applications" && (
-          <>
+        {/*
+          Each tab mounts lazily on its first visit (visitedTabs), then stays mounted
+          and is hidden via CSS instead of being conditionally rendered/unmounted.
+          Conditional rendering (`activeTab === X && <Y />`) unmounts the component on
+          every tab switch, forcing ApplicationsTable/AnalyticsPanel to refetch from
+          scratch each time — the main source of the "switching tabs feels slow" lag.
+          Keeping visited tabs mounted means revisiting one is instant; only the first
+          visit pays for a fetch (and even that is now backed by the server-side Redis
+          cache, so it's fast too).
+        */}
+        {visitedTabs.has("home") && (
+          <div className={activeTab === "home" ? "" : "hidden"}>
+            <AnalyticsPanel />
+          </div>
+        )}
+        {visitedTabs.has("applications") && (
+          <div className={activeTab === "applications" ? "" : "hidden"}>
             <Filters filters={filters} onChange={setFilters} />
-            <ApplicationsTable filters={{ ...filters, is_stale: false }} onSelectId={setSelectedId} />
-          </>
+            <ApplicationsTable
+              filters={{ ...filters, is_stale: false }}
+              onSelectId={setSelectedId}
+            />
+          </div>
         )}
-        {activeTab === "stale" && (
-          <ApplicationsTable filters={{ is_stale: true }} onSelectId={setSelectedId} />
+        {visitedTabs.has("stale") && (
+          <div className={activeTab === "stale" ? "" : "hidden"}>
+            <ApplicationsTable filters={{ is_stale: true }} onSelectId={setSelectedId} />
+          </div>
         )}
-        {activeTab === "status" && <StatusPage />}
+        {visitedTabs.has("status") && (
+          <div className={activeTab === "status" ? "" : "hidden"}>
+            <StatusPage />
+          </div>
+        )}
         {selectedId && (
           <ApplicationDetail
             applicationId={selectedId}
