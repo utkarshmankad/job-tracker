@@ -5,15 +5,22 @@ from __future__ import annotations
 import csv
 import io
 import re
-from datetime import date, datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 import structlog
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from backend.config import ADMIN_TOKEN, DB_PATH, PUBLIC_BASE_URL, REEXTRACT_BATCH_LIMIT
+from backend import cache
+from backend.config import (
+    ADMIN_TOKEN,
+    APPLICATIONS_CACHE_TTL_SECONDS,
+    DB_PATH,
+    INSIGHTS_CACHE_TTL_SECONDS,
+    PUBLIC_BASE_URL,
+    REEXTRACT_BATCH_LIMIT,
+)
 from backend.db.data_store import ApplicationFilter, DataStore, is_application_stale
 from backend.db.models import Application, ApplicationStatus, utc_now
 from backend.diagnostics import DiagnosticRunner
@@ -21,6 +28,15 @@ from backend.engine.insights_engine import InsightsEngine
 from backend.engine.status_updater import StatusUpdater
 
 log = structlog.get_logger(__name__)
+
+_APPLICATIONS_CACHE_PREFIX = "applications:list:"
+_INSIGHTS_CACHE_PREFIX = "insights:"
+
+
+def _invalidate_applications_cache() -> None:
+    cache.invalidate_prefix(_APPLICATIONS_CACHE_PREFIX)
+    cache.invalidate_prefix(_INSIGHTS_CACHE_PREFIX)
+
 
 router = APIRouter()
 
@@ -35,24 +51,24 @@ class StatusHistoryResponse(BaseModel):
 
     id: int
     application_id: int
-    from_status: Optional[str]
+    from_status: str | None
     to_status: str
     trigger: str
     changed_at: datetime
-    message_id: Optional[str]
+    message_id: str | None
 
 
 class ApplicationResponse(BaseModel):
     id: int
-    company: Optional[str]
-    role: Optional[str]
+    company: str | None
+    role: str | None
     source_portal: str
-    job_url: Optional[str]
+    job_url: str | None
     applied_date: datetime
     current_status: ApplicationStatus
     thread_ids: str
     is_false_positive: bool
-    withdraw_reason: Optional[str]
+    withdraw_reason: str | None
     created_at: datetime
     updated_at: datetime
     is_stale: bool
@@ -94,17 +110,17 @@ class InsightReportResponse(BaseModel):
 
 class PollerStatusResponse(BaseModel):
     status: str
-    last_sync_at: Optional[datetime]
-    error_message: Optional[str]
+    last_sync_at: datetime | None
+    error_message: str | None
 
     @field_validator("last_sync_at")
     @classmethod
-    def _tag_utc(cls, v: Optional[datetime]) -> Optional[datetime]:
+    def _tag_utc(cls, v: datetime | None) -> datetime | None:
         # Stored/written as UTC (datetime.now(timezone.utc)) but SQLite drops
         # tzinfo on the round trip, so the value comes back naive. Without an
         # explicit offset, browsers parse the ISO string as local time.
         if v is not None and v.tzinfo is None:
-            return v.replace(tzinfo=timezone.utc)
+            return v.replace(tzinfo=UTC)
         return v
 
 
@@ -148,7 +164,7 @@ class SuppressRuleResponse(BaseModel):
 
     id: int
     sender_pattern: str
-    subject_pattern: Optional[str]
+    subject_pattern: str | None
     created_at: datetime
 
 
@@ -158,22 +174,22 @@ class SuppressRuleResponse(BaseModel):
 
 
 class ApplicationCreate(BaseModel):
-    company: Optional[str] = None
-    role: Optional[str] = None
+    company: str | None = None
+    role: str | None = None
     source_portal: str
-    job_url: Optional[str] = None
+    job_url: str | None = None
     applied_date: datetime
     current_status: ApplicationStatus = ApplicationStatus.APPLIED
 
 
 class ApplicationPatch(BaseModel):
-    current_status: Optional[ApplicationStatus] = None
-    company: Optional[str] = None
-    role: Optional[str] = None
-    job_url: Optional[str] = None
-    applied_date: Optional[datetime] = None
-    is_false_positive: Optional[bool] = None
-    withdraw_reason: Optional[str] = None
+    current_status: ApplicationStatus | None = None
+    company: str | None = None
+    role: str | None = None
+    job_url: str | None = None
+    applied_date: datetime | None = None
+    is_false_positive: bool | None = None
+    withdraw_reason: str | None = None
 
 
 class BulkWithdrawRequest(BaseModel):
@@ -187,7 +203,7 @@ class BulkWithdrawResponse(BaseModel):
 
 class SuppressRuleCreate(BaseModel):
     sender_pattern: str
-    subject_pattern: Optional[str] = None
+    subject_pattern: str | None = None
 
 
 class LinkedInPreviewRequest(BaseModel):
@@ -196,11 +212,11 @@ class LinkedInPreviewRequest(BaseModel):
 
 
 class LinkedInPreviewEntry(BaseModel):
-    company: Optional[str]
-    role: Optional[str]
-    applied_date: Optional[datetime]
+    company: str | None
+    role: str | None
+    applied_date: datetime | None
     predicted_action: str  # "create" | "skip" | "update" | "no_data"
-    existing_id: Optional[int]
+    existing_id: int | None
 
 
 class LinkedInPreviewResponse(BaseModel):
@@ -210,9 +226,9 @@ class LinkedInPreviewResponse(BaseModel):
 
 
 class LinkedInConfirmedEntry(BaseModel):
-    company: Optional[str] = None
-    role: Optional[str] = None
-    applied_date: Optional[datetime] = None
+    company: str | None = None
+    role: str | None = None
+    applied_date: datetime | None = None
     include: bool = True
 
 
@@ -222,11 +238,11 @@ class LinkedInImportConfirmedRequest(BaseModel):
 
 
 class LinkedInImportEntryResult(BaseModel):
-    company: Optional[str]
-    role: Optional[str]
-    applied_date: Optional[datetime]
+    company: str | None
+    role: str | None
+    applied_date: datetime | None
     action: str  # "created" | "updated" | "skipped" | "failed"
-    application_id: Optional[int]
+    application_id: int | None
 
 
 class LinkedInImportResponse(BaseModel):
@@ -264,25 +280,34 @@ def _to_response(app: Application) -> ApplicationResponse:
 def _csv_rows(apps: list[Application]) -> str:
     output = io.StringIO()
     fields = [
-        "id", "company", "role", "source_portal", "job_url",
-        "applied_date", "current_status", "is_false_positive",
-        "created_at", "updated_at",
+        "id",
+        "company",
+        "role",
+        "source_portal",
+        "job_url",
+        "applied_date",
+        "current_status",
+        "is_false_positive",
+        "created_at",
+        "updated_at",
     ]
     writer = csv.DictWriter(output, fieldnames=fields)
     writer.writeheader()
     for app in apps:
-        writer.writerow({
-            "id": app.id,
-            "company": app.company or "",
-            "role": app.role or "",
-            "source_portal": app.source_portal,
-            "job_url": app.job_url or "",
-            "applied_date": app.applied_date.isoformat(),
-            "current_status": app.current_status.value,
-            "is_false_positive": app.is_false_positive,
-            "created_at": app.created_at.isoformat(),
-            "updated_at": app.updated_at.isoformat(),
-        })
+        writer.writerow(
+            {
+                "id": app.id,
+                "company": app.company or "",
+                "role": app.role or "",
+                "source_portal": app.source_portal,
+                "job_url": app.job_url or "",
+                "applied_date": app.applied_date.isoformat(),
+                "current_status": app.current_status.value,
+                "is_false_positive": app.is_false_positive,
+                "created_at": app.created_at.isoformat(),
+                "updated_at": app.updated_at.isoformat(),
+            }
+        )
     return output.getvalue()
 
 
@@ -294,12 +319,12 @@ def _csv_rows(apps: list[Application]) -> str:
 @router.get("/applications", response_model=ApplicationListResponse)
 async def list_applications(
     request: Request,
-    status: Optional[ApplicationStatus] = None,
-    source_portal: Optional[str] = None,
-    date_from: Optional[str] = None,
-    date_to: Optional[str] = None,
-    search: Optional[str] = None,
-    is_stale: Optional[bool] = None,
+    status: ApplicationStatus | None = None,
+    source_portal: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    search: str | None = None,
+    is_stale: bool | None = None,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=500),
 ) -> ApplicationListResponse:
@@ -322,13 +347,23 @@ async def list_applications(
         page=page,
         page_size=page_size,
     )
+    cache_key = (
+        f"{_APPLICATIONS_CACHE_PREFIX}{status}:{source_portal}:{date_from}:{date_to}:"
+        f"{search}:{is_stale}:{page}:{page_size}"
+    )
+    cached = cache.get_json(cache_key)
+    if cached is not None:
+        return ApplicationListResponse(**cached)
+
     items, total = db.get_applications(filters)
-    return ApplicationListResponse(
+    response = ApplicationListResponse(
         items=[_to_response(a) for a in items],
         total=total,
         page=page,
         page_size=page_size,
     )
+    cache.set_json(cache_key, response.model_dump(mode="json"), APPLICATIONS_CACHE_TTL_SECONDS)
+    return response
 
 
 @router.post("/applications", response_model=ApplicationResponse, status_code=201)
@@ -344,6 +379,7 @@ async def create_application(body: ApplicationCreate, request: Request) -> Appli
         updated_at=body.applied_date,
     )
     saved = db.upsert_application(app)
+    _invalidate_applications_cache()
     return _to_response(saved)
 
 
@@ -368,6 +404,7 @@ async def export_applications(
 
     # JSON — return as a plain streaming response with JSON content
     import json as _json
+
     payload = _json.dumps([_to_response(a).model_dump(mode="json") for a in active])
     return StreamingResponse(iter([payload]), media_type="application/json")
 
@@ -388,7 +425,9 @@ def reextract_missing_fields(request: Request, offset: int = Query(0, ge=0)) -> 
         raise HTTPException(status_code=503, detail="Poller not running")
     poller = scheduler.poller
     if poller.service is None:
-        raise HTTPException(status_code=503, detail="Gmail not authenticated — run setup_wizard.py reauth")
+        raise HTTPException(
+            status_code=503, detail="Gmail not authenticated — run setup_wizard.py reauth"
+        )
 
     batch = db.get_applications_missing_fields(offset=offset, limit=REEXTRACT_BATCH_LIMIT)
     updated = 0
@@ -414,7 +453,11 @@ def reextract_missing_fields(request: Request, offset: int = Query(0, ge=0)) -> 
             skipped += 1
 
     remaining = db.count_applications_missing_fields()
-    return ReextractResponse(total=len(batch), updated=updated, skipped=skipped, remaining=remaining)
+    if updated:
+        _invalidate_applications_cache()
+    return ReextractResponse(
+        total=len(batch), updated=updated, skipped=skipped, remaining=remaining
+    )
 
 
 @router.get("/applications/{id}", response_model=ApplicationDetailResponse)
@@ -463,6 +506,9 @@ async def patch_application(
     if needs_upsert:
         app = db.upsert_application(app)
 
+    if needs_upsert or body.current_status is not None:
+        _invalidate_applications_cache()
+
     return _to_response(app)
 
 
@@ -480,6 +526,8 @@ async def bulk_withdraw_by_companies(
         assert app.id is not None
         updater.manual_update(app.id, ApplicationStatus.WITHDRAWN, "company_closed")
         ids.append(app.id)
+    if ids:
+        _invalidate_applications_cache()
     return BulkWithdrawResponse(updated=len(ids), application_ids=ids)
 
 
@@ -498,14 +546,18 @@ _LINKEDIN_VALID_MODES = {"applied", "archived", "interview"}
 
 def _linkedin_predict(
     db: DataStore,
-    company: Optional[str],
-    role: Optional[str],
+    company: str | None,
+    role: str | None,
     mode: str,
-) -> tuple[str, Optional[int]]:
+) -> tuple[str, int | None]:
     """Return (predicted_action, existing_id) without touching the DB."""
     if not company and not role:
         return "no_data", None
-    existing = db.find_application_by_company_role(company or "", role or "") if (company and role) else None
+    existing = (
+        db.find_application_by_company_role(company or "", role or "")
+        if (company and role)
+        else None
+    )
     if existing is None:
         return "create", None
     assert existing.id is not None
@@ -519,6 +571,7 @@ def _linkedin_predict(
 # NOTE: /applications/linkedin-import/preview and /confirmed must be registered
 # before /applications/{id} (they are literal path segments, not captured as int id).
 
+
 @router.post("/applications/linkedin-import/preview", response_model=LinkedInPreviewResponse)
 async def linkedin_import_preview(
     body: LinkedInPreviewRequest, request: Request
@@ -528,11 +581,12 @@ async def linkedin_import_preview(
     from backend.parser.llm_extractor import LLMExtractor  # noqa: PLC0415
 
     if body.mode not in _LINKEDIN_VALID_MODES:
-        raise HTTPException(status_code=400, detail="mode must be 'applied', 'archived', or 'interview'")
+        raise HTTPException(
+            status_code=400, detail="mode must be 'applied', 'archived', or 'interview'"
+        )
 
     db: DataStore = request.app.state.db
     llm: LLMExtractor | None = getattr(request.app.state, "llm_extractor", None)
-    today = utc_now().replace(hour=0, minute=0, second=0, microsecond=0)
 
     entries: list[LinkedInPreviewEntry] = []
     garbage_lines: list[int] = []
@@ -541,13 +595,15 @@ async def linkedin_import_preview(
     # Regex parser is always authoritative for company/role/date extraction.
     for e in parse_linkedin_paste(body.text):
         action, existing_id = _linkedin_predict(db, e.company, e.role, body.mode)
-        entries.append(LinkedInPreviewEntry(
-            company=e.company,
-            role=e.role,
-            applied_date=e.applied_date,
-            predicted_action=action,
-            existing_id=existing_id,
-        ))
+        entries.append(
+            LinkedInPreviewEntry(
+                company=e.company,
+                role=e.role,
+                applied_date=e.applied_date,
+                predicted_action=action,
+                existing_id=existing_id,
+            )
+        )
 
     # LLM classifies which lines are garbage (noise highlighting only, no DB impact).
     if llm is not None:
@@ -565,7 +621,9 @@ async def linkedin_import_confirmed(
 ) -> LinkedInImportResponse:
     """Write user-confirmed LinkedIn entries to the database."""
     if body.mode not in _LINKEDIN_VALID_MODES:
-        raise HTTPException(status_code=400, detail="mode must be 'applied', 'archived', or 'interview'")
+        raise HTTPException(
+            status_code=400, detail="mode must be 'applied', 'archived', or 'interview'"
+        )
 
     db: DataStore = request.app.state.db
     updater: StatusUpdater = request.app.state.updater
@@ -605,13 +663,15 @@ async def linkedin_import_confirmed(
                 else:
                     skipped += 1
                     action = "skipped"
-                results.append(LinkedInImportEntryResult(
-                    company=entry.company,
-                    role=entry.role,
-                    applied_date=applied_date,
-                    action=action,
-                    application_id=existing.id,
-                ))
+                results.append(
+                    LinkedInImportEntryResult(
+                        company=entry.company,
+                        role=entry.role,
+                        applied_date=applied_date,
+                        action=action,
+                        application_id=existing.id,
+                    )
+                )
             else:
                 saved = updater.create_manual(
                     company=entry.company,
@@ -622,13 +682,15 @@ async def linkedin_import_confirmed(
                     target_status=target_status,
                 )
                 created += 1
-                results.append(LinkedInImportEntryResult(
-                    company=entry.company,
-                    role=entry.role,
-                    applied_date=applied_date,
-                    action="created",
-                    application_id=saved.id,
-                ))
+                results.append(
+                    LinkedInImportEntryResult(
+                        company=entry.company,
+                        role=entry.role,
+                        applied_date=applied_date,
+                        action="created",
+                        application_id=saved.id,
+                    )
+                )
 
         except Exception as exc:
             log.warning(
@@ -638,13 +700,15 @@ async def linkedin_import_confirmed(
                 error=str(exc),
             )
             failed += 1
-            results.append(LinkedInImportEntryResult(
-                company=entry.company,
-                role=entry.role,
-                applied_date=entry.applied_date,
-                action="failed",
-                application_id=None,
-            ))
+            results.append(
+                LinkedInImportEntryResult(
+                    company=entry.company,
+                    role=entry.role,
+                    applied_date=entry.applied_date,
+                    action="failed",
+                    application_id=None,
+                )
+            )
 
     log.info(
         "linkedin_import_confirmed",
@@ -654,6 +718,8 @@ async def linkedin_import_confirmed(
         skipped=skipped,
         failed=failed,
     )
+    if created or updated:
+        _invalidate_applications_cache()
     return LinkedInImportResponse(
         created=created,
         updated=updated,
@@ -671,12 +737,11 @@ def delete_application(id: int, request: Request) -> dict:
         raise HTTPException(status_code=404, detail="Application not found")
     _suppress_sender_on_delete(application, db, request)
     db.delete_application(id)
+    _invalidate_applications_cache()
     return {"deleted": True}
 
 
-def _suppress_sender_on_delete(
-    application: Application, db: DataStore, request: Request
-) -> None:
+def _suppress_sender_on_delete(application: Application, db: DataStore, request: Request) -> None:
     """Look up the application's first Gmail thread's sender domain and add a suppress rule."""
     import json as _json
     import re as _re
@@ -710,21 +775,37 @@ def _suppress_sender_on_delete(
 
 @router.get("/insights/flow")
 async def get_insights_flow(request: Request) -> dict:
+    cache_key = f"{_INSIGHTS_CACHE_PREFIX}flow"
+    cached = cache.get_json(cache_key)
+    if cached is not None:
+        return cached
     db: DataStore = request.app.state.db
-    return InsightsEngine(db).flow_data()
+    result = InsightsEngine(db).flow_data()
+    cache.set_json(cache_key, result, INSIGHTS_CACHE_TTL_SECONDS)
+    return result
 
 
 @router.get("/insights/rejection")
 async def get_rejection_data(request: Request) -> dict:
+    cache_key = f"{_INSIGHTS_CACHE_PREFIX}rejection"
+    cached = cache.get_json(cache_key)
+    if cached is not None:
+        return cached
     db: DataStore = request.app.state.db
-    return InsightsEngine(db).rejection_data()
+    result = InsightsEngine(db).rejection_data()
+    cache.set_json(cache_key, result, INSIGHTS_CACHE_TTL_SECONDS)
+    return result
 
 
 @router.get("/insights", response_model=InsightReportResponse)
 async def get_insights(request: Request) -> InsightReportResponse:
+    cache_key = f"{_INSIGHTS_CACHE_PREFIX}report"
+    cached = cache.get_json(cache_key)
+    if cached is not None:
+        return InsightReportResponse(**cached)
     db: DataStore = request.app.state.db
     report = InsightsEngine(db).generate_report()
-    return InsightReportResponse(
+    response = InsightReportResponse(
         funnel=report.funnel,
         channels=[
             ChannelStatResponse(
@@ -744,6 +825,8 @@ async def get_insights(request: Request) -> InsightReportResponse:
         insufficient_data=report.insufficient_data,
         generated_at=report.generated_at,
     )
+    cache.set_json(cache_key, response.model_dump(mode="json"), INSIGHTS_CACHE_TTL_SECONDS)
+    return response
 
 
 # ------------------------------------------------------------------ #
@@ -782,7 +865,9 @@ def backfill_portal(sender_domains: list[str], request: Request) -> dict:
         raise HTTPException(status_code=503, detail="Poller not running")
     poller = scheduler.poller
     if poller.service is None:
-        raise HTTPException(status_code=503, detail="Gmail not authenticated — run setup_wizard.py reauth")
+        raise HTTPException(
+            status_code=503, detail="Gmail not authenticated — run setup_wizard.py reauth"
+        )
     return poller.backfill_portal(sender_domains)
 
 
@@ -864,9 +949,7 @@ async def list_suppress_rules(request: Request) -> list[SuppressRuleResponse]:
 
 
 @router.post("/suppress-rules", response_model=SuppressRuleResponse, status_code=201)
-async def create_suppress_rule(
-    body: SuppressRuleCreate, request: Request
-) -> SuppressRuleResponse:
+async def create_suppress_rule(body: SuppressRuleCreate, request: Request) -> SuppressRuleResponse:
     try:
         re.compile(body.sender_pattern)
     except re.error as exc:
@@ -925,16 +1008,18 @@ async def run_diagnostics(request: Request) -> DiagnosticsResponse:
 async def get_system_status(request: Request) -> SystemStatusResponse:
     db: DataStore = request.app.state.db
     now = utc_now()
-    started_at: Optional[datetime] = getattr(request.app.state, "started_at", None)
+    started_at: datetime | None = getattr(request.app.state, "started_at", None)
     components: list[ComponentStatusResponse] = []
 
     # API Server — always operational if the request arrived
-    components.append(ComponentStatusResponse(
-        name="API Server",
-        status="operational",
-        description="FastAPI server is responding",
-        checked_at=now,
-    ))
+    components.append(
+        ComponentStatusResponse(
+            name="API Server",
+            status="operational",
+            description="FastAPI server is responding",
+            checked_at=now,
+        )
+    )
 
     # Database
     db_total = 0
@@ -942,19 +1027,23 @@ async def get_system_status(request: Request) -> SystemStatusResponse:
     try:
         _, db_total = db.get_applications(ApplicationFilter(page_size=1))
         db_size_kb = DB_PATH.stat().st_size // 1024 if DB_PATH.exists() else 0
-        components.append(ComponentStatusResponse(
-            name="Database",
-            status="operational",
-            description=f"SQLite healthy — {db_total} applications, {db_size_kb} KB",
-            checked_at=now,
-        ))
+        components.append(
+            ComponentStatusResponse(
+                name="Database",
+                status="operational",
+                description=f"SQLite healthy — {db_total} applications, {db_size_kb} KB",
+                checked_at=now,
+            )
+        )
     except Exception as exc:
-        components.append(ComponentStatusResponse(
-            name="Database",
-            status="outage",
-            description=f"Database error: {exc}",
-            checked_at=now,
-        ))
+        components.append(
+            ComponentStatusResponse(
+                name="Database",
+                status="outage",
+                description=f"Database error: {exc}",
+                checked_at=now,
+            )
+        )
 
     # Gmail Poller
     poller = db.get_poller_state()
@@ -976,12 +1065,14 @@ async def get_system_status(request: Request) -> SystemStatusResponse:
         poller_status = "degraded"
         poller_desc = "Never synced — start the scheduler to begin polling"
 
-    components.append(ComponentStatusResponse(
-        name="Gmail Poller",
-        status=poller_status,
-        description=poller_desc,
-        checked_at=now,
-    ))
+    components.append(
+        ComponentStatusResponse(
+            name="Gmail Poller",
+            status=poller_status,
+            description=poller_desc,
+            checked_at=now,
+        )
+    )
 
     # Gmail Auth
     if poller.status in ("AUTH_ERROR", "AUTH_REQUIRED"):
@@ -991,12 +1082,14 @@ async def get_system_status(request: Request) -> SystemStatusResponse:
         auth_status = "operational"
         auth_desc = "OAuth token valid"
 
-    components.append(ComponentStatusResponse(
-        name="Gmail Auth",
-        status=auth_status,
-        description=auth_desc,
-        checked_at=now,
-    ))
+    components.append(
+        ComponentStatusResponse(
+            name="Gmail Auth",
+            status=auth_status,
+            description=auth_desc,
+            checked_at=now,
+        )
+    )
 
     # Overall
     statuses = {c.status for c in components}

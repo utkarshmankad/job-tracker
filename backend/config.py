@@ -3,7 +3,9 @@ from pathlib import Path
 
 # Paths
 HOME = Path.home()
-JOB_TRACKER_DIR = Path(os.environ.get("JOB_TRACKER_DIR", str(Path(__file__).parent.parent / ".job-tracker")))
+JOB_TRACKER_DIR = Path(
+    os.environ.get("JOB_TRACKER_DIR", str(Path(__file__).parent.parent / ".job-tracker"))
+)
 DB_PATH = JOB_TRACKER_DIR / "applications.db"
 CREDENTIALS_PATH = JOB_TRACKER_DIR / "client_secret.json"
 LOG_DIR = JOB_TRACKER_DIR / "logs"
@@ -23,7 +25,9 @@ API_HOST = os.environ.get("API_HOST", "jobtracker.localhost")
 API_PORT = int(os.environ.get("API_PORT", "8000"))
 FRONTEND_PORT = 5173
 FRONTEND_PORT_ALT = 5174
-FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN")  # e.g. https://job-tracker-three-green.vercel.app
+FRONTEND_ORIGIN = os.environ.get(
+    "FRONTEND_ORIGIN"
+)  # e.g. https://job-tracker-three-green.vercel.app
 
 # Public URL the deployed backend is reachable at — used to build the OAuth redirect_uri
 # for the web-based re-auth flow (/poller/reauth/*). Must exactly match a redirect URI
@@ -52,8 +56,18 @@ LLM_API_KEY: str | None = os.environ.get("GROQ_API_KEY")
 LLM_TIMEOUT_SECONDS: int = int(os.environ.get("LLM_TIMEOUT_SECONDS", "30"))
 
 # Insights
-REEXTRACT_BATCH_LIMIT = 50  # cap per /applications/reextract call to avoid Gmail rate limits/timeouts
+# cap per /applications/reextract call to avoid Gmail rate limits/timeouts
+REEXTRACT_BATCH_LIMIT = 50
 MIN_APPLICATIONS_FOR_INSIGHTS = 10
 STALE_DAYS_THRESHOLD = 14
 INTERVIEW_RATE_GREEN_THRESHOLD = 0.20  # 20%+ = green
 DUPLICATE_FUZZY_THRESHOLD = 85  # rapidfuzz score 0-100
+
+# Cache — speeds up repeated reads (e.g. re-fetching /applications or /insights on every
+# tab switch) by caching short-lived GET responses in Redis. Fails open: if Redis is
+# unreachable, every request just falls through to the DB as if caching were off.
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+CACHE_ENABLED = os.environ.get("CACHE_ENABLED", "true").lower() == "true"
+CACHE_CONNECT_TIMEOUT_SECONDS = 0.2  # fail fast when Redis isn't running (e.g. local dev, CI)
+APPLICATIONS_CACHE_TTL_SECONDS = int(os.environ.get("APPLICATIONS_CACHE_TTL_SECONDS", "20"))
+INSIGHTS_CACHE_TTL_SECONDS = int(os.environ.get("INSIGHTS_CACHE_TTL_SECONDS", "20"))
