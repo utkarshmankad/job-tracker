@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from backend.db.models import ApplicationStatus
-from backend.parser.llm_extractor import LLMExtractor, LLMExtractionResult
+from backend.parser.llm_extractor import LLMExtractor
 
 
 @pytest.fixture()
@@ -107,7 +107,9 @@ def test_snippet_and_body_included_in_request(extractor: LLMExtractor) -> None:
         return _ollama_response({"company": "Acme", "role": "Dev", "status": None})
 
     with patch("httpx.post", side_effect=fake_post):
-        extractor.extract("hr@acme.com", "Application received", "Great news!", "Full body text here")
+        extractor.extract(
+            "hr@acme.com", "Application received", "Great news!", "Full body text here"
+        )
 
     user_content = captured[0]["messages"][1]["content"]
     assert "Great news!" in user_content
@@ -204,3 +206,109 @@ def test_all_known_status_values_map_correctly(extractor: LLMExtractor) -> None:
             result = extractor.extract("hr@co.com", "Test", "")
         assert result is not None
         assert result.status == expected_status, f"Failed for {status_str}"
+
+
+# ------------------------------------------------------------------ #
+# classify_linkedin_garbage                                            #
+# ------------------------------------------------------------------ #
+
+
+def _groq_response(content: dict) -> MagicMock:
+    """Fake httpx.Response in Groq /chat/completions (OpenAI-compatible) format."""
+    mock = MagicMock()
+    mock.raise_for_status.return_value = None
+    mock.json.return_value = {"choices": [{"message": {"content": json.dumps(content)}}]}
+    return mock
+
+
+def test_classify_linkedin_garbage_empty_text_short_circuits(extractor: LLMExtractor) -> None:
+    with patch("httpx.post") as mock_post:
+        result = extractor.classify_linkedin_garbage("")
+    mock_post.assert_not_called()
+    assert result is not None
+    assert result.garbage_line_numbers == []
+
+
+def test_classify_linkedin_garbage_blank_lines_only(extractor: LLMExtractor) -> None:
+    with patch("httpx.post") as mock_post:
+        result = extractor.classify_linkedin_garbage("\n\n   \n")
+    mock_post.assert_not_called()
+    assert result.garbage_line_numbers == []
+
+
+def test_classify_linkedin_garbage_returns_line_numbers(extractor: LLMExtractor) -> None:
+    payload = {"garbage_line_numbers": [2, 4]}
+    text = "Software Engineer\nSaved for later\nAcme Corp\nPromoted"
+    with patch("httpx.post", return_value=_ollama_response(payload)):
+        result = extractor.classify_linkedin_garbage(text)
+    assert result is not None
+    assert result.garbage_line_numbers == [2, 4]
+
+
+def test_classify_linkedin_garbage_filters_invalid_line_numbers(extractor: LLMExtractor) -> None:
+    """Line numbers outside the valid range or non-int values must be dropped."""
+    payload = {"garbage_line_numbers": [1, 99, "2", None]}
+    text = "Line one\nLine two"
+    with patch("httpx.post", return_value=_ollama_response(payload)):
+        result = extractor.classify_linkedin_garbage(text)
+    assert result.garbage_line_numbers == [1]
+
+
+def test_classify_linkedin_garbage_missing_key_defaults_empty(extractor: LLMExtractor) -> None:
+    with patch("httpx.post", return_value=_ollama_response({})):
+        result = extractor.classify_linkedin_garbage("Some line")
+    assert result.garbage_line_numbers == []
+
+
+def test_classify_linkedin_garbage_returns_none_on_connect_error(extractor: LLMExtractor) -> None:
+    with patch("httpx.post", side_effect=httpx.ConnectError("refused")):
+        result = extractor.classify_linkedin_garbage("Some line")
+    assert result is None
+
+
+def test_classify_linkedin_garbage_returns_none_on_invalid_json(extractor: LLMExtractor) -> None:
+    mock = MagicMock()
+    mock.raise_for_status.return_value = None
+    mock.json.return_value = {"message": {"content": "not json"}}
+    with patch("httpx.post", return_value=mock):
+        result = extractor.classify_linkedin_garbage("Some line")
+    assert result is None
+
+
+# ------------------------------------------------------------------ #
+# Groq / api_key branch of _chat                                       #
+# ------------------------------------------------------------------ #
+
+
+def test_extract_uses_groq_endpoint_when_api_key_configured() -> None:
+    groq_extractor = LLMExtractor(
+        base_url="https://api.groq.com/openai/v1",
+        model="llama-3.1-8b",
+        timeout=10,
+        api_key="test-key",
+    )
+    payload = {"company": "Acme", "role": "Engineer", "status": None}
+    with patch("httpx.post", return_value=_groq_response(payload)) as mock_post:
+        result = groq_extractor.extract("hr@acme.com", "Update", "")
+
+    assert result is not None
+    assert result.company == "Acme"
+    called_url = mock_post.call_args.args[0]
+    assert called_url.endswith("/chat/completions")
+    called_headers = mock_post.call_args.kwargs["headers"]
+    assert called_headers["Authorization"] == "Bearer test-key"
+
+
+def test_classify_linkedin_garbage_uses_groq_endpoint_when_api_key_configured() -> None:
+    groq_extractor = LLMExtractor(
+        base_url="https://api.groq.com/openai/v1",
+        model="llama-3.1-8b",
+        timeout=10,
+        api_key="test-key",
+    )
+    payload = {"garbage_line_numbers": [1]}
+    with patch("httpx.post", return_value=_groq_response(payload)):
+        result = groq_extractor.classify_linkedin_garbage("Promoted")
+
+    assert result is not None
+    assert result.garbage_line_numbers == [1]

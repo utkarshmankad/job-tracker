@@ -36,7 +36,11 @@ def reset(db_path: Path = DB_PATH) -> None:
         sys.exit(0)
 
     n_apps, n_proc = ds.reset_for_rebackfill()
-    log.info("db_reset_for_rebackfill", applications_deleted=n_apps, processed_messages_deleted=n_proc)
+    log.info(
+        "db_reset_for_rebackfill",
+        applications_deleted=n_apps,
+        processed_messages_deleted=n_proc,
+    )
 
     print(f"Deleted {n_apps} application(s) and {n_proc} processed-message record(s).")
     print("Done. Start the backend — the poller will re-backfill on the next poll cycle.")

@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
 
 from backend.db.data_store import DataStore
-from backend.db.models import Application, ApplicationStatus
+from backend.db.models import Application, ApplicationStatus, utc_now
 from backend.engine.insights_engine import ChannelStat, InsightsEngine
-
 
 # --------------------------------------------------------------------------- #
 # Helpers                                                                      #
@@ -29,7 +27,7 @@ def _seed_app(
         company="TestCo",
         role="Engineer",
         source_portal=source_portal,
-        applied_date=datetime.utcnow(),
+        applied_date=utc_now(),
         current_status=status,
     )
     return db.upsert_application(app)
@@ -189,19 +187,22 @@ def test_flow_data_filters_history_to_active_apps(tmp_path: Path) -> None:
 
 def test_shortlisted_values_derived_from_stages() -> None:
     """_SHORTLISTED_VALUES must match _SHORTLISTED_STAGES.value for every member."""
-    from backend.engine.insights_engine import InsightsEngine, _SHORTLISTED_STAGES
+    from backend.engine.insights_engine import _SHORTLISTED_STAGES, InsightsEngine
+
     expected = frozenset(s.value for s in _SHORTLISTED_STAGES)
     assert InsightsEngine._SHORTLISTED_VALUES == expected
 
 
 def test_interviewed_values_derived_from_stages() -> None:
-    from backend.engine.insights_engine import InsightsEngine, _INTERVIEW_STAGES
+    from backend.engine.insights_engine import _INTERVIEW_STAGES, InsightsEngine
+
     expected = frozenset(s.value for s in _INTERVIEW_STAGES)
     assert InsightsEngine._INTERVIEWED_VALUES == expected
 
 
 def test_offered_values_derived_from_stages() -> None:
-    from backend.engine.insights_engine import InsightsEngine, _OFFER_STAGES
+    from backend.engine.insights_engine import _OFFER_STAGES, InsightsEngine
+
     expected = frozenset(s.value for s in _OFFER_STAGES)
     assert InsightsEngine._OFFERED_VALUES == expected
 
@@ -224,3 +225,94 @@ def test_flow_data_with_history(tmp_path: Path) -> None:
     result = InsightsEngine(db).flow_data()
     assert result["insufficient_data"] is False
     assert result["kpis"]["total"] == 11
+
+
+# --------------------------------------------------------------------------- #
+# rejection_data                                                               #
+# --------------------------------------------------------------------------- #
+
+
+def test_rejection_data_empty_db(tmp_path: Path) -> None:
+    db = _make_db(tmp_path)
+    result = InsightsEngine(db).rejection_data()
+    assert result["insufficient_data"] is True
+    assert result["total"] == 0
+    assert result["rejection_rate"] == 0.0
+    assert result["stage_breakdown"] == {"rejection": {}, "withdrawal": {}}
+
+
+def test_rejection_data_basic_counts(tmp_path: Path) -> None:
+    db = _make_db(tmp_path)
+    for _ in range(5):
+        _seed_app(db, status=ApplicationStatus.REJECTED)
+    for _ in range(2):
+        _seed_app(db, status=ApplicationStatus.WITHDRAWN)
+    for _ in range(3):
+        _seed_app(db, status=ApplicationStatus.OFFER)
+    for _ in range(4):
+        _seed_app(db, status=ApplicationStatus.APPLIED)
+
+    result = InsightsEngine(db).rejection_data()
+
+    assert result["total"] == 14
+    assert result["rejected"] == 5
+    assert result["withdrawn"] == 2
+    assert result["resolved"] == 10  # 5 rejected + 2 withdrawn + 3 offered
+    assert result["rejection_rate"] == 0.5
+    assert result["withdrawal_rate"] == round(2 / 14, 4)
+    assert result["non_offer_rate"] == round(7 / 10, 4)
+    assert result["insufficient_data"] is False
+
+
+def test_rejection_data_stage_breakdown_by_history(tmp_path: Path) -> None:
+    db = _make_db(tmp_path)
+
+    # Rejected straight from Applied — bucket "Applied"
+    app1 = _seed_app(db, status=ApplicationStatus.REJECTED)
+    db.append_status_history(app1.id, None, "Applied", "email")
+    db.append_status_history(app1.id, "Applied", "Rejected", "email")
+
+    # Rejected after being shortlisted — bucket "Shortlisted"
+    app2 = _seed_app(db, status=ApplicationStatus.REJECTED)
+    db.append_status_history(app2.id, None, "Applied", "email")
+    db.append_status_history(app2.id, "Applied", "Resume Shortlisted", "email")
+    db.append_status_history(app2.id, "Resume Shortlisted", "Rejected", "email")
+
+    # Withdrawn after interview — bucket "Interview"
+    app3 = _seed_app(db, status=ApplicationStatus.WITHDRAWN)
+    db.append_status_history(app3.id, None, "Applied", "email")
+    db.append_status_history(app3.id, "Applied", "Interview Scheduled", "email")
+    db.append_status_history(app3.id, "Interview Scheduled", "Withdrawn", "manual")
+
+    result = InsightsEngine(db).rejection_data()
+
+    assert result["stage_breakdown"]["rejection"]["Applied"] == 1
+    assert result["stage_breakdown"]["rejection"]["Shortlisted"] == 1
+    assert result["stage_breakdown"]["withdrawal"]["Interview"] == 1
+
+
+def test_rejection_data_portal_breakdown(tmp_path: Path) -> None:
+    db = _make_db(tmp_path)
+    _seed_app(db, source_portal="LinkedIn", status=ApplicationStatus.REJECTED)
+    _seed_app(db, source_portal="LinkedIn", status=ApplicationStatus.APPLIED)
+    _seed_app(db, source_portal="Naukri", status=ApplicationStatus.WITHDRAWN)
+
+    result = InsightsEngine(db).rejection_data()
+    portals = {p["portal"]: p for p in result["portal_breakdown"]}
+
+    assert portals["LinkedIn"]["total"] == 2
+    assert portals["LinkedIn"]["rejected"] == 1
+    assert portals["LinkedIn"]["rejection_rate"] == 1.0
+    assert portals["Naukri"]["withdrawn"] == 1
+    assert portals["Naukri"]["rejection_rate"] == 0.0  # resolved (withdrawn) but not rejected
+
+
+def test_rejection_data_monthly_trend_has_six_months(tmp_path: Path) -> None:
+    db = _make_db(tmp_path)
+    _seed_app(db, status=ApplicationStatus.REJECTED)
+
+    result = InsightsEngine(db).rejection_data()
+
+    assert len(result["monthly_trend"]) == 6
+    for entry in result["monthly_trend"]:
+        assert set(entry.keys()) == {"month", "label", "rejected", "withdrawn"}

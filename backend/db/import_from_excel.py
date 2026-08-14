@@ -6,7 +6,7 @@ Run from repo root:
 """
 
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import openpyxl
@@ -52,10 +52,10 @@ def _portal(raw: str | None) -> str:
 
 def _applied_date(val) -> datetime:
     if isinstance(val, datetime):
-        return val if val.tzinfo else val.replace(tzinfo=timezone.utc)
+        return val if val.tzinfo else val.replace(tzinfo=UTC)
     if isinstance(val, str):
         try:
-            return datetime.strptime(val, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            return datetime.strptime(val, "%Y-%m-%d").replace(tzinfo=UTC)
         except ValueError:
             pass
     raise ValueError(f"Cannot parse applied date: {val!r}")
