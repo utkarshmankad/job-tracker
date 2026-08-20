@@ -51,7 +51,8 @@ LLM_ENABLED: bool = os.environ.get("LLM_ENABLED", "true").lower() == "true"
 LLM_PROVIDER: str = os.environ.get("LLM_PROVIDER", "ollama")  # "ollama" | "groq"
 LLM_MODEL: str = os.environ.get(
     # llama-3.1-8b-instant retired by Groq on 2026-08-16; migrated default to gpt-oss-20b.
-    "LLM_MODEL", "llama3.2:3b" if LLM_PROVIDER == "ollama" else "openai/gpt-oss-20b"
+    "LLM_MODEL",
+    "llama3.2:3b" if LLM_PROVIDER == "ollama" else "openai/gpt-oss-20b",
 )
 LLM_BASE_URL: str = os.environ.get(
     "LLM_BASE_URL",
