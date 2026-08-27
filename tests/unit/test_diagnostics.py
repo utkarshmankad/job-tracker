@@ -6,15 +6,14 @@ Mirrors backend/diagnostics.py per the project test convention.
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
 from backend.db.data_store import DataStore
-from backend.db.models import Application, ApplicationStatus, PollerState
+from backend.db.models import Application, ApplicationStatus, utc_now
 from backend.diagnostics import DiagnosticResult, DiagnosticRunner
-
 
 # ------------------------------------------------------------------ #
 # Fixtures                                                             #
@@ -123,7 +122,7 @@ def _insert_raw_status(db_path: Path, value: str) -> None:
     """Bypass the ORM and insert a row with an arbitrary current_status string."""
     conn = sqlite3.connect(str(db_path))
     cur = conn.cursor()
-    now = datetime.utcnow().isoformat()
+    now = utc_now().isoformat()
     cur.execute(
         """
         INSERT INTO application
@@ -144,14 +143,15 @@ def test_check_enum_values_empty_db(runner: DiagnosticRunner):
 
 
 def test_check_enum_values_all_correct(db: DataStore, db_path: Path):
+    from datetime import UTC
     from datetime import datetime as dt
 
     app = Application(
         company="X",
         source_portal="LinkedIn",
-        applied_date=dt(2026, 1, 1),
+        applied_date=dt(2026, 1, 1, tzinfo=UTC),
         current_status=ApplicationStatus.APPLIED,
-        updated_at=dt(2026, 1, 1),
+        updated_at=dt(2026, 1, 1, tzinfo=UTC),
     )
     db.upsert_application(app)
 
@@ -184,8 +184,8 @@ def test_check_enum_values_unknown_value_detected(db: DataStore, db_path: Path):
 
 def test_check_enum_values_mixed_formats_detected(db: DataStore, db_path: Path):
     # One row with correct value format, one row with old name format.
-    _insert_raw_status(db_path, "Applied")      # correct
-    _insert_raw_status(db_path, "REJECTED")     # old name format
+    _insert_raw_status(db_path, "Applied")  # correct
+    _insert_raw_status(db_path, "REJECTED")  # old name format
 
     runner = DiagnosticRunner(db_path=db_path)
     result = runner._check_enum_values()
@@ -221,7 +221,7 @@ def test_check_poller_state_api_error(db: DataStore, db_path: Path):
 
 
 def test_check_poller_state_stale(db: DataStore, db_path: Path):
-    stale_time = datetime.utcnow() - timedelta(minutes=20)
+    stale_time = utc_now() - timedelta(minutes=20)
     db.update_poller_state(status="SLEEPING", last_sync_at=stale_time)
     runner = DiagnosticRunner(db_path=db_path)
     result = runner._check_poller_state()
@@ -230,7 +230,7 @@ def test_check_poller_state_stale(db: DataStore, db_path: Path):
 
 
 def test_check_poller_state_recent(db: DataStore, db_path: Path):
-    db.update_poller_state(status="RUNNING", last_sync_at=datetime.utcnow())
+    db.update_poller_state(status="RUNNING", last_sync_at=utc_now())
     runner = DiagnosticRunner(db_path=db_path)
     result = runner._check_poller_state()
     assert result.ok
@@ -247,7 +247,6 @@ def test_run_all_returns_results_for_healthy_db(runner: DiagnosticRunner):
     assert all(isinstance(r, DiagnosticResult) for r in results)
     failed = [r for r in results if not r.ok]
     # Only config path checks may fail in CI (no credentials.json).
-    config_failures = [r for r in failed if r.name == "config_paths"]
     non_config_failures = [r for r in failed if r.name != "config_paths"]
     assert not non_config_failures, [str(r) for r in non_config_failures]
 

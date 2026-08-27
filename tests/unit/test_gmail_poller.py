@@ -11,7 +11,6 @@ import pytest
 
 from backend.db.data_store import DataStore
 from backend.engine.status_updater import StatusUpdater
-from backend.engine.duplicate_detector import DuplicateDetector
 from backend.parser.email_parser import EmailParser
 from backend.poller.gmail_poller import GmailPoller, PollerStatus
 
@@ -19,7 +18,6 @@ from backend.poller.gmail_poller import GmailPoller, PollerStatus
 def _make_poller(tmp_path: Path) -> GmailPoller:
     db = DataStore(db_path=tmp_path / "test.db")
     parser = MagicMock(spec=EmailParser)
-    detector = MagicMock(spec=DuplicateDetector)
     updater = MagicMock(spec=StatusUpdater)
     updater.process.return_value = (MagicMock(), True)
     return GmailPoller(db=db, parser=parser, updater=updater)
@@ -34,12 +32,10 @@ def test_concurrent_poll_once_skips_second_call(tmp_path: Path) -> None:
     results: list[int] = []
     errors: list[Exception] = []
 
-    original_locked = poller._poll_once_locked
-
     def slow_poll():
-        barrier.wait()   # sync with second call arrival
+        barrier.wait()  # sync with second call arrival
         time.sleep(0.1)  # hold the lock briefly
-        return 3          # pretend 3 messages processed
+        return 3  # pretend 3 messages processed
 
     poller._poll_once_locked = slow_poll  # type: ignore[method-assign]
 
@@ -50,7 +46,7 @@ def test_concurrent_poll_once_skips_second_call(tmp_path: Path) -> None:
                 r = poller.poll_once()
                 results.append(r)
             else:
-                barrier.wait()   # arrive after first caller has the lock
+                barrier.wait()  # arrive after first caller has the lock
                 r = poller.poll_once()
                 results.append(r)
         except Exception as exc:
@@ -127,10 +123,15 @@ def test_authenticate_headless_refreshes_expired_token(tmp_path: Path) -> None:
     mock_creds.refresh_token = "1//fake"
     mock_creds.valid = True
 
-    with patch("backend.poller.gmail_poller.keyring.get_password", return_value="{}"), \
-         patch("backend.poller.gmail_poller.Credentials.from_authorized_user_info", return_value=mock_creds), \
-         patch("backend.poller.gmail_poller.keyring.set_password"), \
-         patch("backend.poller.gmail_poller.build", return_value=MagicMock()) as mock_build:
+    with (
+        patch("backend.poller.gmail_poller.keyring.get_password", return_value="{}"),
+        patch(
+            "backend.poller.gmail_poller.Credentials.from_authorized_user_info",
+            return_value=mock_creds,
+        ),
+        patch("backend.poller.gmail_poller.keyring.set_password"),
+        patch("backend.poller.gmail_poller.build", return_value=MagicMock()) as mock_build,
+    ):
         result = poller.authenticate_headless()
 
     assert result is True
@@ -146,8 +147,13 @@ def test_authenticate_headless_returns_false_when_refresh_fails(tmp_path: Path) 
     mock_creds.refresh_token = "1//fake"
     mock_creds.refresh.side_effect = Exception("network error")
 
-    with patch("backend.poller.gmail_poller.keyring.get_password", return_value="{}"), \
-         patch("backend.poller.gmail_poller.Credentials.from_authorized_user_info", return_value=mock_creds):
+    with (
+        patch("backend.poller.gmail_poller.keyring.get_password", return_value="{}"),
+        patch(
+            "backend.poller.gmail_poller.Credentials.from_authorized_user_info",
+            return_value=mock_creds,
+        ),
+    ):
         assert poller.authenticate_headless() is False
     assert poller.service is None
 
@@ -155,9 +161,14 @@ def test_authenticate_headless_returns_false_when_refresh_fails(tmp_path: Path) 
 def test_build_reauth_url_returns_url_and_state(tmp_path: Path) -> None:
     poller = _make_poller(tmp_path)
     mock_flow = MagicMock()
-    mock_flow.authorization_url.return_value = ("https://accounts.google.com/o/oauth2/auth?x=1", "state-abc")
+    mock_flow.authorization_url.return_value = (
+        "https://accounts.google.com/o/oauth2/auth?x=1",
+        "state-abc",
+    )
 
-    with patch("backend.poller.gmail_poller.Flow.from_client_secrets_file", return_value=mock_flow) as mock_from_secrets:
+    with patch(
+        "backend.poller.gmail_poller.Flow.from_client_secrets_file", return_value=mock_flow
+    ) as mock_from_secrets:
         auth_url, state = poller.build_reauth_url("https://example.com/callback")
 
     mock_from_secrets.assert_called_once()
@@ -172,9 +183,11 @@ def test_complete_reauth_saves_token_and_sets_service(tmp_path: Path) -> None:
     mock_creds = MagicMock()
     mock_flow.credentials = mock_creds
 
-    with patch("backend.poller.gmail_poller.Flow.from_client_secrets_file", return_value=mock_flow), \
-         patch("backend.poller.gmail_poller.keyring.set_password") as mock_set, \
-         patch("backend.poller.gmail_poller.build", return_value=MagicMock()) as mock_build:
+    with (
+        patch("backend.poller.gmail_poller.Flow.from_client_secrets_file", return_value=mock_flow),
+        patch("backend.poller.gmail_poller.keyring.set_password") as mock_set,
+        patch("backend.poller.gmail_poller.build", return_value=MagicMock()) as mock_build,
+    ):
         poller.complete_reauth("auth-code-123", "https://example.com/callback")
 
     mock_flow.fetch_token.assert_called_once_with(code="auth-code-123")
@@ -187,6 +200,7 @@ def test_extract_text_from_payload_returns_empty_when_decode_raises(tmp_path: Pa
     """If base64.urlsafe_b64decode raises, the function returns '' without propagating."""
     poller = _make_poller(tmp_path)
     import base64
+
     with patch.object(base64, "urlsafe_b64decode", side_effect=Exception("boom")):
         payload = {"mimeType": "text/plain", "body": {"data": "anythinghere"}}
         result = poller._extract_text_from_payload(payload)
@@ -195,6 +209,7 @@ def test_extract_text_from_payload_returns_empty_when_decode_raises(tmp_path: Pa
 
 def test_extract_text_from_payload_nested_parts(tmp_path: Path) -> None:
     import base64
+
     poller = _make_poller(tmp_path)
     encoded = base64.urlsafe_b64encode(b"hello from nested").decode()
     payload = {
@@ -249,9 +264,9 @@ def test_one_email_parse_error_does_not_abort_remaining(tmp_path: Path) -> None:
     poller.service.users.return_value.messages.return_value = mock_messages
 
     # Parser returns a parsed result for msg1 and msg3
+    from datetime import UTC, datetime
+
     from backend.parser.email_parser import ParsedApplication
-    from backend.db.models import ApplicationStatus
-    from datetime import datetime
 
     def fake_parse(raw_email, suppress_rules):
         return ParsedApplication(
@@ -261,7 +276,7 @@ def test_one_email_parse_error_does_not_abort_remaining(tmp_path: Path) -> None:
             role="Engineer",
             source_portal="Naukri",
             job_url=None,
-            applied_date=datetime(2024, 1, 1),
+            applied_date=datetime(2024, 1, 1, tzinfo=UTC),
             status_signal=None,
             raw_sender=raw_email.sender,
             raw_subject=raw_email.subject,
@@ -273,8 +288,10 @@ def test_one_email_parse_error_does_not_abort_remaining(tmp_path: Path) -> None:
     poller._parser.refine_role.return_value = None
 
     # Patch _fetch_backfill and _fetch_body_text; patch updater.process
-    with patch.object(poller, "_fetch_backfill", return_value=(message_ids, "hist999")), \
-         patch.object(poller, "_fetch_body_text", return_value=""):
+    with (
+        patch.object(poller, "_fetch_backfill", return_value=(message_ids, "hist999")),
+        patch.object(poller, "_fetch_body_text", return_value=""),
+    ):
         count = poller._poll_once_locked()
 
     # msg1 and msg3 should be processed (2 total); msg2 failed but did not abort

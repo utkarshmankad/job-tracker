@@ -1,11 +1,12 @@
 """Shared pytest fixtures."""
 
+from datetime import timedelta
+
 import pytest
-from datetime import datetime, timedelta
 from sqlmodel import Session
 
 from backend.db.data_store import DataStore
-from backend.db.models import Application, ApplicationStatus
+from backend.db.models import Application, ApplicationStatus, utc_now
 
 
 @pytest.fixture
@@ -29,7 +30,7 @@ def seeded_db(db):
             company=f"Company{i}",
             role="Software Engineer",
             source_portal=portals[i % 3],
-            applied_date=datetime.utcnow() - timedelta(days=i),
+            applied_date=utc_now() - timedelta(days=i),
             current_status=statuses[i % 5],
         )
         db.upsert_application(app)
@@ -43,13 +44,13 @@ def stale_app(db):
         company="StaleCompany",
         role="Engineer",
         source_portal="Naukri",
-        applied_date=datetime.utcnow() - timedelta(days=16),
+        applied_date=utc_now() - timedelta(days=16),
         current_status=ApplicationStatus.APPLIED,
     )
     saved = db.upsert_application(app)
     with Session(db._engine) as session:
         record = session.get(Application, saved.id)
-        record.updated_at = datetime.utcnow() - timedelta(days=16)
+        record.updated_at = utc_now() - timedelta(days=16)
         session.add(record)
         session.commit()
     return saved

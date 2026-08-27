@@ -3,16 +3,13 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
-
-import pytest
 
 from backend.db.data_store import DataStore
 from backend.db.models import Application, ApplicationStatus, utc_now
 from backend.engine.duplicate_detector import DuplicateDetector
 from backend.parser.email_parser import ParsedApplication
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -83,9 +80,7 @@ def test_find_duplicate_high_fuzzy_score(tmp_path: Path) -> None:
     existing = _seed_app(db, company="Google LLC", role="Software Engineer")
     detector = DuplicateDetector(db, threshold=80)
 
-    result = detector.find_duplicate(
-        _make_parsed(company="Google LLC", role="Software Engineer I")
-    )
+    result = detector.find_duplicate(_make_parsed(company="Google LLC", role="Software Engineer I"))
     assert result is not None
     assert result.id == existing.id
 
@@ -112,9 +107,7 @@ def test_find_duplicate_empty_query_returns_none(tmp_path: Path) -> None:
     _seed_app(db, company="Meta", role="PM")
     detector = DuplicateDetector(db)
 
-    result = detector.find_duplicate(
-        _make_parsed(company="", role="")
-    )
+    result = detector.find_duplicate(_make_parsed(company="", role=""))
     assert result is None
 
 

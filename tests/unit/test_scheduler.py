@@ -35,8 +35,10 @@ def test_trigger_wakes_loop_before_interval_elapses() -> None:
     poll_calls = threading.Event()
     poller.poll_once.side_effect = lambda: poll_calls.set() or 0
 
-    with patch("backend.poller.scheduler.SleepWatcher") as mock_watcher_cls, \
-         patch("backend.poller.scheduler.POLL_INTERVAL_SECONDS", 300):
+    with (
+        patch("backend.poller.scheduler.SleepWatcher") as mock_watcher_cls,
+        patch("backend.poller.scheduler.POLL_INTERVAL_SECONDS", 300),
+    ):
         mock_watcher_cls.return_value = MagicMock()
         scheduler.start()
         assert poll_calls.wait(timeout=2), "initial poll on start() did not fire"
@@ -71,8 +73,10 @@ def test_unexpected_exception_backs_off_and_continues() -> None:
 
     poller.poll_once.side_effect = flaky
 
-    with patch("backend.poller.scheduler.SleepWatcher") as mock_watcher_cls, \
-         patch.object(threading.Event, "wait", return_value=True):
+    with (
+        patch("backend.poller.scheduler.SleepWatcher") as mock_watcher_cls,
+        patch.object(threading.Event, "wait", return_value=True),
+    ):
         mock_watcher_cls.return_value = MagicMock()
         scheduler.start()
         time.sleep(0.2)
