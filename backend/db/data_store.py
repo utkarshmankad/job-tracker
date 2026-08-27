@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import structlog
-from sqlalchemy import ColumnElement, event, func, or_
+from sqlalchemy import ColumnElement, event, func, inspect, or_
 from sqlmodel import Session, SQLModel, col, create_engine, select
 
 from backend.config import DB_PATH, STALE_DAYS_THRESHOLD
@@ -78,14 +78,15 @@ class DataStore:
         self._backfill_thread_id_index()
 
     def _migrate_schema(self) -> None:
-        # Deliberate exception to "no raw SQL strings": SQLModel/SQLAlchemy ORM has no
-        # portable API for column introspection (PRAGMA table_info) or ALTER TABLE ADD
-        # COLUMN — both require raw SQL via SQLAlchemy Core's text(), kept local to
-        # DataStore so it's still the single point of DB access.
+        # Column introspection uses SQLAlchemy Core's inspect() — no raw SQL needed.
+        # ALTER TABLE ADD COLUMN has no portable Core/ORM construct in SQLAlchemy, so it
+        # stays a raw DDL string via text() — a documented exception to "no raw SQL
+        # strings" (see CLAUDE.md), kept local to DataStore so it's still the single
+        # point of DB access.
         from sqlalchemy import text
 
         with self._engine.connect() as conn:
-            cols = {row[1] for row in conn.execute(text("PRAGMA table_info(application)"))}
+            cols = {c["name"] for c in inspect(conn).get_columns("application")}
             if "withdraw_reason" not in cols:
                 conn.execute(text("ALTER TABLE application ADD COLUMN withdraw_reason VARCHAR"))
                 conn.commit()
@@ -374,8 +375,6 @@ class DataStore:
         SQLModel.metadata.create_all(), which would silently create the missing tables
         this check exists to detect. Uses a throwaway engine for inspection only.
         """
-        from sqlalchemy import inspect
-
         engine = create_engine(f"sqlite:///{db_path}")
         try:
             return set(inspect(engine).get_table_names())
@@ -384,9 +383,12 @@ class DataStore:
 
     def get_raw_status_values(self) -> list[str]:
         """Return distinct current_status values exactly as stored on disk, bypassing
-        the SAEnum column's coercion — reading through the ORM column would itself raise
-        LookupError on legacy NAME-format data, which is precisely the corruption this
-        check exists to detect."""
+        the SAEnum column's coercion — reading through the mapped ORM attribute (or even
+        a Core select() on the mapped column, which still applies the column type's
+        result-level coercion) would itself raise LookupError on legacy NAME-format
+        data, which is precisely the corruption this check exists to detect. Only a
+        genuinely raw SQL string skips that — a documented exception to "no raw SQL
+        strings" (see CLAUDE.md)."""
         from sqlalchemy import text
 
         with self._engine.connect() as conn:
