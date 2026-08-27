@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
+
 import pytest
-from starlette.testclient import TestClient
 from sqlmodel import Session
+from starlette.testclient import TestClient
 
 from backend.config import STALE_DAYS_THRESHOLD
 from backend.db.data_store import DataStore
-from backend.db.models import Application, ApplicationStatus
+from backend.db.models import Application, utc_now
 from backend.engine.duplicate_detector import DuplicateDetector
 from backend.engine.status_updater import StatusUpdater
 from backend.main import app
@@ -170,7 +171,7 @@ def test_stale_flag_on_old_application(seeded_client):
     created = _create_app(client)
     app_id = created["id"]
 
-    old_date = datetime.utcnow() - timedelta(days=STALE_DAYS_THRESHOLD + 1)
+    old_date = utc_now() - timedelta(days=STALE_DAYS_THRESHOLD + 1)
     with Session(test_db._engine) as session:
         record = session.get(Application, app_id)
         record.updated_at = old_date
@@ -376,6 +377,7 @@ def test_trigger_poll_returns_triggered(seeded_client):
 def test_trigger_poll_no_scheduler_returns_503():
     """POST /poller/trigger must return 503 when no scheduler is in app state."""
     from starlette.testclient import TestClient
+
     from backend.main import app
 
     with TestClient(app) as client:
@@ -400,9 +402,7 @@ def test_system_status_api_error_shows_degraded(seeded_client):
     resp = client.get(f"{_BASE}/status")
     assert resp.status_code == 200
     body = resp.json()
-    poller_component = next(
-        (c for c in body["components"] if c["name"] == "Gmail Poller"), None
-    )
+    poller_component = next((c for c in body["components"] if c["name"] == "Gmail Poller"), None)
     assert poller_component is not None
     assert poller_component["status"] == "degraded"
     assert "quota exceeded" in poller_component["description"]
@@ -416,27 +416,21 @@ def test_system_status_auth_error_shows_outage(seeded_client):
     resp = client.get(f"{_BASE}/status")
     assert resp.status_code == 200
     body = resp.json()
-    poller_component = next(
-        (c for c in body["components"] if c["name"] == "Gmail Poller"), None
-    )
+    poller_component = next((c for c in body["components"] if c["name"] == "Gmail Poller"), None)
     assert poller_component is not None
     assert poller_component["status"] == "outage"
 
 
 def test_system_status_stale_poll_shows_degraded(seeded_client):
     """When last_sync_at is >15 min ago, /status must mark poller as degraded."""
-    from datetime import datetime, timedelta
-
     client, test_db = seeded_client
-    stale_time = datetime.utcnow() - timedelta(minutes=20)
+    stale_time = utc_now() - timedelta(minutes=20)
     test_db.update_poller_state(status="SLEEPING", last_sync_at=stale_time)
 
     resp = client.get(f"{_BASE}/status")
     assert resp.status_code == 200
     body = resp.json()
-    poller_component = next(
-        (c for c in body["components"] if c["name"] == "Gmail Poller"), None
-    )
+    poller_component = next((c for c in body["components"] if c["name"] == "Gmail Poller"), None)
     assert poller_component is not None
     assert poller_component["status"] == "degraded"
     assert "min ago" in poller_component["description"]
@@ -477,23 +471,23 @@ def test_delete_adds_suppress_rule_for_sender_domain(seeded_client):
     client, test_db = seeded_client
 
     # Create application directly so thread_ids is non-empty
-    saved = test_db.upsert_application(Application(
-        company="Acme Corp",
-        role="Engineer",
-        source_portal="Direct/Consultancy",
-        applied_date=datetime(2024, 6, 1),
-        thread_ids='["thread-abc123"]',
-    ))
+    saved = test_db.upsert_application(
+        Application(
+            company="Acme Corp",
+            role="Engineer",
+            source_portal="Direct/Consultancy",
+            applied_date=datetime(2024, 6, 1, tzinfo=UTC),
+            thread_ids='["thread-abc123"]',
+        )
+    )
     app_id = saved.id
 
     # Mock Gmail service returning a thread with a known sender
     mock_service = MagicMock()
     mock_service.users.return_value.threads.return_value.get.return_value.execute.return_value = {
-        "messages": [{
-            "payload": {
-                "headers": [{"name": "From", "value": "recruiter@acme-hiring.com"}]
-            }
-        }]
+        "messages": [
+            {"payload": {"headers": [{"name": "From", "value": "recruiter@acme-hiring.com"}]}}
+        ]
     }
 
     real_poller = app.state.poller_scheduler.poller
@@ -507,9 +501,9 @@ def test_delete_adds_suppress_rule_for_sender_domain(seeded_client):
 
         rules = client.get(f"{_BASE}/suppress-rules").json()
         patterns = [r["sender_pattern"] for r in rules]
-        assert any("acme\\-hiring\\.com" in p or "acme-hiring" in p for p in patterns), (
-            f"Expected acme-hiring.com suppress rule, got: {patterns}"
-        )
+        assert any(
+            "acme\\-hiring\\.com" in p or "acme-hiring" in p for p in patterns
+        ), f"Expected acme-hiring.com suppress rule, got: {patterns}"
     finally:
         real_poller.service = original_service
 
@@ -554,7 +548,11 @@ def test_diagnostics_endpoint_available(seeded_client):
 def test_reauth_start_returns_auth_url(seeded_client):
     client, _ = seeded_client
     real_poller = app.state.poller_scheduler.poller
-    with patch.object(real_poller, "build_reauth_url", return_value=("https://accounts.google.com/auth?x=1", "state-xyz")):
+    with patch.object(
+        real_poller,
+        "build_reauth_url",
+        return_value=("https://accounts.google.com/auth?x=1", "state-xyz"),
+    ):
         resp = client.get(f"{_BASE}/poller/reauth/start")
     assert resp.status_code == 200
     assert resp.json() == {"auth_url": "https://accounts.google.com/auth?x=1"}
@@ -564,7 +562,9 @@ def test_reauth_start_returns_auth_url(seeded_client):
 def test_reauth_callback_rejects_mismatched_state(seeded_client):
     client, _ = seeded_client
     app.state.reauth_state = "expected-state"
-    resp = client.get(f"{_BASE}/poller/reauth/callback", params={"code": "abc", "state": "wrong-state"})
+    resp = client.get(
+        f"{_BASE}/poller/reauth/callback", params={"code": "abc", "state": "wrong-state"}
+    )
     assert resp.status_code == 400
 
 
@@ -573,7 +573,9 @@ def test_reauth_callback_succeeds_and_clears_state(seeded_client):
     app.state.reauth_state = "match-state"
     real_poller = app.state.poller_scheduler.poller
     with patch.object(real_poller, "complete_reauth") as mock_complete:
-        resp = client.get(f"{_BASE}/poller/reauth/callback", params={"code": "abc", "state": "match-state"})
+        resp = client.get(
+            f"{_BASE}/poller/reauth/callback", params={"code": "abc", "state": "match-state"}
+        )
     assert resp.status_code == 200
     assert resp.json()["status"] == "RUNNING"
     mock_complete.assert_called_once()
@@ -584,11 +586,19 @@ def test_reauth_callback_succeeds_and_clears_state(seeded_client):
 def test_reauth_start_requires_admin_token_when_configured(seeded_client):
     client, _ = seeded_client
     real_poller = app.state.poller_scheduler.poller
-    with patch.object(real_poller, "build_reauth_url", return_value=("https://accounts.google.com/auth?x=1", "state-xyz")), \
-         patch("backend.api.routes.ADMIN_TOKEN", "secret-token"):
+    with (
+        patch.object(
+            real_poller,
+            "build_reauth_url",
+            return_value=("https://accounts.google.com/auth?x=1", "state-xyz"),
+        ),
+        patch("backend.api.routes.ADMIN_TOKEN", "secret-token"),
+    ):
         resp_no_token = client.get(f"{_BASE}/poller/reauth/start")
         resp_wrong_token = client.get(f"{_BASE}/poller/reauth/start", params={"token": "wrong"})
-        resp_right_token = client.get(f"{_BASE}/poller/reauth/start", params={"token": "secret-token"})
+        resp_right_token = client.get(
+            f"{_BASE}/poller/reauth/start", params={"token": "secret-token"}
+        )
     assert resp_no_token.status_code == 403
     assert resp_wrong_token.status_code == 403
     assert resp_right_token.status_code == 200

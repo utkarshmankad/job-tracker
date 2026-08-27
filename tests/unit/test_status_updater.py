@@ -2,18 +2,16 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
 from backend.db.data_store import DataStore
-from backend.db.models import Application, ApplicationStatus
+from backend.db.models import Application, ApplicationStatus, utc_now
 from backend.engine.duplicate_detector import DuplicateDetector
 from backend.engine.status_updater import StatusUpdater
 from backend.parser.email_parser import ParsedApplication
-
 
 # --------------------------------------------------------------------------- #
 # Helpers                                                                      #
@@ -36,7 +34,7 @@ def _make_parsed(
         role=role,
         source_portal=source_portal,
         job_url=None,
-        applied_date=datetime.utcnow(),
+        applied_date=utc_now(),
         status_signal=status_signal,
         raw_sender="noreply@linkedin.com",
         raw_subject=f"Your application to {company}",
@@ -168,9 +166,7 @@ def test_status_history_written_on_transition(tmp_path: Path) -> None:
     # creation entry + advance entry
     assert len(history) >= 2
 
-    advance = next(
-        h for h in history if h.to_status == ApplicationStatus.RESUME_SHORTLISTED.value
-    )
+    advance = next(h for h in history if h.to_status == ApplicationStatus.RESUME_SHORTLISTED.value)
     assert advance.trigger == "email"
     assert advance.message_id == "msg-002"
     assert advance.from_status == ApplicationStatus.APPLIED.value
@@ -199,21 +195,19 @@ def test_find_existing_uses_thread_id_lookup(tmp_path: Path) -> None:
 def test_find_existing_falls_back_to_detector_when_no_thread_match(tmp_path: Path) -> None:
     db = _make_db(tmp_path)
     # Detector reports an existing match for a different thread
-    from backend.db.models import Application
-    from datetime import datetime as dt
     existing_app = Application(
         id=1,
         company="Acme",
         role="Engineer",
         source_portal="LinkedIn",
-        applied_date=dt.utcnow(),
+        applied_date=utc_now(),
         thread_ids='["different-thread"]',
     )
     detector = MagicMock(spec=DuplicateDetector)
     detector.find_duplicate.return_value = existing_app
     updater = StatusUpdater(db, detector)
 
-    result = updater._find_existing(_make_parsed(thread_id="brand-new-thread"))
+    updater._find_existing(_make_parsed(thread_id="brand-new-thread"))
     # No DB thread match, so falls back to detector
     detector.find_duplicate.assert_called_once()
 

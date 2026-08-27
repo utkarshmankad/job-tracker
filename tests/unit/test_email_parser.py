@@ -1,12 +1,12 @@
 """Tests for backend/parser/email_parser.py."""
 
-from datetime import datetime
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from backend.db.models import ApplicationStatus, SuppressRule
-from backend.parser.email_parser import EmailParser, ParsedApplication, RawEmail
+from backend.parser.email_parser import EmailParser, RawEmail
 from backend.parser.llm_extractor import LLMExtractionResult
 
 
@@ -25,7 +25,7 @@ def _make_email(
         thread_id=thread_id,
         sender=sender,
         subject=subject,
-        date=date or datetime(2024, 1, 15, 10, 0, 0),
+        date=date or datetime(2024, 1, 15, 10, 0, 0, tzinfo=UTC),
         snippet=snippet,
         body_text=body_text,
     )
@@ -214,16 +214,19 @@ def test_valid_suppress_rule_still_works_alongside_invalid(parser: EmailParser) 
 
 def test_extract_sender_domain_angle_brackets() -> None:
     from backend.parser.email_parser import extract_sender_domain
+
     assert extract_sender_domain("Naukri <noreply@naukri.com>") == "naukri.com"
 
 
 def test_extract_sender_domain_bare_email() -> None:
     from backend.parser.email_parser import extract_sender_domain
+
     assert extract_sender_domain("noreply@naukri.com") == "naukri.com"
 
 
 def test_extract_sender_domain_empty() -> None:
     from backend.parser.email_parser import extract_sender_domain
+
     assert extract_sender_domain("") == ""
 
 
@@ -250,6 +253,7 @@ def test_spacy_crash_falls_back_to_regex(parser: EmailParser) -> None:
 def test_spacy_model_not_found_uses_regex_only(tmp_path) -> None:
     """Parser with _nlp=None (model not installed) still classifies emails via regex."""
     import spacy
+
     with patch.object(spacy, "load", side_effect=OSError("model not found")):
         p = EmailParser()
     assert p._nlp is None
@@ -389,9 +393,7 @@ def test_llm_disabled_uses_existing_extraction(parser: EmailParser) -> None:
 def test_body_text_cleared_even_when_llm_is_used(parser: EmailParser) -> None:
     """body_text must always be cleared after parsing, regardless of LLM path."""
     parser._llm = MagicMock()
-    parser._llm.extract.return_value = LLMExtractionResult(
-        company="Acme", role="SWE", status=None
-    )
+    parser._llm.extract.return_value = LLMExtractionResult(company="Acme", role="SWE", status=None)
     email = _make_email(
         sender="noreply@naukri.com",
         subject="Your application to Acme",

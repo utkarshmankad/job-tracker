@@ -83,9 +83,15 @@ def test_filter_by_status(page: Page, frontend_server: str, backend_server: str)
         "applied_date": "2024-06-01",
     }
     for _ in range(3):
-        requests.post(api + "/applications", json={**base_payload, "current_status": "Applied", "company": "AppCo"})
+        requests.post(
+            api + "/applications",
+            json={**base_payload, "current_status": "Applied", "company": "AppCo"},
+        )
     for _ in range(2):
-        requests.post(api + "/applications", json={**base_payload, "current_status": "Rejected", "company": "RejCo"})
+        requests.post(
+            api + "/applications",
+            json={**base_payload, "current_status": "Rejected", "company": "RejCo"},
+        )
 
     page.goto(frontend_server)
     page.get_by_label("Status").select_option("Rejected")
@@ -95,17 +101,21 @@ def test_filter_by_status(page: Page, frontend_server: str, backend_server: str)
 
 
 def test_stale_row_highlighted(page: Page, frontend_server: str, backend_server: str) -> None:
+    from datetime import UTC, datetime, timedelta
+
     import requests as req
-    from datetime import datetime, timedelta
 
     api = backend_server + "/api/v1"
-    stale_date = (datetime.utcnow() - timedelta(days=20)).strftime("%Y-%m-%d")
-    resp = req.post(api + "/applications", json={
-        "source_portal": "Naukri",
-        "applied_date": stale_date,
-        "current_status": "Applied",
-        "company": "StaleE2ECorp",
-    })
+    stale_date = (datetime.now(UTC) - timedelta(days=20)).strftime("%Y-%m-%d")
+    resp = req.post(
+        api + "/applications",
+        json={
+            "source_portal": "Naukri",
+            "applied_date": stale_date,
+            "current_status": "Applied",
+            "company": "StaleE2ECorp",
+        },
+    )
     assert resp.status_code == 201
 
     page.goto(frontend_server)
@@ -113,7 +123,9 @@ def test_stale_row_highlighted(page: Page, frontend_server: str, backend_server:
     expect(stale_row).to_have_class(re.compile(r".*amber.*"))
 
 
-def test_analytics_tab_insufficient_data(page: Page, frontend_server: str, backend_server: str) -> None:
+def test_analytics_tab_insufficient_data(
+    page: Page, frontend_server: str, backend_server: str
+) -> None:
     page.goto(frontend_server)
     page.get_by_role("button", name="Analytics").click()
     expect(page.locator("body")).to_contain_text("Add at least 10 applications")

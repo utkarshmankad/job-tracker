@@ -18,8 +18,10 @@ def _mock_poller(authenticated: bool) -> MagicMock:
 
 def test_poll_once_exits_2_when_no_credentials() -> None:
     mock_poller = _mock_poller(authenticated=False)
-    with patch("backend.poller.poll_once_cli.build_poller", return_value=mock_poller), \
-         pytest.raises(SystemExit) as exc_info:
+    with (
+        patch("backend.poller.poll_once_cli.build_poller", return_value=mock_poller),
+        pytest.raises(SystemExit) as exc_info,
+    ):
         poll_once()
     assert exc_info.value.code == 2
 
@@ -52,8 +54,10 @@ def test_poll_once_exits_2_on_auth_error(tmp_path: Path) -> None:
     mock_poller = _mock_poller(authenticated=True)
     mock_poller.poll_once.side_effect = AuthError("401")
 
-    with patch("backend.poller.poll_once_cli.build_poller", return_value=mock_poller), \
-         pytest.raises(SystemExit) as exc_info:
+    with (
+        patch("backend.poller.poll_once_cli.build_poller", return_value=mock_poller),
+        pytest.raises(SystemExit) as exc_info,
+    ):
         poll_once()
     assert exc_info.value.code == 2
 
@@ -66,7 +70,9 @@ def test_poll_once_exits_1_on_http_error(tmp_path: Path) -> None:
     mock_poller = _mock_poller(authenticated=True)
     mock_poller.poll_once.side_effect = HttpError(mock_resp, b"server error")
 
-    with patch("backend.poller.poll_once_cli.build_poller", return_value=mock_poller), \
-         pytest.raises(SystemExit) as exc_info:
+    with (
+        patch("backend.poller.poll_once_cli.build_poller", return_value=mock_poller),
+        pytest.raises(SystemExit) as exc_info,
+    ):
         poll_once()
     assert exc_info.value.code == 1

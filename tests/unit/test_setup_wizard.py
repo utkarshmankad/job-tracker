@@ -25,18 +25,20 @@ def test_setup_happy_path(tmp_path: Path) -> None:
     log_dir = tmp_path / "jt" / "logs"
 
     runner = CliRunner()
-    with patch.object(setup_wizard, "CREDENTIALS_PATH", creds_path), \
-         patch.object(setup_wizard, "JOB_TRACKER_DIR", job_tracker_dir), \
-         patch.object(setup_wizard, "LOG_DIR", log_dir), \
-         patch.object(setup_wizard, "_run_oauth", return_value="{\"token\": \"fake\"}") as mock_oauth, \
-         patch.object(setup_wizard, "_save_token") as mock_save, \
-         patch.object(setup_wizard, "DataStore") as mock_ds, \
-         patch.object(setup_wizard, "_install_launchd_plists") as mock_plists:
+    with (
+        patch.object(setup_wizard, "CREDENTIALS_PATH", creds_path),
+        patch.object(setup_wizard, "JOB_TRACKER_DIR", job_tracker_dir),
+        patch.object(setup_wizard, "LOG_DIR", log_dir),
+        patch.object(setup_wizard, "_run_oauth", return_value='{"token": "fake"}') as mock_oauth,
+        patch.object(setup_wizard, "_save_token") as mock_save,
+        patch.object(setup_wizard, "DataStore") as mock_ds,
+        patch.object(setup_wizard, "_install_launchd_plists") as mock_plists,
+    ):
         result = runner.invoke(setup_wizard.cli, ["setup"])
 
     assert result.exit_code == 0, result.output
     mock_oauth.assert_called_once()
-    mock_save.assert_called_once_with("{\"token\": \"fake\"}")
+    mock_save.assert_called_once_with('{"token": "fake"}')
     mock_ds.assert_called_once()
     mock_plists.assert_called_once()
     assert job_tracker_dir.exists()
@@ -46,13 +48,15 @@ def test_setup_happy_path(tmp_path: Path) -> None:
 
 def test_reauth_runs_oauth_and_saves_token() -> None:
     runner = CliRunner()
-    with patch.object(setup_wizard, "_run_oauth", return_value="{\"token\": \"fake\"}") as mock_oauth, \
-         patch.object(setup_wizard, "_save_token") as mock_save:
+    with (
+        patch.object(setup_wizard, "_run_oauth", return_value='{"token": "fake"}') as mock_oauth,
+        patch.object(setup_wizard, "_save_token") as mock_save,
+    ):
         result = runner.invoke(setup_wizard.cli, ["reauth"])
 
     assert result.exit_code == 0
     mock_oauth.assert_called_once()
-    mock_save.assert_called_once_with("{\"token\": \"fake\"}")
+    mock_save.assert_called_once_with('{"token": "fake"}')
     assert "Re-authentication complete" in result.output
 
 
@@ -85,8 +89,10 @@ def test_save_token_writes_to_keyring() -> None:
 
 def test_install_launchd_plists_writes_plist_files(tmp_path: Path) -> None:
     launch_agents_dir = tmp_path / "LaunchAgents"
-    with patch.object(setup_wizard, "LAUNCH_AGENTS_DIR", launch_agents_dir), \
-         patch("subprocess.run") as mock_run:
+    with (
+        patch.object(setup_wizard, "LAUNCH_AGENTS_DIR", launch_agents_dir),
+        patch("subprocess.run") as mock_run,
+    ):
         setup_wizard._install_launchd_plists()
 
     api_plist = launch_agents_dir / "com.jobtracker.api.plist"

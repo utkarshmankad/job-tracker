@@ -4,18 +4,18 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
 from sqlmodel import Session
 
 from backend.db.data_store import ApplicationFilter, DataStore, is_application_stale
-from backend.db.models import Application, ApplicationStatus, StatusHistory
+from backend.db.models import Application, ApplicationStatus, utc_now
 
 
 def _make_app(**kwargs) -> Application:
-    defaults = dict(source_portal="LinkedIn", applied_date=datetime.utcnow())
+    defaults = dict(source_portal="LinkedIn", applied_date=utc_now())
     defaults.update(kwargs)
     return Application(**defaults)
 
@@ -130,7 +130,7 @@ def test_stale_applications(tmp_path: Path) -> None:
     # Backdate updated_at via a direct session write (bypasses upsert_application's now() logic)
     with Session(ds._engine) as session:
         db_app = session.get(Application, stale_candidate.id)
-        db_app.updated_at = datetime.utcnow() - timedelta(days=20)
+        db_app.updated_at = utc_now() - timedelta(days=20)
         session.add(db_app)
         session.commit()
 
@@ -194,7 +194,7 @@ def test_find_application_by_thread_id_second_in_list(tmp_path: Path) -> None:
     ds = DataStore(tmp_path / "test.db")
     app = _make_app(company="MultiThreadCo")
     app.thread_ids = json.dumps(["first-thread", "second-thread", "third-thread"])
-    saved = ds.upsert_application(app)
+    ds.upsert_application(app)
 
     assert ds.find_application_by_thread_id("second-thread") is not None
     assert ds.find_application_by_thread_id("third-thread") is not None
@@ -229,6 +229,7 @@ def test_thread_id_index_backfills_from_existing_json_blobs(tmp_path: Path) -> N
     """Reopening a DB whose ApplicationThreadId rows are missing/incomplete must
     backfill them from Application.thread_ids without the caller doing anything."""
     from sqlmodel import Session, select
+
     from backend.db.models import ApplicationThreadId
 
     db_path = tmp_path / "test.db"
@@ -257,7 +258,9 @@ def test_get_status_history_for_apps_filters_correctly(tmp_path: Path) -> None:
     assert app2.id is not None
 
     ds.append_status_history(app1.id, None, ApplicationStatus.APPLIED.value, "email")
-    ds.append_status_history(app1.id, ApplicationStatus.APPLIED.value, ApplicationStatus.REJECTED.value, "email")
+    ds.append_status_history(
+        app1.id, ApplicationStatus.APPLIED.value, ApplicationStatus.REJECTED.value, "email"
+    )
     ds.append_status_history(app2.id, None, ApplicationStatus.APPLIED.value, "email")
 
     result = ds.get_status_history_for_apps({app1.id})
@@ -280,7 +283,7 @@ def test_is_application_stale_old_applied(tmp_path: Path) -> None:
 
     with Session(ds._engine) as session:
         db_app = session.get(Application, app.id)
-        db_app.updated_at = datetime.utcnow() - timedelta(days=20)
+        db_app.updated_at = utc_now() - timedelta(days=20)
         session.add(db_app)
         session.commit()
 
@@ -302,7 +305,7 @@ def test_is_application_stale_non_applied_status(tmp_path: Path) -> None:
 
     with Session(ds._engine) as session:
         db_app = session.get(Application, app.id)
-        db_app.updated_at = datetime.utcnow() - timedelta(days=30)
+        db_app.updated_at = utc_now() - timedelta(days=30)
         session.add(db_app)
         session.commit()
 
@@ -315,6 +318,7 @@ def test_poller_state_missing_raises_runtime_error(tmp_path: Path) -> None:
     ds = DataStore(tmp_path / "test.db")
     # Delete the singleton PollerState row directly
     from backend.db.models import PollerState
+
     with Session(ds._engine) as session:
         state = session.get(PollerState, 1)
         if state:
@@ -328,6 +332,7 @@ def test_poller_state_missing_raises_runtime_error(tmp_path: Path) -> None:
 def test_update_poller_state_missing_raises_runtime_error(tmp_path: Path) -> None:
     ds = DataStore(tmp_path / "test.db")
     from backend.db.models import PollerState
+
     with Session(ds._engine) as session:
         state = session.get(PollerState, 1)
         if state:

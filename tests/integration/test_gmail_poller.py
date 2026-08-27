@@ -1,8 +1,8 @@
 """Integration tests for GmailPoller — Gmail API is fully mocked."""
 
-import pytest
 from unittest.mock import MagicMock
 
+import pytest
 from googleapiclient.errors import HttpError
 
 from backend.db.data_store import ApplicationFilter, DataStore
@@ -122,9 +122,7 @@ def test_auth_error_updates_poller_state(poller, db):
 
 def test_rate_limit_retried(poller, db):
     service = make_mock_service(TEST_MESSAGES)
-    list_execute = (
-        service.users.return_value.messages.return_value.list.return_value.execute
-    )
+    list_execute = service.users.return_value.messages.return_value.list.return_value.execute
     list_result = {
         "messages": [{"id": m["id"], "threadId": m["threadId"]} for m in TEST_MESSAGES],
         "historyId": "99999",
@@ -164,13 +162,7 @@ def test_fetch_via_history_used_when_last_history_id_set(poller, db):
     service = MagicMock()
     history_response = {
         "historyId": "100000",
-        "history": [
-            {
-                "messagesAdded": [
-                    {"message": {"id": "msg001", "threadId": "thread001"}}
-                ]
-            }
-        ],
+        "history": [{"messagesAdded": [{"message": {"id": "msg001", "threadId": "thread001"}}]}],
     }
     service.users.return_value.history.return_value.list.return_value.execute.return_value = (
         history_response
@@ -211,15 +203,15 @@ def test_body_text_fetched_when_company_is_none(poller, db):
         "payload": {
             "mimeType": "text/plain",
             "body": {
-                "data": __import__("base64").urlsafe_b64encode(
+                "data": __import__("base64")
+                .urlsafe_b64encode(
                     b"Dear Candidate, Your application to Infosys has been received."
-                ).decode()
+                )
+                .decode()
             },
         }
     }
     service.users.return_value.messages.return_value.get.side_effect = None
-    responses = [no_company_msg, full_msg]
-    call_count = [0]
 
     def get_side_effect(**kwargs):
         mock = MagicMock()
@@ -254,6 +246,7 @@ def test_build_raw_email_with_bad_date_falls_back_to_utcnow(poller):
     }
     raw = poller._build_raw_email(msg)
     from backend.db.models import utc_now
+
     # Should not raise and should be close to now
     assert (utc_now() - raw.date).total_seconds() < 5
 
