@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 import structlog
 from rapidfuzz import fuzz
@@ -40,7 +40,7 @@ class DuplicateDetector:
         if not query or not candidates:
             return None
 
-        best_score = 0
+        best_score = 0.0
         best_match: Application | None = None
 
         for app in candidates:

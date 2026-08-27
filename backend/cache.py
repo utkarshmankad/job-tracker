@@ -9,7 +9,7 @@ when Redis simply isn't running, e.g. local dev without `redis-server`, or CI).
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
 
 import redis
 import structlog
@@ -46,7 +46,7 @@ def get_json(key: str) -> Any | None:
     if client is None:
         return None
     try:
-        raw = client.get(key)
+        raw = cast("bytes | str | None", client.get(key))
     except redis.RedisError as exc:
         _disable("get_failed", exc)
         return None
@@ -75,7 +75,10 @@ def invalidate_prefix(prefix: str) -> None:
     try:
         cursor = 0
         while True:
-            cursor, keys = client.scan(cursor=cursor, match=f"{prefix}*", count=200)
+            cursor, keys = cast(
+                "tuple[int, list[bytes]]",
+                client.scan(cursor=cursor, match=f"{prefix}*", count=200),
+            )
             if keys:
                 client.delete(*keys)
             if cursor == 0:

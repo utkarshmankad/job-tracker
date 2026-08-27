@@ -9,6 +9,7 @@ from typing import Any
 import spacy
 import structlog
 import yaml
+from spacy.language import Language
 
 from backend.config import (
     LLM_API_KEY,
@@ -76,6 +77,7 @@ class EmailParser:
         with open(rules_path) as f:
             data = yaml.safe_load(f)
         self._portals: list[dict[str, Any]] = data.get("portals", [])
+        self._nlp: Language | None
         try:
             self._nlp = spacy.load("en_core_web_sm")
         except OSError:

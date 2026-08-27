@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import structlog
-from sqlalchemy import event, func, or_
+from sqlalchemy import ColumnElement, event, func, or_
 from sqlmodel import Session, SQLModel, col, create_engine, select
 
 from backend.config import DB_PATH, STALE_DAYS_THRESHOLD
@@ -173,11 +173,11 @@ class DataStore:
 
     def get_applications(self, filters: ApplicationFilter) -> tuple[list[Application], int]:
         with Session(self._engine, expire_on_commit=False) as session:
-            conditions = []
+            conditions: list[ColumnElement[bool]] = []
             if filters.status is not None:
-                conditions.append(Application.current_status == filters.status)
+                conditions.append(col(Application.current_status) == filters.status)
             if filters.source_portal is not None:
-                conditions.append(Application.source_portal == filters.source_portal)
+                conditions.append(col(Application.source_portal) == filters.source_portal)
             if filters.date_from is not None:
                 conditions.append(col(Application.applied_date) >= filters.date_from)
             if filters.date_to is not None:
@@ -192,13 +192,13 @@ class DataStore:
                 )
             if filters.is_stale is True:
                 stale_cutoff = utc_now() - timedelta(days=STALE_DAYS_THRESHOLD)
-                conditions.append(Application.current_status == ApplicationStatus.APPLIED)
+                conditions.append(col(Application.current_status) == ApplicationStatus.APPLIED)
                 conditions.append(col(Application.applied_date) < stale_cutoff)
             elif filters.is_stale is False:
                 stale_cutoff = utc_now() - timedelta(days=STALE_DAYS_THRESHOLD)
                 conditions.append(
                     ~(
-                        (Application.current_status == ApplicationStatus.APPLIED)
+                        (col(Application.current_status) == ApplicationStatus.APPLIED)
                         & (col(Application.applied_date) < stale_cutoff)
                     )
                 )
@@ -245,11 +245,11 @@ class DataStore:
         with Session(self._engine, expire_on_commit=False) as session:
             stmt = (
                 select(Application)
-                .where(Application.is_false_positive == False)  # noqa: E712
+                .where(col(Application.is_false_positive).is_(False))
                 .where(
                     or_(
-                        Application.company == None,  # noqa: E711
-                        Application.role == None,  # noqa: E711
+                        col(Application.company).is_(None),
+                        col(Application.role).is_(None),
                     )
                 )
                 .order_by(col(Application.id))
@@ -264,11 +264,11 @@ class DataStore:
             stmt = (
                 select(func.count())
                 .select_from(Application)
-                .where(Application.is_false_positive == False)  # noqa: E712
+                .where(col(Application.is_false_positive).is_(False))
                 .where(
                     or_(
-                        Application.company == None,  # noqa: E711
-                        Application.role == None,  # noqa: E711
+                        col(Application.company).is_(None),
+                        col(Application.role).is_(None),
                     )
                 )
             )
@@ -304,8 +304,8 @@ class DataStore:
                 return []
             stmt = (
                 select(Application)
-                .where(Application.is_false_positive == False)  # noqa: E712
-                .where(Application.current_status.notin_([s.value for s in terminal]))  # type: ignore[attr-defined]
+                .where(col(Application.is_false_positive).is_(False))
+                .where(col(Application.current_status).notin_([s.value for s in terminal]))
                 .where(or_(*conditions))
             )
             return list(session.exec(stmt).all())
@@ -317,14 +317,14 @@ class DataStore:
                 return False
             # Delete dependent rows first; the FKs are NOT NULL so SQLAlchemy cannot
             # null them out via its default orphan strategy.
-            for row in session.exec(
+            for history_row in session.exec(
                 select(StatusHistory).where(StatusHistory.application_id == id)
             ).all():
-                session.delete(row)
-            for row in session.exec(
+                session.delete(history_row)
+            for thread_row in session.exec(
                 select(ApplicationThreadId).where(ApplicationThreadId.application_id == id)
             ).all():
-                session.delete(row)
+                session.delete(thread_row)
             # Flush child deletes before deleting the parent — SQLAlchemy's unit-of-work
             # dependency sort doesn't reliably order these plain foreign_key=... columns
             # (no relationship()) ahead of the parent delete in the same flush, which trips
@@ -559,7 +559,7 @@ class DataStore:
         if not app_ids:
             return []
         with Session(self._engine, expire_on_commit=False) as session:
-            stmt = select(StatusHistory).where(StatusHistory.application_id.in_(app_ids))
+            stmt = select(StatusHistory).where(col(StatusHistory.application_id).in_(app_ids))
             return list(session.exec(stmt).all())
 
     def get_stale_applications(

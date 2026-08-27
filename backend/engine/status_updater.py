@@ -71,6 +71,7 @@ class StatusUpdater:
         if is_new:
             record = self._create_new(parsed)
         else:
+            assert record is not None
             assert record.id is not None
             app_id = record.id
             self._detector.merge(record, parsed)

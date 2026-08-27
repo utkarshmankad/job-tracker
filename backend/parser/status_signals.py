@@ -3,7 +3,7 @@
 from backend.db.models import ApplicationStatus
 
 # Global keyword lists for status signal detection (used when portal-specific rules don't match)
-GLOBAL_STATUS_KEYWORDS: dict[str, list[str]] = {
+GLOBAL_STATUS_KEYWORDS: dict[ApplicationStatus, list[str]] = {
     ApplicationStatus.RESUME_SHORTLISTED: ["shortlisted", "profile selected", "resume shortlisted", "pleased to inform you", "moved to next"],
     ApplicationStatus.INTERVIEW_SCHEDULED: ["interview scheduled", "would like to schedule", "invite you for an interview", "calendar invite", "interview slot", "interview on"],
     ApplicationStatus.INTERVIEW_IN_PROGRESS: ["following up on your interview", "post-interview", "panel interview today"],

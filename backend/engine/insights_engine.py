@@ -164,6 +164,8 @@ class InsightsEngine:
         offered = 0
 
         for app in apps:
+            if app.id is None:
+                continue
             stages = stages_by_app.get(app.id, set()) | {app.current_status.value}
             current = app.current_status.value
             is_rejected  = current == ApplicationStatus.REJECTED.value
@@ -327,6 +329,8 @@ class InsightsEngine:
         stage_withdrawal: dict[str, int] = {"Applied": 0, "Shortlisted": 0, "Interview": 0}
         for app in apps:
             if app.current_status not in (ApplicationStatus.REJECTED, ApplicationStatus.WITHDRAWN):
+                continue
+            if app.id is None:
                 continue
             stages = stages_by_app.get(app.id, set()) | {app.current_status.value}
             if stages & self._INTERVIEWED_VALUES:
