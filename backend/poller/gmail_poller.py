@@ -70,9 +70,7 @@ class GmailPoller:
             self._save_token_to_keyring(creds)
 
         if not creds or not creds.valid:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                str(CREDENTIALS_PATH), GMAIL_SCOPES
-            )
+            flow = InstalledAppFlow.from_client_secrets_file(str(CREDENTIALS_PATH), GMAIL_SCOPES)
             creds = flow.run_local_server(port=0)
             assert creds is not None
             self._save_token_to_keyring(creds)
@@ -142,9 +140,7 @@ class GmailPoller:
         if not token_json:
             return None
         try:
-            return Credentials.from_authorized_user_info(
-                json.loads(token_json), GMAIL_SCOPES
-            )
+            return Credentials.from_authorized_user_info(json.loads(token_json), GMAIL_SCOPES)
         except Exception as exc:
             log.warning("keyring_token_invalid", error=str(exc))
             return None
@@ -155,9 +151,7 @@ class GmailPoller:
             # in-memory for this process and re-refreshes on next restart.
             log.info("gmail_token_refresh_not_persisted_env_backed")
             return
-        keyring.set_password(
-            GMAIL_KEYCHAIN_SERVICE, GMAIL_KEYCHAIN_USERNAME, creds.to_json()
-        )
+        keyring.set_password(GMAIL_KEYCHAIN_SERVICE, GMAIL_KEYCHAIN_USERNAME, creds.to_json())
 
     @property
     def is_polling(self) -> bool:
@@ -235,12 +229,18 @@ class GmailPoller:
         """Fetch, parse, and persist a single message. Returns "new", "update",
         "suppressed", "not_found", or "error"."""
         try:
-            msg = self._require_service().users().messages().get(
-                userId="me",
-                id=msg_id,
-                format="metadata",
-                metadataHeaders=["From", "Subject", "Date"],
-            ).execute()
+            msg = (
+                self._require_service()
+                .users()
+                .messages()
+                .get(
+                    userId="me",
+                    id=msg_id,
+                    format="metadata",
+                    metadataHeaders=["From", "Subject", "Date"],
+                )
+                .execute()
+            )
 
             raw_email = self._build_raw_email(msg)
             parsed = self._parser.parse(raw_email, suppress_rules)
@@ -290,9 +290,16 @@ class GmailPoller:
             return None
         import concurrent.futures
 
-        request_obj = self._require_service().users().threads().get(
-            userId="me", id=thread_id,
-            format="metadata", metadataHeaders=["From"],
+        request_obj = (
+            self._require_service()
+            .users()
+            .threads()
+            .get(
+                userId="me",
+                id=thread_id,
+                format="metadata",
+                metadataHeaders=["From"],
+            )
         )
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(request_obj.execute)
@@ -305,13 +312,12 @@ class GmailPoller:
         messages = thread.get("messages", [])
         if not messages:
             return None
-        headers = {
-            h["name"]: h["value"]
-            for h in messages[0].get("payload", {}).get("headers", [])
-        }
+        headers = {h["name"]: h["value"] for h in messages[0].get("payload", {}).get("headers", [])}
         return extract_sender_domain(headers.get("From", ""))
 
-    def backfill_portal(self, sender_domains: list[str], days: int = BACKFILL_DAYS) -> dict[str, int]:
+    def backfill_portal(
+        self, sender_domains: list[str], days: int = BACKFILL_DAYS
+    ) -> dict[str, int]:
         """Re-scan Gmail for a portal's domains and pick up applications missed
         before a portal_rules.yaml entry existed for it.
 
@@ -390,14 +396,22 @@ class GmailPoller:
             return None, None
 
         try:
-            thread = self._require_service().users().threads().get(
-                userId="me",
-                id=thread_ids_raw[0],
-                format="metadata",
-                metadataHeaders=["From", "Subject", "Date"],
-            ).execute()
+            thread = (
+                self._require_service()
+                .users()
+                .threads()
+                .get(
+                    userId="me",
+                    id=thread_ids_raw[0],
+                    format="metadata",
+                    metadataHeaders=["From", "Subject", "Date"],
+                )
+                .execute()
+            )
         except HttpError as exc:
-            log.warning("reextract_thread_fetch_failed", thread_id=thread_ids_raw[0], error=str(exc))
+            log.warning(
+                "reextract_thread_fetch_failed", thread_id=thread_ids_raw[0], error=str(exc)
+            )
             return None, None
 
         messages = thread.get("messages", [])
@@ -478,9 +492,13 @@ class GmailPoller:
     def _fetch_body_text(self, msg_id: str) -> str:
         """Fetch full message and extract plain-text body. Body is never stored."""
         try:
-            msg = self._require_service().users().messages().get(
-                userId="me", id=msg_id, format="full"
-            ).execute()
+            msg = (
+                self._require_service()
+                .users()
+                .messages()
+                .get(userId="me", id=msg_id, format="full")
+                .execute()
+            )
             return self._extract_text_from_payload(msg.get("payload", {}))
         except HttpError:
             return ""
@@ -503,10 +521,7 @@ class GmailPoller:
         return ""
 
     def _build_raw_email(self, msg: dict) -> RawEmail:
-        headers = {
-            h["name"]: h["value"]
-            for h in msg.get("payload", {}).get("headers", [])
-        }
+        headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
         sender = headers.get("From", "")
         subject = headers.get("Subject", "")
         date_str = headers.get("Date", "")

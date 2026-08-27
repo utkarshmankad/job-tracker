@@ -84,7 +84,9 @@ class StatusUpdater:
                 if record is None:
                     raise RuntimeError(f"Application {app_id} vanished after status advance")
 
-        result = "applied" if is_new else ("status_update" if parsed.status_signal else "thread_merged")
+        result = (
+            "applied" if is_new else ("status_update" if parsed.status_signal else "thread_merged")
+        )
         self._db.mark_processed(parsed.message_id, result)
         return record, is_new
 
@@ -213,5 +215,3 @@ class StatusUpdater:
             message_id=None,
         )
         return updated
-
-

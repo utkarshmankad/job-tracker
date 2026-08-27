@@ -25,6 +25,7 @@ from backend.parser.status_signals import GLOBAL_STATUS_KEYWORDS
 
 log = structlog.get_logger(__name__)
 
+
 def extract_sender_domain(sender: str) -> str:
     """Extract the domain portion from a 'Name <user@domain.com>' or 'user@domain.com' string."""
     match = re.search(r"<[^@]+@([^>]+)>", sender)
@@ -50,10 +51,10 @@ _SIGNAL_TO_STATUS: dict[str, ApplicationStatus] = {
 class RawEmail:
     message_id: str
     thread_id: str
-    sender: str       # full "Name <email@domain.com>" string
+    sender: str  # full "Name <email@domain.com>" string
     subject: str
     date: datetime
-    snippet: str      # Gmail snippet, max 100 chars
+    snippet: str  # Gmail snippet, max 100 chars
     body_text: str | None  # set to None after parsing
 
 
@@ -85,10 +86,13 @@ class EmailParser:
             self._nlp = None
         self._llm: LLMExtractor | None = (
             LLMExtractor(LLM_BASE_URL, LLM_MODEL, LLM_TIMEOUT_SECONDS, LLM_API_KEY)
-            if LLM_ENABLED else None
+            if LLM_ENABLED
+            else None
         )
 
-    def parse(self, email: RawEmail, suppress_rules: list[SuppressRule]) -> ParsedApplication | None:
+    def parse(
+        self, email: RawEmail, suppress_rules: list[SuppressRule]
+    ) -> ParsedApplication | None:
         if self._matches_suppress_rule(email.sender, email.subject, suppress_rules, email.snippet):
             email.body_text = None
             return None
@@ -126,7 +130,9 @@ class EmailParser:
         # Status-signal keywords alone (e.g. "shortlisted") are too broad without a domain
         # anchor and cause certification-program marketing emails to be classified as job apps.
         if not matched_portal:
-            direct_portal = next((p for p in self._portals if p.get("name") == "Direct/Consultancy"), None)
+            direct_portal = next(
+                (p for p in self._portals if p.get("name") == "Direct/Consultancy"), None
+            )
             if direct_portal:
                 subject_hit = any(
                     pat.lower() in subject_lower
@@ -164,14 +170,20 @@ class EmailParser:
             )
             role = llm_result.role or self._extract_role(email.subject, snippet_for_extraction)
             # LLM status=None means "APPLIED" (the default) → also try keyword detection
-            status_signal = llm_result.status if llm_result.status is not None else self._detect_status_signal(
-                email.subject, email.snippet, portal_name, portal_signals
+            status_signal = (
+                llm_result.status
+                if llm_result.status is not None
+                else self._detect_status_signal(
+                    email.subject, email.snippet, portal_name, portal_signals
+                )
             )
         else:
             status_signal = self._detect_status_signal(
                 email.subject, email.snippet, portal_name, portal_signals
             )
-            company = self._extract_company(email.subject, combined_snippet, portal_name, sender_domain)
+            company = self._extract_company(
+                email.subject, combined_snippet, portal_name, sender_domain
+            )
             role = self._extract_role(email.subject, snippet_for_extraction)
 
         job_url = self._extract_job_url(combined_snippet)
@@ -245,30 +257,82 @@ class EmailParser:
         return False
 
     # Words that indicate an extracted "company" is actually a program, event, or boilerplate.
-    _REJECT_COMPANY_WORDS: frozenset[str] = frozenset([
-        "programme", "program", "course", "certification", "certificate",
-        "training", "bootcamp", "highlights", "compile", "view",
-        "event", "regards", "please", "ctc",
-        "application",  # prevents "Meesho Application" type extractions
-    ])
+    _REJECT_COMPANY_WORDS: frozenset[str] = frozenset(
+        [
+            "programme",
+            "program",
+            "course",
+            "certification",
+            "certificate",
+            "training",
+            "bootcamp",
+            "highlights",
+            "compile",
+            "view",
+            "event",
+            "regards",
+            "please",
+            "ctc",
+            "application",  # prevents "Meesho Application" type extractions
+        ]
+    )
     # Names that start with these words are almost never real company names.
-    _REJECT_COMPANY_LEADING: frozenset[str] = frozenset([
-        "the", "a", "an", "your", "our", "this", "please", "regards",
-        "received", "shortlisted", "selected", "confirm",
-        # Unambiguous job-title words — companies never start with these
-        "director", "manager", "senior", "sr.", "vp", "vice", "chief", "head",
-        "lead", "principal", "junior", "jr.", "associate", "staff", "fellow",
-    ])
+    _REJECT_COMPANY_LEADING: frozenset[str] = frozenset(
+        [
+            "the",
+            "a",
+            "an",
+            "your",
+            "our",
+            "this",
+            "please",
+            "regards",
+            "received",
+            "shortlisted",
+            "selected",
+            "confirm",
+            # Unambiguous job-title words — companies never start with these
+            "director",
+            "manager",
+            "senior",
+            "sr.",
+            "vp",
+            "vice",
+            "chief",
+            "head",
+            "lead",
+            "principal",
+            "junior",
+            "jr.",
+            "associate",
+            "staff",
+            "fellow",
+        ]
+    )
     # Greeting words that precede a person's name in email text and get fused into ORG entity
     _GREETING_PATTERN = re.compile(r"\s*\b(?:hi|hello|dear|hey)\b\s*$", re.IGNORECASE)
-    # Strip "Hi/Hello/Dear [Name]" suffix anywhere in the ORG text, e.g. "Applied Materials Hi Utkarsh"
+    # Strip "Hi/Hello/Dear [Name]" suffix anywhere in the ORG text,
+    # e.g. "Applied Materials Hi Utkarsh"
     _GREETING_SUFFIX_PATTERN = re.compile(r"\s+(?:hi|hello|dear|hey)\b.*$", re.IGNORECASE)
     # If an ORG entity ends with one of these, it's most likely a job title, not a company.
-    _REJECT_COMPANY_TRAILING: frozenset[str] = frozenset([
-        "engineer", "developer", "analyst", "manager", "director",
-        "scientist", "architect", "designer", "consultant", "officer",
-        "development", "engineering", "technical", "officer",
-    ])
+    _REJECT_COMPANY_TRAILING: frozenset[str] = frozenset(
+        [
+            "engineer",
+            "developer",
+            "analyst",
+            "manager",
+            "director",
+            "scientist",
+            "architect",
+            "designer",
+            "consultant",
+            "officer",
+            "development",
+            "engineering",
+            "technical",
+            "officer",
+        ]
+    )
 
     def _is_valid_company(self, name: str) -> bool:
         if not name or len(name) > 50:
@@ -300,10 +364,11 @@ class EmailParser:
                 log.warning("spacy_nlp_error_falling_back_to_regex", error=str(exc))
 
         if doc is not None:
-            # Index PERSON spans so we can detect company+person fusions (e.g. "HiLabs Ujwala Kudur")
+            # Index PERSON spans so we can detect company+person fusions
+            # (e.g. "HiLabs Ujwala Kudur")
             person_spans = [(e.start_char, e.end_char) for e in doc.ents if e.label_ == "PERSON"]
 
-        for ent in (doc.ents if doc is not None else []):
+        for ent in doc.ents if doc is not None else []:
             if ent.label_ != "ORG":
                 continue
             org_text = ent.text.strip()
@@ -342,7 +407,7 @@ class EmailParser:
             # and strip any trailing greeting word (Hi, Hello, Dear, Hey).
             for p_start, _ in person_spans:
                 if ent.start_char < p_start < ent.end_char:
-                    org_text = text[ent.start_char:p_start].strip(" -–—,")
+                    org_text = text[ent.start_char : p_start].strip(" -–—,")
                     org_text = self._GREETING_PATTERN.sub("", org_text).strip()
                     break
 
@@ -351,11 +416,13 @@ class EmailParser:
 
         # Regex fallbacks on subject
         patterns = [
-            r"(?:your application to|applied to|application to)\s+([A-Z][A-Za-z0-9 &,.']+?)(?:\s+(?:for|is|has|-)|\s*$)",
+            r"(?:your application to|applied to|application to)\s+"
+            r"([A-Z][A-Za-z0-9 &,.']+?)(?:\s+(?:for|is|has|-)|\s*$)",
             r"(?:at|from)\s+([A-Z][A-Za-z0-9 &,.']+?)(?:\s+(?:for|is|has|-)|\s*$)",
             r"^([A-Z][A-Za-z0-9 &,.']+?)\s*[-–—]\s*(?:(?:your\s+)?(?:job )?application)",
             # "Job Offer - Company", "Interview Invitation - Company", "Your Application - Company"
-            r"(?:job offer|employment offer|interview invitation|opportunity|your application|application received)\s*[-–—:]\s*([A-Z][A-Za-z0-9 &,.']+?)\s*$",
+            r"(?:job offer|employment offer|interview invitation|opportunity|"
+            r"your application|application received)\s*[-–—:]\s*([A-Z][A-Za-z0-9 &,.']+?)\s*$",
         ]
         for pattern in patterns:
             match = re.search(pattern, subject, re.IGNORECASE)
@@ -366,14 +433,21 @@ class EmailParser:
 
         return None
 
-    _ROLE_LEADING_STRIP = re.compile(
-        r"^(?:our|the|a|an|this|your)\s+", re.IGNORECASE
-    )
+    _ROLE_LEADING_STRIP = re.compile(r"^(?:our|the|a|an|this|your)\s+", re.IGNORECASE)
     # Extracted text that is a meta-word, not a real role name.
-    _REJECT_ROLE_WORDS: frozenset[str] = frozenset([
-        "role", "position", "opening", "job", "opportunity", "vacancy",
-        "post", "application", "profile",
-    ])
+    _REJECT_ROLE_WORDS: frozenset[str] = frozenset(
+        [
+            "role",
+            "position",
+            "opening",
+            "job",
+            "opportunity",
+            "vacancy",
+            "post",
+            "application",
+            "profile",
+        ]
+    )
 
     def _extract_role(self, subject: str, snippet: str = "") -> str | None:
         patterns = [
@@ -421,8 +495,13 @@ class EmailParser:
         matches = re.findall(r"https?://[^\s\"'>]+", snippet)
         keywords = {"job", "position", "career", "opening", "role"}
         portal_domains = {
-            "naukri.com", "linkedin.com", "hirest.tech", "instahire.in",
-            "wellfound.com", "angel.co", "instahyre.com",
+            "naukri.com",
+            "linkedin.com",
+            "hirest.tech",
+            "instahire.in",
+            "wellfound.com",
+            "angel.co",
+            "instahyre.com",
         }
         for url in matches:
             url_lower = url.lower()
