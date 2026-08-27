@@ -29,5 +29,5 @@ def test_app_has_expected_metadata() -> None:
 
 
 def test_router_mounted_under_api_v1() -> None:
-    paths = {route.path for route in app.routes}
+    paths = app.openapi()["paths"].keys()
     assert any(p.startswith("/api/v1") for p in paths)

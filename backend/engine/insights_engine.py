@@ -13,27 +13,33 @@ from backend.db.models import Application, ApplicationStatus, utc_now
 
 log = structlog.get_logger(__name__)
 
-_SHORTLISTED_STAGES: frozenset[ApplicationStatus] = frozenset({
-    ApplicationStatus.RESUME_SHORTLISTED,
-    ApplicationStatus.INTERVIEW_SCHEDULED,
-    ApplicationStatus.INTERVIEW_IN_PROGRESS,
-    ApplicationStatus.OFFER_NEGOTIATION,
-    ApplicationStatus.OFFER,
-    ApplicationStatus.JOINED,
-})
+_SHORTLISTED_STAGES: frozenset[ApplicationStatus] = frozenset(
+    {
+        ApplicationStatus.RESUME_SHORTLISTED,
+        ApplicationStatus.INTERVIEW_SCHEDULED,
+        ApplicationStatus.INTERVIEW_IN_PROGRESS,
+        ApplicationStatus.OFFER_NEGOTIATION,
+        ApplicationStatus.OFFER,
+        ApplicationStatus.JOINED,
+    }
+)
 
-_INTERVIEW_STAGES: frozenset[ApplicationStatus] = frozenset({
-    ApplicationStatus.INTERVIEW_SCHEDULED,
-    ApplicationStatus.INTERVIEW_IN_PROGRESS,
-    ApplicationStatus.OFFER_NEGOTIATION,
-    ApplicationStatus.OFFER,
-    ApplicationStatus.JOINED,
-})
+_INTERVIEW_STAGES: frozenset[ApplicationStatus] = frozenset(
+    {
+        ApplicationStatus.INTERVIEW_SCHEDULED,
+        ApplicationStatus.INTERVIEW_IN_PROGRESS,
+        ApplicationStatus.OFFER_NEGOTIATION,
+        ApplicationStatus.OFFER,
+        ApplicationStatus.JOINED,
+    }
+)
 
-_OFFER_STAGES: frozenset[ApplicationStatus] = frozenset({
-    ApplicationStatus.OFFER,
-    ApplicationStatus.JOINED,
-})
+_OFFER_STAGES: frozenset[ApplicationStatus] = frozenset(
+    {
+        ApplicationStatus.OFFER,
+        ApplicationStatus.JOINED,
+    }
+)
 
 
 @dataclass
@@ -116,13 +122,15 @@ class InsightsEngine:
 
         stats: list[ChannelStat] = []
         for source, group in groups.items():
-            stats.append(ChannelStat(
-                source=source,
-                total=len(group),
-                shortlisted=sum(1 for a in group if a.current_status in _SHORTLISTED_STAGES),
-                interviewed=sum(1 for a in group if a.current_status in _INTERVIEW_STAGES),
-                offered=sum(1 for a in group if a.current_status in _OFFER_STAGES),
-            ))
+            stats.append(
+                ChannelStat(
+                    source=source,
+                    total=len(group),
+                    shortlisted=sum(1 for a in group if a.current_status in _SHORTLISTED_STAGES),
+                    interviewed=sum(1 for a in group if a.current_status in _INTERVIEW_STAGES),
+                    offered=sum(1 for a in group if a.current_status in _OFFER_STAGES),
+                )
+            )
         return stats
 
     # ------------------------------------------------------------------ #
@@ -132,10 +140,12 @@ class InsightsEngine:
     _SHORTLISTED_VALUES: frozenset[str] = frozenset(s.value for s in _SHORTLISTED_STAGES)
     _INTERVIEWED_VALUES: frozenset[str] = frozenset(s.value for s in _INTERVIEW_STAGES)
     _OFFERED_VALUES: frozenset[str] = frozenset(s.value for s in _OFFER_STAGES)
-    _TERMINAL_VALUES: frozenset[str] = frozenset({
-        ApplicationStatus.REJECTED.value,
-        ApplicationStatus.WITHDRAWN.value,
-    })
+    _TERMINAL_VALUES: frozenset[str] = frozenset(
+        {
+            ApplicationStatus.REJECTED.value,
+            ApplicationStatus.WITHDRAWN.value,
+        }
+    )
 
     def flow_data(self) -> dict:
         apps = self._fetch_active_apps()
@@ -143,8 +153,17 @@ class InsightsEngine:
 
         if total == 0:
             return {
-                "nodes": [], "links": [], "outcomes": [],
-                "kpis": {"total": 0, "interview_rate": 0.0, "offer_rate": 0.0, "active": 0, "withdrawn": 0, "stale": 0},
+                "nodes": [],
+                "links": [],
+                "outcomes": [],
+                "kpis": {
+                    "total": 0,
+                    "interview_rate": 0.0,
+                    "offer_rate": 0.0,
+                    "active": 0,
+                    "withdrawn": 0,
+                    "stale": 0,
+                },
                 "weekly_activity": [],
                 "insufficient_data": True,
             }
@@ -158,97 +177,117 @@ class InsightsEngine:
                 stages_by_app.setdefault(h.application_id, set()).add(h.to_status)
 
         # Counters per broad stage — Rejected, Withdrawn, Stale tracked separately
-        rejected_direct  = withdrawn_direct  = active_applied = stale_applied = 0
+        rejected_direct = withdrawn_direct = active_applied = stale_applied = 0
         rejected_post_short = withdrawn_post_short = active_short = 0
-        rejected_post_int   = withdrawn_post_int   = active_int  = 0
+        rejected_post_int = withdrawn_post_int = active_int = 0
         offered = 0
 
         for app in apps:
+            if app.id is None:
+                continue
             stages = stages_by_app.get(app.id, set()) | {app.current_status.value}
             current = app.current_status.value
-            is_rejected  = current == ApplicationStatus.REJECTED.value
+            is_rejected = current == ApplicationStatus.REJECTED.value
             is_withdrawn = current == ApplicationStatus.WITHDRAWN.value
-            is_terminal  = is_rejected or is_withdrawn
-
-            ever_offered      = bool(stages & self._OFFERED_VALUES)
-            ever_interviewed  = bool(stages & self._INTERVIEWED_VALUES)
-            ever_shortlisted  = bool(stages & self._SHORTLISTED_VALUES)
+            ever_offered = bool(stages & self._OFFERED_VALUES)
+            ever_interviewed = bool(stages & self._INTERVIEWED_VALUES)
+            ever_shortlisted = bool(stages & self._SHORTLISTED_VALUES)
 
             if ever_offered:
                 offered += 1
 
             if ever_interviewed:
-                if is_rejected:       rejected_post_int  += 1
-                elif is_withdrawn:    withdrawn_post_int += 1
-                elif not ever_offered: active_int        += 1
+                if is_rejected:
+                    rejected_post_int += 1
+                elif is_withdrawn:
+                    withdrawn_post_int += 1
+                elif not ever_offered:
+                    active_int += 1
             elif ever_shortlisted:
-                if is_rejected:       rejected_post_short  += 1
-                elif is_withdrawn:    withdrawn_post_short += 1
-                else:                 active_short         += 1
+                if is_rejected:
+                    rejected_post_short += 1
+                elif is_withdrawn:
+                    withdrawn_post_short += 1
+                else:
+                    active_short += 1
             else:
-                if is_rejected:       rejected_direct  += 1
-                elif is_withdrawn:    withdrawn_direct += 1
-                elif is_application_stale(app): stale_applied += 1
-                else:                 active_applied   += 1
+                if is_rejected:
+                    rejected_direct += 1
+                elif is_withdrawn:
+                    withdrawn_direct += 1
+                elif is_application_stale(app):
+                    stale_applied += 1
+                else:
+                    active_applied += 1
 
-        total_rejected  = rejected_direct  + rejected_post_short  + rejected_post_int
+        total_rejected = rejected_direct + rejected_post_short + rejected_post_int
         total_withdrawn = withdrawn_direct + withdrawn_post_short + withdrawn_post_int
-        total_active    = active_applied   + active_short         + active_int
-        total_stale     = stale_applied
+        total_active = active_applied + active_short + active_int
+        total_stale = stale_applied
 
         # Apps that ever reached each stage (including those that later withdrew/rejected)
         shortlisted_total = (
             offered
-            + rejected_post_int  + withdrawn_post_int  + active_int
-            + rejected_post_short + withdrawn_post_short + active_short
+            + rejected_post_int
+            + withdrawn_post_int
+            + active_int
+            + rejected_post_short
+            + withdrawn_post_short
+            + active_short
         )
         interview_total = offered + rejected_post_int + withdrawn_post_int + active_int
 
         nodes = [
-            {"id": "Applied",       "count": total},
-            {"id": "Shortlisted",   "count": shortlisted_total},
-            {"id": "Interview",     "count": interview_total},
-            {"id": "Offer / Joined","count": offered},
-            {"id": "Rejected",      "count": total_rejected},
-            {"id": "Withdrawn",     "count": total_withdrawn},
-            {"id": "Active",        "count": total_active},
-            {"id": "Stale",         "count": total_stale},
+            {"id": "Applied", "count": total},
+            {"id": "Shortlisted", "count": shortlisted_total},
+            {"id": "Interview", "count": interview_total},
+            {"id": "Offer / Joined", "count": offered},
+            {"id": "Rejected", "count": total_rejected},
+            {"id": "Withdrawn", "count": total_withdrawn},
+            {"id": "Active", "count": total_active},
+            {"id": "Stale", "count": total_stale},
         ]
 
         links: list[dict] = []
         if shortlisted_total:
-            links.append({"source": "Applied",     "target": "Shortlisted",   "value": shortlisted_total})
+            links.append({"source": "Applied", "target": "Shortlisted", "value": shortlisted_total})
         if rejected_direct:
-            links.append({"source": "Applied",     "target": "Rejected",      "value": rejected_direct})
+            links.append({"source": "Applied", "target": "Rejected", "value": rejected_direct})
         if withdrawn_direct:
-            links.append({"source": "Applied",     "target": "Withdrawn",     "value": withdrawn_direct})
+            links.append({"source": "Applied", "target": "Withdrawn", "value": withdrawn_direct})
         if active_applied:
-            links.append({"source": "Applied",     "target": "Active",        "value": active_applied})
+            links.append({"source": "Applied", "target": "Active", "value": active_applied})
         if stale_applied:
-            links.append({"source": "Applied",     "target": "Stale",         "value": stale_applied})
+            links.append({"source": "Applied", "target": "Stale", "value": stale_applied})
         if interview_total:
-            links.append({"source": "Shortlisted", "target": "Interview",     "value": interview_total})
+            links.append({"source": "Shortlisted", "target": "Interview", "value": interview_total})
         if rejected_post_short:
-            links.append({"source": "Shortlisted", "target": "Rejected",      "value": rejected_post_short})
+            links.append(
+                {"source": "Shortlisted", "target": "Rejected", "value": rejected_post_short}
+            )
         if withdrawn_post_short:
-            links.append({"source": "Shortlisted", "target": "Withdrawn",     "value": withdrawn_post_short})
+            links.append(
+                {"source": "Shortlisted", "target": "Withdrawn", "value": withdrawn_post_short}
+            )
         if active_short:
-            links.append({"source": "Shortlisted", "target": "Active",        "value": active_short})
+            links.append({"source": "Shortlisted", "target": "Active", "value": active_short})
         if offered:
-            links.append({"source": "Interview",   "target": "Offer / Joined","value": offered})
+            links.append({"source": "Interview", "target": "Offer / Joined", "value": offered})
         if rejected_post_int:
-            links.append({"source": "Interview",   "target": "Rejected",      "value": rejected_post_int})
+            links.append({"source": "Interview", "target": "Rejected", "value": rejected_post_int})
         if withdrawn_post_int:
-            links.append({"source": "Interview",   "target": "Withdrawn",     "value": withdrawn_post_int})
+            links.append(
+                {"source": "Interview", "target": "Withdrawn", "value": withdrawn_post_int}
+            )
         if active_int:
-            links.append({"source": "Interview",   "target": "Active",        "value": active_int})
+            links.append({"source": "Interview", "target": "Active", "value": active_int})
 
         outcomes = [
-            {"name": "Active",        "value": total_active,    "color": "#3b82f6"},
-            {"name": "Offer / Joined","value": offered,          "color": "#22c55e"},
-            {"name": "Rejected",      "value": total_rejected,  "color": "#ef4444"},
-            {"name": "Withdrawn",     "value": total_withdrawn, "color": "#f97316"},
-            {"name": "Stale",         "value": total_stale,     "color": "#eab308"},
+            {"name": "Active", "value": total_active, "color": "#3b82f6"},
+            {"name": "Offer / Joined", "value": offered, "color": "#22c55e"},
+            {"name": "Rejected", "value": total_rejected, "color": "#ef4444"},
+            {"name": "Withdrawn", "value": total_withdrawn, "color": "#f97316"},
+            {"name": "Stale", "value": total_stale, "color": "#eab308"},
         ]
 
         return {
@@ -298,8 +337,13 @@ class InsightsEngine:
 
         if total == 0:
             return {
-                "total": 0, "rejected": 0, "withdrawn": 0, "resolved": 0,
-                "rejection_rate": 0.0, "withdrawal_rate": 0.0, "non_offer_rate": 0.0,
+                "total": 0,
+                "rejected": 0,
+                "withdrawn": 0,
+                "resolved": 0,
+                "rejection_rate": 0.0,
+                "withdrawal_rate": 0.0,
+                "non_offer_rate": 0.0,
                 "stage_breakdown": {"rejection": {}, "withdrawal": {}},
                 "portal_breakdown": [],
                 "monthly_trend": [],
@@ -313,7 +357,9 @@ class InsightsEngine:
 
         rejection_rate = round(n_rejected / n_resolved, 4) if n_resolved > 0 else 0.0
         withdrawal_rate = round(n_withdrawn / total, 4)
-        non_offer_rate = round((n_rejected + n_withdrawn) / n_resolved, 4) if n_resolved > 0 else 0.0
+        non_offer_rate = (
+            round((n_rejected + n_withdrawn) / n_resolved, 4) if n_resolved > 0 else 0.0
+        )
 
         # Stage breakdown using history
         app_ids = {a.id for a in apps if a.id is not None}
@@ -327,6 +373,8 @@ class InsightsEngine:
         stage_withdrawal: dict[str, int] = {"Applied": 0, "Shortlisted": 0, "Interview": 0}
         for app in apps:
             if app.current_status not in (ApplicationStatus.REJECTED, ApplicationStatus.WITHDRAWN):
+                continue
+            if app.id is None:
                 continue
             stages = stages_by_app.get(app.id, set()) | {app.current_status.value}
             if stages & self._INTERVIEWED_VALUES:
@@ -355,13 +403,17 @@ class InsightsEngine:
         portal_breakdown = []
         for stat in portal_map.values():
             resolved_p = stat["rejected"] + stat["withdrawn"]
-            portal_breakdown.append({
-                "portal": stat["portal"],
-                "total": stat["total"],
-                "rejected": stat["rejected"],
-                "withdrawn": stat["withdrawn"],
-                "rejection_rate": round(stat["rejected"] / resolved_p, 4) if resolved_p > 0 else None,
-            })
+            portal_breakdown.append(
+                {
+                    "portal": stat["portal"],
+                    "total": stat["total"],
+                    "rejected": stat["rejected"],
+                    "withdrawn": stat["withdrawn"],
+                    "rejection_rate": round(stat["rejected"] / resolved_p, 4)
+                    if resolved_p > 0
+                    else None,
+                }
+            )
         portal_breakdown.sort(key=lambda x: x["total"], reverse=True)
 
         # Monthly trend (last 6 months) keyed by updated_at month for terminal apps
@@ -386,7 +438,14 @@ class InsightsEngine:
             key = f"{yr:04d}-{mo:02d}"
             label = date(yr, mo, 1).strftime("%b %Y")
             entry = monthly.get(key, {"rejected": 0, "withdrawn": 0})
-            trend.append({"month": key, "label": label, "rejected": entry["rejected"], "withdrawn": entry["withdrawn"]})
+            trend.append(
+                {
+                    "month": key,
+                    "label": label,
+                    "rejected": entry["rejected"],
+                    "withdrawn": entry["withdrawn"],
+                }
+            )
 
         return {
             "total": total,

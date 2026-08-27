@@ -1,23 +1,22 @@
 """Gmail API polling logic."""
 
-from enum import Enum
-import json
 import base64
+import json
+import os
 import threading
 from dataclasses import replace as dataclass_replace
-from datetime import timezone
+from datetime import UTC
 from email.utils import parsedate_to_datetime
-from pathlib import Path
-
-import os
+from enum import Enum
+from typing import TYPE_CHECKING, Any
 
 import keyring
-from google.oauth2.credentials import Credentials
+import structlog
 from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow, InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-import structlog
 
 from backend.config import (
     BACKFILL_DAYS,
@@ -28,9 +27,12 @@ from backend.config import (
 )
 from backend.db.data_store import DataStore
 from backend.db.models import utc_now
-from backend.parser.email_parser import EmailParser, RawEmail, extract_sender_domain
 from backend.engine.status_updater import StatusUpdater
-from backend.poller.error_retry import gmail_retry, AuthError, StaleHistoryError
+from backend.parser.email_parser import EmailParser, RawEmail, extract_sender_domain
+from backend.poller.error_retry import AuthError, StaleHistoryError, gmail_retry
+
+if TYPE_CHECKING:
+    from backend.db.models import Application, SuppressRule
 
 log = structlog.get_logger()
 
@@ -48,10 +50,17 @@ class GmailPoller:
         self._parser = parser
         self._updater = updater
         self._poll_lock = threading.Lock()
-        self.service = None
+        self.service: Any | None = None
         self.status = PollerStatus.SLEEPING
         state = db.get_poller_state()
         self.last_history_id: str | None = state.last_history_id
+
+    def _require_service(self) -> Any:
+        """Return the authenticated Gmail service, raising AuthError if not yet
+        authenticated instead of failing later with an opaque AttributeError."""
+        if self.service is None:
+            raise AuthError("Gmail service not authenticated")
+        return self.service
 
     def authenticate(self) -> None:
         creds = self._load_token_from_keyring()
@@ -61,10 +70,9 @@ class GmailPoller:
             self._save_token_to_keyring(creds)
 
         if not creds or not creds.valid:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                str(CREDENTIALS_PATH), GMAIL_SCOPES
-            )
+            flow = InstalledAppFlow.from_client_secrets_file(str(CREDENTIALS_PATH), GMAIL_SCOPES)
             creds = flow.run_local_server(port=0)
+            assert creds is not None
             self._save_token_to_keyring(creds)
 
         self.service = build("gmail", "v1", credentials=creds)
@@ -132,9 +140,7 @@ class GmailPoller:
         if not token_json:
             return None
         try:
-            return Credentials.from_authorized_user_info(
-                json.loads(token_json), GMAIL_SCOPES
-            )
+            return Credentials.from_authorized_user_info(json.loads(token_json), GMAIL_SCOPES)
         except Exception as exc:
             log.warning("keyring_token_invalid", error=str(exc))
             return None
@@ -145,9 +151,7 @@ class GmailPoller:
             # in-memory for this process and re-refreshes on next restart.
             log.info("gmail_token_refresh_not_persisted_env_backed")
             return
-        keyring.set_password(
-            GMAIL_KEYCHAIN_SERVICE, GMAIL_KEYCHAIN_USERNAME, creds.to_json()
-        )
+        keyring.set_password(GMAIL_KEYCHAIN_SERVICE, GMAIL_KEYCHAIN_USERNAME, creds.to_json())
 
     @property
     def is_polling(self) -> bool:
@@ -225,12 +229,18 @@ class GmailPoller:
         """Fetch, parse, and persist a single message. Returns "new", "update",
         "suppressed", "not_found", or "error"."""
         try:
-            msg = self.service.users().messages().get(
-                userId="me",
-                id=msg_id,
-                format="metadata",
-                metadataHeaders=["From", "Subject", "Date"],
-            ).execute()
+            msg = (
+                self._require_service()
+                .users()
+                .messages()
+                .get(
+                    userId="me",
+                    id=msg_id,
+                    format="metadata",
+                    metadataHeaders=["From", "Subject", "Date"],
+                )
+                .execute()
+            )
 
             raw_email = self._build_raw_email(msg)
             parsed = self._parser.parse(raw_email, suppress_rules)
@@ -280,9 +290,16 @@ class GmailPoller:
             return None
         import concurrent.futures
 
-        request_obj = self.service.users().threads().get(
-            userId="me", id=thread_id,
-            format="metadata", metadataHeaders=["From"],
+        request_obj = (
+            self._require_service()
+            .users()
+            .threads()
+            .get(
+                userId="me",
+                id=thread_id,
+                format="metadata",
+                metadataHeaders=["From"],
+            )
         )
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(request_obj.execute)
@@ -295,13 +312,12 @@ class GmailPoller:
         messages = thread.get("messages", [])
         if not messages:
             return None
-        headers = {
-            h["name"]: h["value"]
-            for h in messages[0].get("payload", {}).get("headers", [])
-        }
+        headers = {h["name"]: h["value"] for h in messages[0].get("payload", {}).get("headers", [])}
         return extract_sender_domain(headers.get("From", ""))
 
-    def backfill_portal(self, sender_domains: list[str], days: int = BACKFILL_DAYS) -> dict[str, int]:
+    def backfill_portal(
+        self, sender_domains: list[str], days: int = BACKFILL_DAYS
+    ) -> dict[str, int]:
         """Re-scan Gmail for a portal's domains and pick up applications missed
         before a portal_rules.yaml entry existed for it.
 
@@ -319,7 +335,7 @@ class GmailPoller:
             kwargs: dict = {"userId": "me", "q": q, "maxResults": 100}
             if page_token:
                 kwargs["pageToken"] = page_token
-            response = self.service.users().messages().list(**kwargs).execute()
+            response = self._require_service().users().messages().list(**kwargs).execute()
             for m in response.get("messages", []):
                 message_ids.append((m["id"], m["threadId"]))
             page_token = response.get("nextPageToken")
@@ -375,20 +391,27 @@ class GmailPoller:
 
     def reextract_fields(self, app: "Application") -> tuple[str | None, str | None]:
         """Re-fetch an application's first thread from Gmail and re-run field extraction."""
-        from backend.db.models import Application  # local import to avoid module-level cycle
         thread_ids_raw: list[str] = json.loads(app.thread_ids)
         if not thread_ids_raw:
             return None, None
 
         try:
-            thread = self.service.users().threads().get(
-                userId="me",
-                id=thread_ids_raw[0],
-                format="metadata",
-                metadataHeaders=["From", "Subject", "Date"],
-            ).execute()
+            thread = (
+                self._require_service()
+                .users()
+                .threads()
+                .get(
+                    userId="me",
+                    id=thread_ids_raw[0],
+                    format="metadata",
+                    metadataHeaders=["From", "Subject", "Date"],
+                )
+                .execute()
+            )
         except HttpError as exc:
-            log.warning("reextract_thread_fetch_failed", thread_id=thread_ids_raw[0], error=str(exc))
+            log.warning(
+                "reextract_thread_fetch_failed", thread_id=thread_ids_raw[0], error=str(exc)
+            )
             return None, None
 
         messages = thread.get("messages", [])
@@ -418,7 +441,7 @@ class GmailPoller:
             if page_token:
                 kwargs["pageToken"] = page_token
 
-            response = self.service.users().messages().list(**kwargs).execute()
+            response = self._require_service().users().messages().list(**kwargs).execute()
 
             if new_history_id is None:
                 new_history_id = response.get("historyId")
@@ -447,7 +470,7 @@ class GmailPoller:
                 kwargs["pageToken"] = page_token
 
             try:
-                response = self.service.users().history().list(**kwargs).execute()
+                response = self._require_service().users().history().list(**kwargs).execute()
             except HttpError as e:
                 if e.resp.status == 404:
                     raise StaleHistoryError("History ID expired") from e
@@ -469,9 +492,13 @@ class GmailPoller:
     def _fetch_body_text(self, msg_id: str) -> str:
         """Fetch full message and extract plain-text body. Body is never stored."""
         try:
-            msg = self.service.users().messages().get(
-                userId="me", id=msg_id, format="full"
-            ).execute()
+            msg = (
+                self._require_service()
+                .users()
+                .messages()
+                .get(userId="me", id=msg_id, format="full")
+                .execute()
+            )
             return self._extract_text_from_payload(msg.get("payload", {}))
         except HttpError:
             return ""
@@ -494,10 +521,7 @@ class GmailPoller:
         return ""
 
     def _build_raw_email(self, msg: dict) -> RawEmail:
-        headers = {
-            h["name"]: h["value"]
-            for h in msg.get("payload", {}).get("headers", [])
-        }
+        headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
         sender = headers.get("From", "")
         subject = headers.get("Subject", "")
         date_str = headers.get("Date", "")
@@ -505,9 +529,9 @@ class GmailPoller:
         try:
             parsed_date = parsedate_to_datetime(date_str)
             date = (
-                parsed_date.astimezone(timezone.utc)
+                parsed_date.astimezone(UTC)
                 if parsed_date.tzinfo is not None
-                else parsed_date.replace(tzinfo=timezone.utc)
+                else parsed_date.replace(tzinfo=UTC)
             )
         except Exception as exc:
             log.warning("email_date_parse_failed", date_header=date_str, error=str(exc))
