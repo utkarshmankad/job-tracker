@@ -3,11 +3,13 @@ import { X, ExternalLink, Mail, Trash2, Pencil, Check } from "lucide-react";
 import { api } from "../api/client";
 import { STATUS_OPTIONS, STATUS_COLORS } from "../utils/constants";
 import { formatDate } from "../utils/formatters";
+import { useModalA11y } from "../hooks/useModalA11y";
 
 const inputCls =
   "border border-gray-300 dark:border-gray-600 rounded px-2 py-1 text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 w-full";
 
 export default function ApplicationDetail({ applicationId, onClose, onDelete }) {
+  const dialogRef = useModalA11y(onClose);
   const [app, setApp] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -108,9 +110,16 @@ export default function ApplicationDetail({ applicationId, onClose, onDelete }) 
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 pt-16">
-      <div className="bg-white dark:bg-gray-900 rounded-lg shadow-xl w-full max-w-2xl max-h-[80vh] overflow-y-auto">
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="application-detail-title"
+        tabIndex={-1}
+        className="bg-white dark:bg-gray-900 rounded-lg shadow-xl w-full max-w-2xl max-h-[80vh] overflow-y-auto"
+      >
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 dark:border-gray-700">
-          <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+          <h2 id="application-detail-title" className="text-lg font-semibold text-gray-900 dark:text-gray-100">
             Application Detail
           </h2>
           <div className="flex items-center gap-2">
@@ -268,6 +277,7 @@ export default function ApplicationDetail({ applicationId, onClose, onDelete }) 
                   <dt className="text-gray-500 dark:text-gray-400">Status</dt>
                   <dd className="flex flex-wrap items-center gap-2">
                     <select
+                      aria-label="Application status"
                       value={statusEdit}
                       onChange={(e) => handleStatusChange(e.target.value)}
                       disabled={saving}
@@ -281,6 +291,7 @@ export default function ApplicationDetail({ applicationId, onClose, onDelete }) 
                     </select>
                     {statusEdit === "Withdrawn" && (
                       <select
+                        aria-label="Withdrawal reason"
                         value={withdrawReason}
                         onChange={(e) => {
                           setWithdrawReason(e.target.value);

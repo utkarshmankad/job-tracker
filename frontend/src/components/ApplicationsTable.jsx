@@ -154,7 +154,14 @@ export default function ApplicationsTable({ filters, onSelectId }) {
         enableSorting: false,
         cell: (info) =>
           info.getValue() ? (
-            <span title="Stale — no update in 14+ days" className="text-amber-400 text-xs">⚠</span>
+            <span
+              role="img"
+              aria-label="Stale — no update in 14+ days"
+              title="Stale — no update in 14+ days"
+              className="text-amber-400 text-xs"
+            >
+              ⚠
+            </span>
           ) : null,
       },
       {
@@ -184,6 +191,10 @@ export default function ApplicationsTable({ filters, onSelectId }) {
       setSorting(next);
       setDisplayCount(BATCH); // reset scroll when sort changes
     },
+    // Row identity by application id, not array index — otherwise sorting
+    // reassigns React's row keys to whatever id now sits at that index instead
+    // of following the record, which can visually smear row state across sorts.
+    getRowId: (row) => String(row.id),
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
   });
@@ -311,20 +322,36 @@ export default function ApplicationsTable({ filters, onSelectId }) {
         <thead className="bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
           {table.getHeaderGroups().map((hg) => (
             <tr key={hg.id}>
-              {hg.headers.map((header) => (
-                <th
-                  key={header.id}
-                  onClick={header.column.getToggleSortingHandler()}
-                  className={`px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider ${
-                    header.column.getCanSort()
-                      ? "cursor-pointer select-none hover:text-gray-700 dark:hover:text-gray-200"
-                      : ""
-                  }`}
-                >
-                  {flexRender(header.column.columnDef.header, header.getContext())}
-                  <SortIcon column={header.column} />
-                </th>
-              ))}
+              {hg.headers.map((header) => {
+                const sortDir = header.column.getIsSorted();
+                const ariaSort = !header.column.getCanSort()
+                  ? undefined
+                  : sortDir === "asc"
+                  ? "ascending"
+                  : sortDir === "desc"
+                  ? "descending"
+                  : "none";
+                return (
+                  <th
+                    key={header.id}
+                    aria-sort={ariaSort}
+                    className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider"
+                  >
+                    {header.column.getCanSort() ? (
+                      <button
+                        type="button"
+                        onClick={header.column.getToggleSortingHandler()}
+                        className="flex items-center select-none hover:text-gray-700 dark:hover:text-gray-200"
+                      >
+                        {flexRender(header.column.columnDef.header, header.getContext())}
+                        <SortIcon column={header.column} />
+                      </button>
+                    ) : (
+                      flexRender(header.column.columnDef.header, header.getContext())
+                    )}
+                  </th>
+                );
+              })}
             </tr>
           ))}
         </thead>

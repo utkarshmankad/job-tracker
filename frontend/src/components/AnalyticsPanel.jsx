@@ -213,7 +213,21 @@ function WeeklyActivity({ data }) {
 
 // ── Channel table ────────────────────────────────────────────────────────────
 
-const SIGNAL_ICON = { green: "🟢", red: "🔴", neutral: "⚪" };
+const SIGNAL_CONFIG = {
+  green: { icon: "🟢", label: "Healthy" },
+  red: { icon: "🔴", label: "Poor" },
+  neutral: { icon: "⚪", label: "No data" },
+};
+
+function SignalBadge({ signal }) {
+  const cfg = SIGNAL_CONFIG[signal] ?? SIGNAL_CONFIG.neutral;
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span aria-hidden="true">{cfg.icon}</span>
+      <span className="text-xs text-gray-600 dark:text-gray-400">{cfg.label}</span>
+    </span>
+  );
+}
 
 function ChannelTable({ channels }) {
   return (
@@ -238,7 +252,9 @@ function ChannelTable({ channels }) {
             <td className="py-2 pr-4 text-gray-600 dark:text-gray-400">
               {ch.offer_rate != null ? formatPercent(ch.offer_rate) : "—"}
             </td>
-            <td className="py-2">{SIGNAL_ICON[ch.signal ?? ch.flag] ?? "⚪"}</td>
+            <td className="py-2">
+              <SignalBadge signal={ch.signal ?? ch.flag} />
+            </td>
           </tr>
         ))}
       </tbody>
@@ -409,22 +425,26 @@ export default function AnalyticsPanel() {
         <div className={card}>
           <h2 className="text-base font-semibold text-gray-800 dark:text-gray-200 mb-4">Insights</h2>
           <ul className="space-y-2">
-            {insights.insights.map((ins, i) => (
-              <li key={i} className="flex items-start gap-2 text-sm">
-                <span
-                  className={`mt-0.5 px-2 py-0.5 rounded-full text-xs font-medium shrink-0 ${
-                    ins.flag === "green"
-                      ? "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300"
-                      : ins.flag === "red"
-                      ? "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300"
-                      : "bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400"
-                  }`}
-                >
-                  {ins.flag ?? "info"}
-                </span>
-                <span className="text-gray-700 dark:text-gray-300">{ins.message}</span>
-              </li>
-            ))}
+            {insights.insights.map((ins, i) => {
+              const label =
+                ins.flag === "green" ? "Positive" : ins.flag === "red" ? "Needs attention" : "Info";
+              return (
+                <li key={i} className="flex items-start gap-2 text-sm">
+                  <span
+                    className={`mt-0.5 px-2 py-0.5 rounded-full text-xs font-medium shrink-0 ${
+                      ins.flag === "green"
+                        ? "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300"
+                        : ins.flag === "red"
+                        ? "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300"
+                        : "bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400"
+                    }`}
+                  >
+                    {label}
+                  </span>
+                  <span className="text-gray-700 dark:text-gray-300">{ins.message}</span>
+                </li>
+              );
+            })}
           </ul>
         </div>
       )}
