@@ -29,6 +29,7 @@ export default function App() {
   // so revisiting one is instant instead of re-fetching from scratch every time.
   const [visitedTabs, setVisitedTabs] = useState(() => new Set(["home"]));
   const [filters, setFilters] = useState({});
+  const [staleFilters, setStaleFilters] = useState({});
   const [selectedId, setSelectedId] = useState(null);
   const [showAddForm, setShowAddForm] = useState(false);
   const { dark, toggle } = useTheme();
@@ -185,7 +186,11 @@ export default function App() {
         )}
         {visitedTabs.has("stale") && (
           <div className={activeTab === "stale" ? "" : "hidden"}>
-            <ApplicationsTable filters={{ is_stale: true }} onSelectId={setSelectedId} />
+            <Filters filters={staleFilters} onChange={setStaleFilters} />
+            <ApplicationsTable
+              filters={{ ...staleFilters, is_stale: true }}
+              onSelectId={setSelectedId}
+            />
           </div>
         )}
         {visitedTabs.has("status") && (
