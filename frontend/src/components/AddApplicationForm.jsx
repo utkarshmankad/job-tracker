@@ -2,6 +2,7 @@ import { useState } from "react";
 import { X, Save } from "lucide-react";
 import { api } from "../api/client";
 import { STATUS_OPTIONS, SOURCE_PORTALS } from "../utils/constants";
+import { useModalA11y } from "../hooks/useModalA11y";
 
 const EMPTY = {
   company: "",
@@ -16,6 +17,7 @@ const inputCls =
   "w-full border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500";
 
 export default function AddApplicationForm({ onSuccess, onClose }) {
+  const dialogRef = useModalA11y(onClose);
   const [form, setForm] = useState({ ...EMPTY });
   const [errors, setErrors] = useState({});
   const [submitting, setSubmitting] = useState(false);
@@ -58,9 +60,16 @@ export default function AddApplicationForm({ onSuccess, onClose }) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 pt-16">
-      <div className="bg-white dark:bg-gray-900 rounded-lg shadow-xl w-full max-w-lg">
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="add-application-title"
+        tabIndex={-1}
+        className="bg-white dark:bg-gray-900 rounded-lg shadow-xl w-full max-w-lg"
+      >
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 dark:border-gray-700">
-          <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+          <h2 id="add-application-title" className="text-lg font-semibold text-gray-900 dark:text-gray-100">
             Add Application
           </h2>
           <button
@@ -132,8 +141,11 @@ export default function AddApplicationForm({ onSuccess, onClose }) {
           </div>
 
           <div>
-            <label className="block text-sm text-gray-600 dark:text-gray-400 mb-1">Job URL</label>
+            <label htmlFor="job_url" className="block text-sm text-gray-600 dark:text-gray-400 mb-1">
+              Job URL
+            </label>
             <input
+              id="job_url"
               type="text"
               value={form.job_url}
               onChange={(e) => update("job_url", e.target.value)}
@@ -161,8 +173,11 @@ export default function AddApplicationForm({ onSuccess, onClose }) {
           </div>
 
           <div>
-            <label className="block text-sm text-gray-600 dark:text-gray-400 mb-1">Status</label>
+            <label htmlFor="current_status" className="block text-sm text-gray-600 dark:text-gray-400 mb-1">
+              Status
+            </label>
             <select
+              id="current_status"
               value={form.current_status}
               onChange={(e) => update("current_status", e.target.value)}
               className={inputCls}

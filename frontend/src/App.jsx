@@ -23,6 +23,17 @@ const NAV_TABS = [
   { id: "status", label: "Status", Icon: Activity },
 ];
 
+// One page-level H1 per view — the app is a tab-based SPA with no route changes,
+// so this updates in place rather than mounting a new page. Visually hidden:
+// the brand mark stays the prominent visual element, but screen readers and
+// automated accessibility checks need an actual H1 identifying the view.
+const TAB_TITLES = {
+  home: "Dashboard",
+  applications: "Applications",
+  stale: "Stale Applications",
+  status: "System Status",
+};
+
 export default function App() {
   const [activeTab, setActiveTab] = useState("home");
   // Tabs mount lazily on first visit, then stay mounted (kept alive, hidden via CSS)
@@ -154,6 +165,8 @@ export default function App() {
             </div>
           </div>
         </div>
+
+        <h1 className="sr-only">{TAB_TITLES[activeTab]}</h1>
 
         {exportError && (
           <div className="mb-4 text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
