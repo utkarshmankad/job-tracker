@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import {
   LayoutList, Activity, Home, AlertTriangle,
   Download, PlusCircle, Sun, Moon,
@@ -33,10 +33,27 @@ export default function App() {
   const [showAddForm, setShowAddForm] = useState(false);
   const { dark, toggle } = useTheme();
   const [exportError, setExportError] = useState(null);
+  const [staleCount, setStaleCount] = useState(null);
+
+  const refreshStaleCount = useCallback(() => {
+    api
+      .listApplications({ is_stale: true, page_size: 1 })
+      .then((res) => setStaleCount(res.total ?? 0))
+      .catch(() => setStaleCount(null)); // badge just stays hidden on failure
+  }, []);
+
+  // Poll cadence matches the Gmail poller (every 5 min) — stale status can only
+  // change that often anyway, so there's no value checking more frequently.
+  useEffect(() => {
+    refreshStaleCount();
+    const interval = setInterval(refreshStaleCount, 5 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, [refreshStaleCount]);
 
   const selectTab = (id) => {
     setActiveTab(id);
     setVisitedTabs((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
+    if (id === "stale") refreshStaleCount();
   };
 
   const handleExport = async () => {
@@ -97,6 +114,14 @@ export default function App() {
                 >
                   <Icon size={14} aria-hidden="true" />
                   {label}
+                  {id === "stale" && staleCount > 0 && (
+                    <span
+                      aria-label={`${staleCount} stale application${staleCount !== 1 ? "s" : ""}`}
+                      className="ml-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-semibold leading-none bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300"
+                    >
+                      {staleCount}
+                    </span>
+                  )}
                 </button>
               ))}
             </nav>
@@ -175,6 +200,7 @@ export default function App() {
             onDelete={() => {
               setSelectedId(null);
               setFilters((f) => ({ ...f }));
+              refreshStaleCount();
             }}
           />
         )}

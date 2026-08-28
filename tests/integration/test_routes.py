@@ -128,6 +128,67 @@ def test_delete_application(seeded_client):
     assert resp.status_code == 404
 
 
+def test_bulk_update_status(seeded_client):
+    client, _ = seeded_client
+    id1 = _create_app(client, {**_APP_PAYLOAD, "company": "Acme"})["id"]
+    id2 = _create_app(client, {**_APP_PAYLOAD, "company": "Beta"})["id"]
+
+    resp = client.post(
+        f"{_BASE}/applications/bulk-status",
+        json={"application_ids": [id1, id2], "status": "Resume Shortlisted"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["updated"] == 2
+    assert body["failed_ids"] == []
+
+    for app_id in (id1, id2):
+        detail = client.get(f"{_BASE}/applications/{app_id}")
+        assert detail.json()["current_status"] == "Resume Shortlisted"
+
+
+def test_bulk_update_status_reports_failed_ids_for_missing_applications(seeded_client):
+    client, _ = seeded_client
+    app_id = _create_app(client)["id"]
+
+    resp = client.post(
+        f"{_BASE}/applications/bulk-status",
+        json={"application_ids": [app_id, 999999], "status": "Rejected"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["updated"] == 1
+    assert body["failed_ids"] == [999999]
+
+
+def test_bulk_delete_applications(seeded_client):
+    client, _ = seeded_client
+    id1 = _create_app(client, {**_APP_PAYLOAD, "company": "Acme"})["id"]
+    id2 = _create_app(client, {**_APP_PAYLOAD, "company": "Beta"})["id"]
+
+    resp = client.post(f"{_BASE}/applications/bulk-delete", json={"application_ids": [id1, id2]})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["updated"] == 2
+    assert body["failed_ids"] == []
+
+    assert client.get(f"{_BASE}/applications/{id1}").status_code == 404
+    assert client.get(f"{_BASE}/applications/{id2}").status_code == 404
+
+
+def test_bulk_delete_reports_failed_ids_for_missing_applications(seeded_client):
+    client, _ = seeded_client
+    app_id = _create_app(client)["id"]
+
+    resp = client.post(
+        f"{_BASE}/applications/bulk-delete", json={"application_ids": [app_id, 999999]}
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["updated"] == 1
+    assert body["failed_ids"] == [999999]
+
+
 def test_export_csv_headers(seeded_client):
     client, _ = seeded_client
     _create_app(client)
