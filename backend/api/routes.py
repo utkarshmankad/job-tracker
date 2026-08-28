@@ -201,6 +201,20 @@ class BulkWithdrawResponse(BaseModel):
     application_ids: list[int]
 
 
+class BulkStatusRequest(BaseModel):
+    application_ids: list[int]
+    status: ApplicationStatus
+
+
+class BulkDeleteRequest(BaseModel):
+    application_ids: list[int]
+
+
+class BulkActionResponse(BaseModel):
+    updated: int
+    failed_ids: list[int]
+
+
 class SuppressRuleCreate(BaseModel):
     sender_pattern: str
     subject_pattern: str | None = None
@@ -529,6 +543,45 @@ async def bulk_withdraw_by_companies(
     if ids:
         _invalidate_applications_cache()
     return BulkWithdrawResponse(updated=len(ids), application_ids=ids)
+
+
+@router.post("/applications/bulk-status", response_model=BulkActionResponse)
+async def bulk_update_status(body: BulkStatusRequest, request: Request) -> BulkActionResponse:
+    """Set current_status on a set of applications via the same manual-update path as
+    a single-record PATCH — status transitions still go through StatusUpdater, never
+    a direct field write. Non-existent ids are reported in failed_ids, not raised."""
+    updater: StatusUpdater = request.app.state.updater
+    updated_ids: list[int] = []
+    failed_ids: list[int] = []
+    for app_id in body.application_ids:
+        try:
+            updater.manual_update(app_id, body.status)
+            updated_ids.append(app_id)
+        except ValueError:
+            failed_ids.append(app_id)
+    if updated_ids:
+        _invalidate_applications_cache()
+    return BulkActionResponse(updated=len(updated_ids), failed_ids=failed_ids)
+
+
+@router.post("/applications/bulk-delete", response_model=BulkActionResponse)
+async def bulk_delete_applications(body: BulkDeleteRequest, request: Request) -> BulkActionResponse:
+    """Delete a set of applications. Unlike the single-record DELETE endpoint, this does
+    not auto-add a sender-suppress rule per row — that requires a live Gmail API call per
+    application (get_thread_sender_domain), and doing that N times sequentially inside one
+    HTTP request doesn't scale to a bulk operation. Use the single-delete endpoint (or a
+    suppress rule added directly) if that's needed for a specific sender."""
+    db: DataStore = request.app.state.db
+    deleted_ids: list[int] = []
+    failed_ids: list[int] = []
+    for app_id in body.application_ids:
+        if db.delete_application(app_id):
+            deleted_ids.append(app_id)
+        else:
+            failed_ids.append(app_id)
+    if deleted_ids:
+        _invalidate_applications_cache()
+    return BulkActionResponse(updated=len(deleted_ids), failed_ids=failed_ids)
 
 
 _LINKEDIN_STATUS_RANK: dict[ApplicationStatus, int] = {

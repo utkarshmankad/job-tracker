@@ -36,6 +36,18 @@ export const api = {
   bulkWithdraw: (companies) =>
     request("/applications/bulk-withdraw", { method: "POST", body: JSON.stringify({ companies }) }),
 
+  bulkUpdateStatus: (applicationIds, status) =>
+    request("/applications/bulk-status", {
+      method: "POST",
+      body: JSON.stringify({ application_ids: applicationIds, status }),
+    }),
+
+  bulkDeleteApplications: (applicationIds) =>
+    request("/applications/bulk-delete", {
+      method: "POST",
+      body: JSON.stringify({ application_ids: applicationIds }),
+    }),
+
   linkedinPreview: (text, mode) =>
     request("/applications/linkedin-import/preview", { method: "POST", body: JSON.stringify({ text, mode }) }),
 
