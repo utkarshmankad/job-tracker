@@ -1,8 +1,7 @@
 """SQLModel table definitions — source of truth for schema."""
 
 import enum
-from datetime import datetime, timezone
-from typing import List, Optional
+from datetime import UTC, datetime
 
 from sqlalchemy import Column
 from sqlalchemy import Enum as SAEnum
@@ -12,7 +11,7 @@ from sqlmodel import Field, Relationship, SQLModel
 
 def utc_now() -> datetime:
     """Timezone-aware 'now' — the only clock repo code should call (never bare utcnow())."""
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class UTCDateTime(TypeDecorator):
@@ -23,17 +22,17 @@ class UTCDateTime(TypeDecorator):
     impl = DateTime
     cache_ok = True
 
-    def process_bind_param(self, value: Optional[datetime], dialect) -> Optional[datetime]:
+    def process_bind_param(self, value: datetime | None, dialect) -> datetime | None:
         if value is None:
             return None
         if value.tzinfo is not None:
-            value = value.astimezone(timezone.utc)
+            value = value.astimezone(UTC)
         return value.replace(tzinfo=None)
 
-    def process_result_value(self, value: Optional[datetime], dialect) -> Optional[datetime]:
+    def process_result_value(self, value: datetime | None, dialect) -> datetime | None:
         if value is None:
             return None
-        return value.replace(tzinfo=timezone.utc)
+        return value.replace(tzinfo=UTC)
 
 
 class ApplicationStatus(str, enum.Enum):
@@ -49,11 +48,11 @@ class ApplicationStatus(str, enum.Enum):
 
 
 class Application(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    company: Optional[str] = None
-    role: Optional[str] = None
+    id: int | None = Field(default=None, primary_key=True)
+    company: str | None = None
+    role: str | None = None
     source_portal: str = Field(index=True)
-    job_url: Optional[str] = None
+    job_url: str | None = None
     applied_date: datetime = Field(index=True, sa_type=UTCDateTime)
     current_status: ApplicationStatus = Field(
         default=ApplicationStatus.APPLIED,
@@ -67,21 +66,21 @@ class Application(SQLModel, table=True):
     )
     thread_ids: str = "[]"  # JSON-encoded list[str]
     is_false_positive: bool = False
-    withdraw_reason: Optional[str] = None  # "self_withdraw" | "company_closed"
+    withdraw_reason: str | None = None  # "self_withdraw" | "company_closed"
     created_at: datetime = Field(default_factory=utc_now, sa_type=UTCDateTime)
     updated_at: datetime = Field(default_factory=utc_now, index=True, sa_type=UTCDateTime)
-    status_history: List["StatusHistory"] = Relationship(back_populates="application")
+    status_history: list["StatusHistory"] = Relationship(back_populates="application")
 
 
 class StatusHistory(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: int | None = Field(default=None, primary_key=True)
     application_id: int = Field(foreign_key="application.id")
-    from_status: Optional[str] = None
+    from_status: str | None = None
     to_status: str
     trigger: str  # "email" | "manual"
     changed_at: datetime = Field(default_factory=utc_now, sa_type=UTCDateTime)
-    message_id: Optional[str] = None
-    application: Optional[Application] = Relationship(back_populates="status_history")
+    message_id: str | None = None
+    application: Application | None = Relationship(back_populates="status_history")
 
 
 class ApplicationThreadId(SQLModel, table=True):
@@ -89,24 +88,24 @@ class ApplicationThreadId(SQLModel, table=True):
     Application itself). Kept in sync by DataStore.upsert_application — replaces an
     unindexed LIKE scan over the JSON blob with an indexed equality lookup."""
 
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: int | None = Field(default=None, primary_key=True)
     application_id: int = Field(foreign_key="application.id", index=True)
     thread_id: str = Field(index=True)
 
 
 class SuppressRule(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: int | None = Field(default=None, primary_key=True)
     sender_pattern: str
-    subject_pattern: Optional[str] = None
+    subject_pattern: str | None = None
     created_at: datetime = Field(default_factory=utc_now, sa_type=UTCDateTime)
 
 
 class PollerState(SQLModel, table=True):
     id: int = Field(default=1, primary_key=True)
-    last_history_id: Optional[str] = None
-    last_sync_at: Optional[datetime] = Field(default=None, sa_type=UTCDateTime)
+    last_history_id: str | None = None
+    last_sync_at: datetime | None = Field(default=None, sa_type=UTCDateTime)
     status: str = "SLEEPING"
-    error_message: Optional[str] = None
+    error_message: str | None = None
 
 
 class ProcessedMessage(SQLModel, table=True):
@@ -125,12 +124,12 @@ class ProspectStatus(str, enum.Enum):
 class Prospect(SQLModel, table=True):
     """A job lead or important recruiting interaction that is not yet an application."""
 
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: int | None = Field(default=None, primary_key=True)
     source_portal: str = Field(default="LinkedIn", index=True)
     category: str = Field(index=True)  # meeting | recruiter_outreach | profile_interest
     title: str
     sender: str
-    snippet: Optional[str] = None
+    snippet: str | None = None
     received_at: datetime = Field(index=True, sa_type=UTCDateTime)
     gmail_message_id: str = Field(index=True, unique=True)
     gmail_thread_id: str = Field(index=True)

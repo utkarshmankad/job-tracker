@@ -45,6 +45,4 @@ def test_ignores_recommendation_digest() -> None:
 
 
 def test_ignores_same_words_from_non_linkedin_sender() -> None:
-    assert parse_linkedin_prospect(
-        _email("Schedule a call", sender="unknown@example.com")
-    ) is None
+    assert parse_linkedin_prospect(_email("Schedule a call", sender="unknown@example.com")) is None

@@ -204,9 +204,7 @@ class EmailParser:
             is_classification_confident=is_confident,
         )
 
-    def parse_prospect(
-        self, email: RawEmail, suppress_rules: list[SuppressRule]
-    ) -> Any | None:
+    def parse_prospect(self, email: RawEmail, suppress_rules: list[SuppressRule]) -> Any | None:
         """Classify actionable non-application recruiting mail.
 
         Imported lazily to avoid a module cycle: prospect_parser reuses RawEmail.
