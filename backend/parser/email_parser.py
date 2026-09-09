@@ -204,6 +204,20 @@ class EmailParser:
             is_classification_confident=is_confident,
         )
 
+    def parse_prospect(
+        self, email: RawEmail, suppress_rules: list[SuppressRule]
+    ) -> Any | None:
+        """Classify actionable non-application recruiting mail.
+
+        Imported lazily to avoid a module cycle: prospect_parser reuses RawEmail.
+        """
+        if self._matches_suppress_rule(email.sender, email.subject, suppress_rules, email.snippet):
+            return None
+
+        from backend.parser.prospect_parser import parse_linkedin_prospect  # noqa: PLC0415
+
+        return parse_linkedin_prospect(email)
+
     def extract_fields(
         self,
         sender: str,

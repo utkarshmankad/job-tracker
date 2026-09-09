@@ -113,3 +113,37 @@ class ProcessedMessage(SQLModel, table=True):
     message_id: str = Field(primary_key=True)
     processed_at: datetime = Field(default_factory=utc_now, sa_type=UTCDateTime)
     result: str  # "applied" | "status_update" | "suppressed" | "ignored"
+
+
+class ProspectStatus(str, enum.Enum):
+    NEW = "New"
+    REVIEWED = "Reviewed"
+    DISMISSED = "Dismissed"
+    CONVERTED = "Converted"
+
+
+class Prospect(SQLModel, table=True):
+    """A job lead or important recruiting interaction that is not yet an application."""
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    source_portal: str = Field(default="LinkedIn", index=True)
+    category: str = Field(index=True)  # meeting | recruiter_outreach | profile_interest
+    title: str
+    sender: str
+    snippet: Optional[str] = None
+    received_at: datetime = Field(index=True, sa_type=UTCDateTime)
+    gmail_message_id: str = Field(index=True, unique=True)
+    gmail_thread_id: str = Field(index=True)
+    status: ProspectStatus = Field(
+        default=ProspectStatus.NEW,
+        sa_column=Column(
+            "status",
+            SAEnum(ProspectStatus, values_callable=lambda obj: [e.value for e in obj]),
+            default=ProspectStatus.NEW.value,
+            index=True,
+            nullable=False,
+        ),
+    )
+    classification_reason: str
+    created_at: datetime = Field(default_factory=utc_now, sa_type=UTCDateTime)
+    updated_at: datetime = Field(default_factory=utc_now, index=True, sa_type=UTCDateTime)

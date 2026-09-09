@@ -26,7 +26,7 @@ from backend.config import (
     GMAIL_SCOPES,
 )
 from backend.db.data_store import DataStore
-from backend.db.models import utc_now
+from backend.db.models import Prospect, utc_now
 from backend.engine.status_updater import StatusUpdater
 from backend.parser.email_parser import EmailParser, RawEmail, extract_sender_domain
 from backend.poller.error_retry import AuthError, StaleHistoryError, gmail_retry
@@ -246,6 +246,23 @@ class GmailPoller:
             parsed = self._parser.parse(raw_email, suppress_rules)
 
             if parsed is None:
+                prospect = self._parser.parse_prospect(raw_email, suppress_rules)
+                if prospect is not None:
+                    _, created = self._db.upsert_prospect(
+                        Prospect(
+                            source_portal="LinkedIn",
+                            category=prospect.category,
+                            title=prospect.title,
+                            sender=prospect.sender,
+                            snippet=prospect.snippet,
+                            received_at=raw_email.date,
+                            gmail_message_id=prospect.message_id,
+                            gmail_thread_id=prospect.thread_id,
+                            classification_reason=prospect.classification_reason,
+                        )
+                    )
+                    self._db.mark_processed(msg_id, "prospect")
+                    return "prospect" if created else "suppressed"
                 self._db.mark_processed(msg_id, "suppressed")
                 return "suppressed"
 
