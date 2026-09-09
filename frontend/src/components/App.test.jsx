@@ -7,7 +7,11 @@ import { ThemeProvider } from "../contexts/ThemeContext";
 vi.mock("../api/client", () => ({
   api: {
     getPollerStatus: vi.fn().mockResolvedValue({ status: "RUNNING", last_sync_at: null }),
-    listApplications: vi.fn().mockResolvedValue([]),
+    listApplications: vi.fn().mockResolvedValue({ items: [], total: 0 }),
+    listProspects: vi.fn().mockResolvedValue([]),
+    getFlowData: vi.fn().mockResolvedValue({ insufficient_data: true }),
+    getInsights: vi.fn().mockResolvedValue({ channels: [], insights: [] }),
+    getRejectionData: vi.fn().mockResolvedValue({ insufficient_data: true }),
     exportApplications: vi.fn(),
   },
 }));
@@ -29,9 +33,14 @@ describe("App — icon button accessibility", () => {
     expect(screen.getByRole("button", { name: /applications/i })).toBeInTheDocument();
   });
 
-  it("renders Analytics tab with accessible name", () => {
+  it("renders Home tab with accessible name", () => {
     renderApp();
-    expect(screen.getByRole("button", { name: /analytics/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^home$/i })).toBeInTheDocument();
+  });
+
+  it("renders Opportunities tab with accessible name", () => {
+    renderApp();
+    expect(screen.getByRole("button", { name: /opportunities/i })).toBeInTheDocument();
   });
 
   it("renders Status tab with accessible name", () => {

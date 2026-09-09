@@ -33,6 +33,11 @@ export const api = {
   triggerPoll: () => request("/poller/trigger", { method: "POST" }),
   getSystemStatus: () => request("/status"),
 
+  listProspects: (params = {}) =>
+    request(`/prospects?${new URLSearchParams(params)}`),
+  updateProspectStatus: (id, status) =>
+    request(`/prospects/${id}`, { method: "PATCH", body: JSON.stringify({ status }) }),
+
   bulkWithdraw: (companies) =>
     request("/applications/bulk-withdraw", { method: "POST", body: JSON.stringify({ companies }) }),
 

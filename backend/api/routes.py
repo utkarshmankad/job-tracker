@@ -22,7 +22,7 @@ from backend.config import (
     REEXTRACT_BATCH_LIMIT,
 )
 from backend.db.data_store import ApplicationFilter, DataStore, is_application_stale
-from backend.db.models import Application, ApplicationStatus, utc_now
+from backend.db.models import Application, ApplicationStatus, ProspectStatus, utc_now
 from backend.diagnostics import DiagnosticRunner
 from backend.engine.insights_engine import InsightsEngine
 from backend.engine.status_updater import StatusUpdater
@@ -83,6 +83,28 @@ class ApplicationListResponse(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+class ProspectResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    source_portal: str
+    category: str
+    title: str
+    sender: str
+    snippet: str | None
+    received_at: datetime
+    gmail_message_id: str
+    gmail_thread_id: str
+    status: ProspectStatus
+    classification_reason: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProspectStatusPatch(BaseModel):
+    status: ProspectStatus
 
 
 class ChannelStatResponse(BaseModel):
@@ -328,6 +350,29 @@ def _csv_rows(apps: list[Application]) -> str:
 # ------------------------------------------------------------------ #
 # Applications                                                         #
 # ------------------------------------------------------------------ #
+
+
+@router.get("/prospects", response_model=list[ProspectResponse])
+async def list_prospects(
+    request: Request,
+    status: ProspectStatus | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> list[ProspectResponse]:
+    """List automatically detected recruiting opportunities and meeting signals."""
+    db: DataStore = request.app.state.db
+    return [ProspectResponse.model_validate(p) for p in db.get_prospects(status, limit)]
+
+
+@router.patch("/prospects/{prospect_id}", response_model=ProspectResponse)
+async def update_prospect_status(
+    prospect_id: int, body: ProspectStatusPatch, request: Request
+) -> ProspectResponse:
+    db: DataStore = request.app.state.db
+    try:
+        prospect = db.update_prospect_status(prospect_id, body.status)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ProspectResponse.model_validate(prospect)
 
 
 @router.get("/applications", response_model=ApplicationListResponse)

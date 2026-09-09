@@ -18,6 +18,8 @@ from backend.db.models import (
     ApplicationThreadId,
     PollerState,
     ProcessedMessage,
+    Prospect,
+    ProspectStatus,
     StatusHistory,
     SuppressRule,
     utc_now,
@@ -146,6 +148,45 @@ class DataStore:
             session.refresh(db_app)
             self._sync_thread_ids(session, db_app.id, db_app.thread_ids)
             return db_app
+
+    # ------------------------------------------------------------------ #
+    # Prospects                                                            #
+    # ------------------------------------------------------------------ #
+
+    def upsert_prospect(self, prospect: Prospect) -> tuple[Prospect, bool]:
+        """Insert a prospect idempotently by Gmail message ID."""
+        with Session(self._engine, expire_on_commit=False) as session:
+            existing = session.exec(
+                select(Prospect).where(Prospect.gmail_message_id == prospect.gmail_message_id)
+            ).first()
+            if existing is not None:
+                return existing, False
+            session.add(prospect)
+            session.commit()
+            session.refresh(prospect)
+            return prospect, True
+
+    def get_prospects(
+        self, status: ProspectStatus | None = None, limit: int = 100
+    ) -> list[Prospect]:
+        with Session(self._engine, expire_on_commit=False) as session:
+            stmt = select(Prospect)
+            if status is not None:
+                stmt = stmt.where(Prospect.status == status)
+            stmt = stmt.order_by(col(Prospect.received_at).desc()).limit(limit)
+            return list(session.exec(stmt).all())
+
+    def update_prospect_status(self, prospect_id: int, status: ProspectStatus) -> Prospect:
+        with Session(self._engine, expire_on_commit=False) as session:
+            prospect = session.get(Prospect, prospect_id)
+            if prospect is None:
+                raise ValueError(f"Prospect {prospect_id} not found")
+            prospect.status = status
+            prospect.updated_at = utc_now()
+            session.add(prospect)
+            session.commit()
+            session.refresh(prospect)
+            return prospect
 
     def _sync_thread_ids(
         self, session: Session, application_id: int | None, thread_ids_json: str | None
