@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from pathlib import Path
 
 from backend.db.data_store import DataStore
@@ -225,6 +226,65 @@ def test_flow_data_with_history(tmp_path: Path) -> None:
     result = InsightsEngine(db).flow_data()
     assert result["insufficient_data"] is False
     assert result["kpis"]["total"] == 11
+
+
+def test_search_pulse_separates_recent_activity_from_matured_conversion(tmp_path: Path) -> None:
+    db = _make_db(tmp_path)
+    now = utc_now()
+    recent = _seed_app(db, status=ApplicationStatus.INTERVIEW_SCHEDULED)
+    recent.applied_date = now - timedelta(days=3)
+    recent.created_at = now - timedelta(days=2)
+    db.upsert_application(recent)
+    matured = _seed_app(db, status=ApplicationStatus.REJECTED)
+    matured.applied_date = now - timedelta(days=20)
+    matured.created_at = now - timedelta(days=20)
+    db.upsert_application(matured)
+
+    result = InsightsEngine(db).search_pulse(window_days=28)
+
+    assert result["recent"]["applications"] == 2
+    assert result["recent"]["interviews"] == 1
+    assert result["matured_cohort"]["applications"] == 1
+    assert result["matured_cohort"]["responses"] == 1
+    assert result["matured_cohort"]["response_rate"] == 1.0
+
+
+def test_search_pulse_reports_late_imports_and_both_activity_dates(tmp_path: Path) -> None:
+    db = _make_db(tmp_path)
+    now = utc_now()
+    app = _seed_app(db)
+    app.applied_date = now - timedelta(days=20)
+    app.created_at = now - timedelta(days=2)
+    db.upsert_application(app)
+
+    result = InsightsEngine(db).search_pulse(window_days=28)
+
+    assert result["recent"]["late_imports"] == 1
+    assert sum(week["applied"] for week in result["activity"]) == 1
+    assert sum(week["captured"] for week in result["activity"]) == 1
+
+
+def test_search_pulse_does_not_count_withdrawal_as_employer_response(tmp_path: Path) -> None:
+    db = _make_db(tmp_path)
+    app = _seed_app(db, status=ApplicationStatus.WITHDRAWN)
+    app.applied_date = utc_now() - timedelta(days=20)
+    db.upsert_application(app)
+
+    result = InsightsEngine(db).search_pulse(window_days=28)
+
+    assert result["matured_cohort"]["applications"] == 1
+    assert result["matured_cohort"]["responses"] == 0
+    assert result["matured_cohort"]["response_rate"] == 0.0
+
+
+def test_search_pulse_rejects_unsupported_window(tmp_path: Path) -> None:
+    db = _make_db(tmp_path)
+    try:
+        InsightsEngine(db).search_pulse(window_days=14)
+    except ValueError as exc:
+        assert "7, 28, or 90" in str(exc)
+    else:
+        raise AssertionError("Expected unsupported window to be rejected")
 
 
 # --------------------------------------------------------------------------- #

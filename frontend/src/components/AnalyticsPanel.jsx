@@ -1,27 +1,13 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import {
   PieChart, Pie, Cell, Tooltip, ResponsiveContainer,
   AreaChart, Area, XAxis, YAxis, CartesianGrid,
   BarChart, Bar, Legend,
 } from "recharts";
-import { sankey as d3Sankey, sankeyLinkHorizontal } from "d3-sankey";
 import { api } from "../api/client";
 import { formatPercent } from "../utils/formatters";
 
 // ── Colour palette ──────────────────────────────────────────────────────────
-
-const NODE_COLORS = {
-  "Applied":       "#6366f1",
-  "Shortlisted":   "#f59e0b",
-  "Interview":     "#8b5cf6",
-  "Offer / Joined":"#22c55e",
-  "Rejected":      "#ef4444",
-  "Withdrawn":     "#f97316",
-  "Active":        "#3b82f6",
-  "Stale":         "#eab308",
-};
-
-const DEFAULT_COLOR = "#94a3b8";
 
 const REJECTION_COLORS = {
   rejected: "#ef4444",
@@ -40,103 +26,54 @@ function KpiCard({ label, value, sub, accent }) {
   );
 }
 
-// ── Sankey diagram ───────────────────────────────────────────────────────────
-
-function SankeyChart({ nodes: apiNodes, links: apiLinks }) {
-  const containerRef = useRef(null);
-  // Scale height with node count so small nodes never get clipped.
-  // 72px per node gives comfortable padding; floor at 380, cap at 620.
-  const chartH = Math.min(620, Math.max(380, apiNodes.length * 72));
-  const [dims, setDims] = useState({ width: 700, height: chartH });
-
-  useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver(([entry]) => {
-      setDims({ width: entry.contentRect.width, height: chartH });
-    });
-    ro.observe(el);
-    setDims({ width: el.clientWidth || 700, height: chartH });
-    return () => ro.disconnect();
-  }, [chartH]);
-
-  const { width, height } = dims;
-
-  const nodeIndexMap = new Map(apiNodes.map((n, i) => [n.id, i]));
-  const d3Nodes = apiNodes.map((n) => ({ ...n }));
-  const d3Links = apiLinks
-    .filter((l) => nodeIndexMap.has(l.source) && nodeIndexMap.has(l.target) && l.value > 0)
-    .map((l) => ({
-      source: nodeIndexMap.get(l.source),
-      target: nodeIndexMap.get(l.target),
-      value: l.value,
-    }));
-
-  if (d3Links.length === 0) return null;
-
-  const generator = d3Sankey()
-    .nodeWidth(18)
-    .nodePadding(18)
-    // Right margin 170 → label text has room; bottom margin 36 → count label never clips.
-    .extent([[16, 16], [width - 170, height - 36]]);
-
-  let graph;
-  try {
-    graph = generator({ nodes: d3Nodes, links: d3Links });
-  } catch {
-    return null;
-  }
-
+function PeriodPicker({ value, onChange }) {
   return (
-    <div ref={containerRef} style={{ width: "100%" }}>
-      <svg width={width} height={height} style={{ overflow: "visible" }}>
-        {graph.links.map((link, i) => (
-          <path
-            key={i}
-            d={sankeyLinkHorizontal()(link)}
-            fill="none"
-            stroke={NODE_COLORS[apiNodes[link.source.index]?.id] ?? DEFAULT_COLOR}
-            strokeOpacity={0.25}
-            strokeWidth={Math.max(1, link.width)}
-          />
-        ))}
-        {graph.nodes.map((node, i) => {
-          const color = NODE_COLORS[node.id] ?? DEFAULT_COLOR;
-          const nodeH = Math.max(4, node.y1 - node.y0);
-          const labelRight = node.x1 + 8;
-          return (
-            <g key={i}>
-              <rect
-                x={node.x0}
-                y={node.y0}
-                width={node.x1 - node.x0}
-                height={nodeH}
-                fill={color}
-                rx={3}
-              />
-              <text
-                x={labelRight}
-                y={node.y0 + nodeH / 2}
-                dy="0.35em"
-                fontSize={11}
-                fill="currentColor"
-                className="fill-gray-700 dark:fill-gray-300"
-              >
-                {node.id}
-              </text>
-              <text
-                x={labelRight}
-                y={node.y0 + nodeH / 2 + 13}
-                dy="0.35em"
-                fontSize={10}
-                fill={color}
-              >
-                {node.count}
-              </text>
-            </g>
-          );
-        })}
-      </svg>
+    <div className="inline-flex rounded-lg border border-gray-200 dark:border-gray-700 p-1" aria-label="Analytics period">
+      {[7, 28, 90].map((days) => (
+        <button
+          key={days}
+          type="button"
+          onClick={() => onChange(days)}
+          className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+            value === days
+              ? "bg-indigo-600 text-white"
+              : "text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700"
+          }`}
+          aria-pressed={value === days}
+        >
+          {days} days
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function StageFunnel({ nodes }) {
+  const byId = Object.fromEntries(nodes.map((node) => [node.id, node.count]));
+  const stages = [
+    { label: "Applied", value: byId.Applied ?? 0, color: "bg-indigo-500" },
+    { label: "Shortlisted", value: byId.Shortlisted ?? 0, color: "bg-amber-500" },
+    { label: "Interview", value: byId.Interview ?? 0, color: "bg-violet-500" },
+    { label: "Offer / Joined", value: byId["Offer / Joined"] ?? 0, color: "bg-green-500" },
+  ];
+  return (
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+      {stages.map((stage, index) => {
+        const previous = index > 0 ? stages[index - 1].value : null;
+        const conversion = previous ? stage.value / previous : null;
+        return (
+          <div key={stage.label} className="relative rounded-lg bg-gray-50 p-4 dark:bg-gray-900/40">
+            {index > 0 && (
+              <span className="absolute -top-2 left-3 rounded-full bg-white px-2 text-xs font-medium text-gray-500 shadow-sm dark:bg-gray-800 dark:text-gray-400">
+                {conversion == null ? "—" : formatPercent(conversion)} from prior
+              </span>
+            )}
+            <div className={`mb-3 h-1.5 rounded-full ${stage.color}`} />
+            <div className="text-2xl font-bold text-gray-900 dark:text-gray-100">{stage.value}</div>
+            <div className="text-sm text-gray-500 dark:text-gray-400">{stage.label}</div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -198,12 +135,24 @@ function WeeklyActivity({ data }) {
         <XAxis dataKey="label" tick={{ fontSize: 10 }} interval={1} />
         <YAxis allowDecimals={false} tick={{ fontSize: 10 }} />
         <Tooltip />
+        <Legend iconType="circle" iconSize={9} wrapperStyle={{ fontSize: 12 }} />
         <Area
           type="monotone"
-          dataKey="count"
+          dataKey="applied"
+          name="Applied date"
           stroke="#6366f1"
           strokeWidth={2}
           fill="url(#areaGrad)"
+          dot={false}
+        />
+        <Area
+          type="monotone"
+          dataKey="captured"
+          name="Captured by tracker"
+          stroke="#14b8a6"
+          strokeWidth={2}
+          fill="none"
+          strokeDasharray="5 4"
           dot={false}
         />
       </AreaChart>
@@ -348,15 +297,24 @@ export default function AnalyticsPanel() {
   const [flow, setFlow] = useState(null);
   const [insights, setInsights] = useState(null);
   const [rejection, setRejection] = useState(null);
+  const [pulse, setPulse] = useState(null);
+  const [windowDays, setWindowDays] = useState(28);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
   useEffect(() => {
-    Promise.all([api.getFlowData(), api.getInsights(), api.getRejectionData()])
-      .then(([f, i, r]) => { setFlow(f); setInsights(i); setRejection(r); setError(null); })
+    Promise.all([api.getFlowData(), api.getInsights(), api.getRejectionData(), api.getSearchPulse(28)])
+      .then(([f, i, r, p]) => { setFlow(f); setInsights(i); setRejection(r); setPulse(p); setError(null); })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
   }, []);
+
+  const changeWindow = (days) => {
+    setWindowDays(days);
+    api.getSearchPulse(days)
+      .then((data) => { setPulse(data); setError(null); })
+      .catch((e) => setError(e.message));
+  };
 
   if (loading) return <div className="text-sm text-gray-500 dark:text-gray-400 py-12 text-center">Loading analytics…</div>;
   if (error) return <div className="text-sm text-red-600 py-8 text-center">Error: {error}</div>;
@@ -368,7 +326,7 @@ export default function AnalyticsPanel() {
     );
   }
 
-  const { kpis, nodes, links, weekly_activity } = flow;
+  const { kpis, nodes, weekly_activity } = flow;
   const outcomes = (flow.outcomes ?? []).filter((o) => o.value > 0);
   const channelData = insights?.channels?.map((c) => ({
     ...c,
@@ -382,7 +340,33 @@ export default function AnalyticsPanel() {
 
   return (
     <div className="space-y-6">
-      {/* KPI row */}
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Search Pulse</h2>
+          <p className="text-sm text-gray-500 dark:text-gray-400">Recent activity and fair conversion rates from applications old enough to have received a response.</p>
+        </div>
+        <PeriodPicker value={windowDays} onChange={changeWindow} />
+      </div>
+
+      {pulse && (
+        <>
+          <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
+            <KpiCard label={`Applications · ${windowDays}d`} value={pulse.recent.applications} sub="by application date" />
+            <KpiCard label="Captured" value={pulse.recent.captured} sub={`${pulse.recent.late_imports} imported 7+ days late`} />
+            <KpiCard label="Interviews" value={pulse.recent.interviews} sub={`from recent applications`} />
+            <KpiCard label="Matured response" value={pulse.matured_cohort.response_rate == null ? "—" : formatPercent(pulse.matured_cohort.response_rate)} sub={`${pulse.matured_cohort.responses}/${pulse.matured_cohort.applications} applications`} />
+            <KpiCard label="Matured shortlist" value={pulse.matured_cohort.shortlist_rate == null ? "—" : formatPercent(pulse.matured_cohort.shortlist_rate)} sub={`excludes newest ${pulse.maturity_days} days`} />
+          </div>
+          {pulse.matured_cohort.applications === 0 && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-300">
+              No applications are old enough in this comparison period yet. Conversion rates will appear after the {pulse.maturity_days}-day response window.
+            </div>
+          )}
+        </>
+      )}
+
+      {/* Lifetime KPI row */}
+      <h2 className="text-base font-semibold text-gray-800 dark:text-gray-200">All-time context</h2>
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
         <KpiCard label="Total Applications" value={kpis.total} />
         <KpiCard label="Active" value={kpis.active} sub="in progress" />
@@ -392,11 +376,11 @@ export default function AnalyticsPanel() {
         <KpiCard label="Offer Rate" value={formatPercent(kpis.offer_rate)} sub="of all applications" />
       </div>
 
-      {/* Sankey + Donut row */}
+      {/* Funnel + Donut row */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className={`${card} lg:col-span-2`}>
-          <h2 className="text-base font-semibold text-gray-800 dark:text-gray-200 mb-4">Application Flow</h2>
-          <SankeyChart nodes={nodes} links={links} />
+          <h2 className="text-base font-semibold text-gray-800 dark:text-gray-200 mb-4">Stage Conversion</h2>
+          <StageFunnel nodes={nodes} />
         </div>
         <div className={card}>
           <h2 className="text-base font-semibold text-gray-800 dark:text-gray-200 mb-4">Outcomes</h2>
@@ -405,10 +389,11 @@ export default function AnalyticsPanel() {
       </div>
 
       {/* Weekly activity */}
-      {weekly_activity?.length > 0 && (
+      {(pulse?.activity ?? weekly_activity)?.length > 0 && (
         <div className={card}>
-          <h2 className="text-base font-semibold text-gray-800 dark:text-gray-200 mb-4">Applications per Week</h2>
-          <WeeklyActivity data={weekly_activity} />
+          <h2 className="text-base font-semibold text-gray-800 dark:text-gray-200">Application Activity</h2>
+          <p className="mb-4 text-xs text-gray-400 dark:text-gray-500">Applied date shows search effort; captured date reveals delayed imports and backfills.</p>
+          <WeeklyActivity data={pulse?.activity ?? weekly_activity} />
         </div>
       )}
 

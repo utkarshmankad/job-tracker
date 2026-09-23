@@ -27,6 +27,7 @@ export const api = {
 
   getInsights: () => request("/insights"),
   getFlowData: () => request("/insights/flow"),
+  getSearchPulse: (windowDays = 28) => request(`/insights/pulse?window_days=${windowDays}`),
   getRejectionData: () => request("/insights/rejection"),
 
   getPollerStatus: () => request("/poller/status"),
