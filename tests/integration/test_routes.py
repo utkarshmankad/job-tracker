@@ -381,6 +381,23 @@ def test_insights_flow_endpoint(seeded_client):
     assert "kpis" in body
 
 
+def test_search_pulse_endpoint(seeded_client):
+    client, _ = seeded_client
+    resp = client.get(f"{_BASE}/insights/pulse?window_days=28")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["window_days"] == 28
+    assert "recent" in body
+    assert "matured_cohort" in body
+    assert "activity" in body
+
+
+def test_search_pulse_rejects_invalid_window(seeded_client):
+    client, _ = seeded_client
+    resp = client.get(f"{_BASE}/insights/pulse?window_days=14")
+    assert resp.status_code == 422
+
+
 def test_reauth_poller_endpoint(seeded_client):
     client, _ = seeded_client
     resp = client.post(f"{_BASE}/poller/reauth")

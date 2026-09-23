@@ -109,6 +109,74 @@ class InsightsEngine:
         apps, _ = self._db.get_applications(ApplicationFilter(page_size=10_000))
         return [a for a in apps if not a.is_false_positive]
 
+    def search_pulse(self, window_days: int = 28, maturity_days: int = 14) -> dict:
+        """Return recent activity and a fully matured comparison cohort."""
+        if window_days not in (7, 28, 90):
+            raise ValueError("window_days must be one of 7, 28, or 90")
+
+        apps = self._fetch_active_apps()
+        now = utc_now()
+        recent_start = now - timedelta(days=window_days)
+        cohort_end = now - timedelta(days=maturity_days)
+        cohort_start = cohort_end - timedelta(days=window_days)
+
+        recent = [a for a in apps if recent_start <= a.applied_date <= now]
+        captured_recent = [a for a in apps if recent_start <= a.created_at <= now]
+        matured = [a for a in apps if cohort_start <= a.applied_date < cohort_end]
+
+        app_ids = {a.id for a in apps if a.id is not None}
+        histories = self._db.get_status_history_for_apps(app_ids)
+        stages_by_app: dict[int, set[str]] = {}
+        for history in histories:
+            stages_by_app.setdefault(history.application_id, set()).add(history.to_status)
+
+        def stages_for(app: Application) -> set[str]:
+            stages = {app.current_status.value}
+            if app.id is not None:
+                stages |= stages_by_app.get(app.id, set())
+            return stages
+
+        def count_reached(group: list[Application], stages: frozenset[str]) -> int:
+            return sum(1 for app in group if stages_for(app) & stages)
+
+        response_values = frozenset(self._SHORTLISTED_VALUES | {ApplicationStatus.REJECTED.value})
+        responses = count_reached(matured, response_values)
+        shortlisted = count_reached(matured, self._SHORTLISTED_VALUES)
+        interviewed = count_reached(matured, self._INTERVIEWED_VALUES)
+        offered = count_reached(matured, self._OFFERED_VALUES)
+        matured_total = len(matured)
+        late_imports = sum(
+            1
+            for app in captured_recent
+            if (app.created_at.date() - app.applied_date.date()).days > 7
+        )
+
+        return {
+            "window_days": window_days,
+            "maturity_days": maturity_days,
+            "recent": {
+                "applications": len(recent),
+                "captured": len(captured_recent),
+                "interviews": count_reached(recent, self._INTERVIEWED_VALUES),
+                "offers": count_reached(recent, self._OFFERED_VALUES),
+                "late_imports": late_imports,
+            },
+            "matured_cohort": {
+                "start": cohort_start.date().isoformat(),
+                "end": cohort_end.date().isoformat(),
+                "applications": matured_total,
+                "responses": responses,
+                "shortlisted": shortlisted,
+                "interviewed": interviewed,
+                "offered": offered,
+                "response_rate": round(responses / matured_total, 4) if matured_total else None,
+                "shortlist_rate": round(shortlisted / matured_total, 4) if matured_total else None,
+                "interview_rate": round(interviewed / matured_total, 4) if matured_total else None,
+                "offer_rate": round(offered / matured_total, 4) if matured_total else None,
+            },
+            "activity": self._weekly_activity(apps, weeks=max(4, (window_days + 6) // 7)),
+        }
+
     def _funnel_counts(self, apps: list[Application]) -> dict[str, int]:
         counts: dict[str, int] = {s.value: 0 for s in ApplicationStatus}
         for app in apps:
@@ -306,26 +374,34 @@ class InsightsEngine:
             "insufficient_data": total < MIN_APPLICATIONS_FOR_INSIGHTS,
         }
 
-    def _weekly_activity(self, apps: list[Application]) -> list[dict]:
+    def _weekly_activity(self, apps: list[Application], weeks: int = 12) -> list[dict]:
         today = utc_now().date()
-        # Start from Monday of the week 11 weeks ago
-        start_monday = today - timedelta(weeks=11, days=today.weekday())
-        weeks = [start_monday + timedelta(weeks=i) for i in range(12)]
+        start_monday = today - timedelta(weeks=weeks - 1, days=today.weekday())
+        week_starts = [start_monday + timedelta(weeks=i) for i in range(weeks)]
 
-        counts: dict[date, int] = {w: 0 for w in weeks}
+        applied_counts: dict[date, int] = {w: 0 for w in week_starts}
+        captured_counts: dict[date, int] = {w: 0 for w in week_starts}
         for app in apps:
-            app_date = (
-                app.applied_date.date()
-                if isinstance(app.applied_date, datetime)
-                else app.applied_date
-            )
-            for i, week_start in enumerate(weeks):
-                week_end = week_start + timedelta(days=7)
-                if week_start <= app_date < week_end:
-                    counts[week_start] += 1
-                    break
+            for value, counts in (
+                (app.applied_date, applied_counts),
+                (app.created_at, captured_counts),
+            ):
+                app_date = value.date() if isinstance(value, datetime) else value
+                for week_start in week_starts:
+                    week_end = week_start + timedelta(days=7)
+                    if week_start <= app_date < week_end:
+                        counts[week_start] += 1
+                        break
 
-        return [{"week": w.isoformat(), "count": counts[w]} for w in weeks]
+        return [
+            {
+                "week": week.isoformat(),
+                "count": applied_counts[week],
+                "applied": applied_counts[week],
+                "captured": captured_counts[week],
+            }
+            for week in week_starts
+        ]
 
     # ------------------------------------------------------------------ #
     # Rejection analytics                                                  #

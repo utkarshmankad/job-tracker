@@ -883,6 +883,20 @@ async def get_insights_flow(request: Request) -> dict:
     return result
 
 
+@router.get("/insights/pulse")
+async def get_search_pulse(request: Request, window_days: int = 28) -> dict:
+    if window_days not in (7, 28, 90):
+        raise HTTPException(status_code=422, detail="window_days must be 7, 28, or 90")
+    cache_key = f"{_INSIGHTS_CACHE_PREFIX}pulse:{window_days}"
+    cached = cache.get_json(cache_key)
+    if cached is not None:
+        return cached
+    db: DataStore = request.app.state.db
+    result = InsightsEngine(db).search_pulse(window_days=window_days)
+    cache.set_json(cache_key, result, INSIGHTS_CACHE_TTL_SECONDS)
+    return result
+
+
 @router.get("/insights/rejection")
 async def get_rejection_data(request: Request) -> dict:
     cache_key = f"{_INSIGHTS_CACHE_PREFIX}rejection"
