@@ -17,3 +17,4 @@ frontend/dist/
 .mypy_cache/
 .coverage
 graphify-out/
+.vercel/

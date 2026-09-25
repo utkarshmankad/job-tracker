@@ -62,6 +62,13 @@ describe("App — icon button accessibility", () => {
     expect(screen.getByRole("button", { name: /add application/i })).toBeInTheDocument();
   });
 
+  it("shows the automatic deployment status", () => {
+    renderApp();
+    expect(
+      screen.getByText(/production updates automatically after changes pass ci on main/i)
+    ).toBeInTheDocument();
+  });
+
   it("dark mode toggle has an accessible label", () => {
     renderApp();
     expect(screen.getByRole("button", { name: /(dark|light) mode/i })).toBeInTheDocument();
