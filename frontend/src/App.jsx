@@ -249,6 +249,9 @@ export default function App() {
             onClose={() => setShowAddForm(false)}
           />
         )}
+        <footer className="mt-8 border-t border-gray-200 pt-4 text-center text-xs text-gray-400 dark:border-gray-800 dark:text-gray-500">
+          Production updates automatically after changes pass CI on main.
+        </footer>
       </div>
     </div>
   );
