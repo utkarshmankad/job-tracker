@@ -44,6 +44,8 @@ def _make_parsed(
     role: str = "Engineer",
     source_portal: str = "LinkedIn",
     thread_id: str = "t-new",
+    job_url: str | None = None,
+    status_signal: ApplicationStatus | None = None,
 ) -> ParsedApplication:
     return ParsedApplication(
         message_id="msg-new",
@@ -51,9 +53,9 @@ def _make_parsed(
         company=company,
         role=role,
         source_portal=source_portal,
-        job_url=None,
+        job_url=job_url,
         applied_date=utc_now(),
-        status_signal=None,
+        status_signal=status_signal,
         raw_sender="hr@acme.com",
         raw_subject=f"Your application at {company}",
         is_classification_confident=True,
@@ -112,17 +114,17 @@ def test_find_duplicate_empty_query_returns_none(tmp_path: Path) -> None:
 
 
 def test_find_duplicate_outside_lookup_window_not_matched(tmp_path: Path) -> None:
-    """Applications older than 90 days should not be considered for deduplication."""
+    """Applications older than 180 days should not be considered for deduplication."""
     db = _make_db(tmp_path)
-    _seed_app(db, company="OldCo", role="Engineer", days_ago=95)
+    _seed_app(db, company="OldCo", role="Engineer", days_ago=181)
     detector = DuplicateDetector(db)
 
     result = detector.find_duplicate(_make_parsed(company="OldCo", role="Engineer"))
     assert result is None
 
 
-def test_find_duplicate_filters_by_source_portal(tmp_path: Path) -> None:
-    """Candidates from a different source_portal are not considered."""
+def test_find_duplicate_matches_across_source_portals(tmp_path: Path) -> None:
+    """The same application can surface through a portal and a direct email."""
     db = _make_db(tmp_path)
     _seed_app(db, company="Acme", role="Engineer", source_portal="Naukri")
     detector = DuplicateDetector(db)
@@ -130,7 +132,52 @@ def test_find_duplicate_filters_by_source_portal(tmp_path: Path) -> None:
     result = detector.find_duplicate(
         _make_parsed(company="Acme", role="Engineer", source_portal="LinkedIn")
     )
-    assert result is None
+    assert result is not None
+
+
+def test_find_duplicate_matches_canonical_url(tmp_path: Path) -> None:
+    db = _make_db(tmp_path)
+    existing = _seed_app(db, company="Acme", role="Engineer")
+    existing.job_url = "https://jobs.example.com/123?utm_source=linkedin"
+    db.upsert_application(existing)
+
+    result = DuplicateDetector(db).find_duplicate(
+        _make_parsed(
+            company="Different extraction",
+            role="Different role",
+            job_url="https://jobs.example.com/123",
+        )
+    )
+    assert result is not None
+    assert result.id == existing.id
+
+
+def test_status_email_with_missing_role_matches_single_company_application(tmp_path: Path) -> None:
+    db = _make_db(tmp_path)
+    existing = _seed_app(db, company="Acme Pvt Ltd", role="Engineering Manager")
+
+    result = DuplicateDetector(db).find_duplicate(
+        _make_parsed(
+            company="Acme",
+            role="",
+            status_signal=ApplicationStatus.INTERVIEW_SCHEDULED,
+        )
+    )
+    assert result is not None
+    assert result.id == existing.id
+
+
+def test_duplicate_candidate_pairs_are_review_only(tmp_path: Path) -> None:
+    db = _make_db(tmp_path)
+    first = _seed_app(db, company="Acme Pvt Ltd", role="Engineer")
+    second = _seed_app(db, company="Acme", role="Engineer", source_portal="Naukri")
+
+    pairs = DuplicateDetector(db).find_candidate_pairs()
+
+    assert len(pairs) == 1
+    assert {pairs[0]["primary"].id, pairs[0]["duplicate"].id} == {first.id, second.id}
+    assert db.get_application(first.id) is not None
+    assert db.get_application(second.id) is not None
 
 
 def test_find_duplicate_same_portal_matched(tmp_path: Path) -> None:

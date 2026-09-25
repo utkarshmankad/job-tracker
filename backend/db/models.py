@@ -3,7 +3,7 @@
 import enum
 from datetime import UTC, datetime
 
-from sqlalchemy import Column
+from sqlalchemy import Column, String
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.types import DateTime, TypeDecorator
 from sqlmodel import Field, Relationship, SQLModel
@@ -52,6 +52,17 @@ class Application(SQLModel, table=True):
     company: str | None = None
     role: str | None = None
     source_portal: str = Field(index=True)
+    application_method: str = Field(
+        default="Unknown",
+        sa_column=Column(
+            "application_method",
+            String,
+            default="Unknown",
+            server_default="Unknown",
+            index=True,
+            nullable=False,
+        ),
+    )
     job_url: str | None = None
     applied_date: datetime = Field(index=True, sa_type=UTCDateTime)
     current_status: ApplicationStatus = Field(

@@ -24,6 +24,7 @@ from backend.config import (
 from backend.db.data_store import ApplicationFilter, DataStore, is_application_stale
 from backend.db.models import Application, ApplicationStatus, ProspectStatus, utc_now
 from backend.diagnostics import DiagnosticRunner
+from backend.engine.duplicate_detector import DuplicateDetector
 from backend.engine.insights_engine import InsightsEngine
 from backend.engine.status_updater import StatusUpdater
 
@@ -63,6 +64,7 @@ class ApplicationResponse(BaseModel):
     company: str | None
     role: str | None
     source_portal: str
+    application_method: str
     job_url: str | None
     applied_date: datetime
     current_status: ApplicationStatus
@@ -113,6 +115,11 @@ class ChannelStatResponse(BaseModel):
     shortlisted: int
     interviewed: int
     offered: int
+    responded: int
+    response_rate: float
+    median_response_days: float | None
+    applications_per_interview: float | None
+    confidence: str
 
 
 class ChannelInsightResponse(BaseModel):
@@ -124,6 +131,7 @@ class ChannelInsightResponse(BaseModel):
 class InsightReportResponse(BaseModel):
     funnel: dict[str, int]
     channels: list[ChannelStatResponse]
+    methods: list[ChannelStatResponse]
     insights: list[ChannelInsightResponse]
     total_applications: int
     insufficient_data: bool
@@ -199,6 +207,7 @@ class ApplicationCreate(BaseModel):
     company: str | None = None
     role: str | None = None
     source_portal: str
+    application_method: str = "Unknown"
     job_url: str | None = None
     applied_date: datetime
     current_status: ApplicationStatus = ApplicationStatus.APPLIED
@@ -208,10 +217,17 @@ class ApplicationPatch(BaseModel):
     current_status: ApplicationStatus | None = None
     company: str | None = None
     role: str | None = None
+    source_portal: str | None = None
+    application_method: str | None = None
     job_url: str | None = None
     applied_date: datetime | None = None
     is_false_positive: bool | None = None
     withdraw_reason: str | None = None
+
+
+class DuplicateMergeRequest(BaseModel):
+    primary_id: int
+    duplicate_id: int
 
 
 class BulkWithdrawRequest(BaseModel):
@@ -301,6 +317,7 @@ def _to_response(app: Application) -> ApplicationResponse:
         company=app.company,
         role=app.role,
         source_portal=app.source_portal,
+        application_method=app.application_method,
         job_url=app.job_url,
         applied_date=app.applied_date,
         current_status=app.current_status,
@@ -320,6 +337,7 @@ def _csv_rows(apps: list[Application]) -> str:
         "company",
         "role",
         "source_portal",
+        "application_method",
         "job_url",
         "applied_date",
         "current_status",
@@ -336,6 +354,7 @@ def _csv_rows(apps: list[Application]) -> str:
                 "company": app.company or "",
                 "role": app.role or "",
                 "source_portal": app.source_portal,
+                "application_method": app.application_method,
                 "job_url": app.job_url or "",
                 "applied_date": app.applied_date.isoformat(),
                 "current_status": app.current_status.value,
@@ -380,6 +399,7 @@ async def list_applications(
     request: Request,
     status: ApplicationStatus | None = None,
     source_portal: str | None = None,
+    application_method: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
     search: str | None = None,
@@ -399,6 +419,7 @@ async def list_applications(
     filters = ApplicationFilter(
         status=status,
         source_portal=source_portal,
+        application_method=application_method,
         date_from=date_from_dt,
         date_to=date_to_dt,
         search=search,
@@ -407,7 +428,7 @@ async def list_applications(
         page_size=page_size,
     )
     cache_key = (
-        f"{_APPLICATIONS_CACHE_PREFIX}{status}:{source_portal}:{date_from}:{date_to}:"
+        f"{_APPLICATIONS_CACHE_PREFIX}{status}:{source_portal}:{application_method}:{date_from}:{date_to}:"
         f"{search}:{is_stale}:{page}:{page_size}"
     )
     cached = cache.get_json(cache_key)
@@ -432,6 +453,7 @@ async def create_application(body: ApplicationCreate, request: Request) -> Appli
         company=body.company,
         role=body.role,
         source_portal=body.source_portal,
+        application_method=body.application_method,
         job_url=body.job_url,
         applied_date=body.applied_date,
         current_status=body.current_status,
@@ -440,6 +462,40 @@ async def create_application(body: ApplicationCreate, request: Request) -> Appli
     saved = db.upsert_application(app)
     _invalidate_applications_cache()
     return _to_response(saved)
+
+
+@router.get("/applications/meta/taxonomy")
+async def get_application_taxonomy(request: Request) -> dict[str, list[str]]:
+    db: DataStore = request.app.state.db
+    return db.get_application_taxonomy()
+
+
+@router.get("/applications/duplicates")
+async def list_duplicate_candidates(request: Request) -> list[dict]:
+    db: DataStore = request.app.state.db
+    detector = DuplicateDetector(db)
+    return [
+        {
+            "primary": _to_response(pair["primary"]).model_dump(mode="json"),
+            "duplicate": _to_response(pair["duplicate"]).model_dump(mode="json"),
+            "score": pair["score"],
+            "reasons": pair["reasons"],
+        }
+        for pair in detector.find_candidate_pairs()
+    ]
+
+
+@router.post("/applications/duplicates/merge", response_model=ApplicationResponse)
+async def merge_duplicate_applications(
+    body: DuplicateMergeRequest, request: Request
+) -> ApplicationResponse:
+    db: DataStore = request.app.state.db
+    try:
+        merged = db.merge_applications(body.primary_id, body.duplicate_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _invalidate_applications_cache()
+    return _to_response(merged)
 
 
 # NOTE: /applications/export must be registered before /applications/{id}
@@ -551,6 +607,12 @@ async def patch_application(
         needs_upsert = True
     if body.role is not None:
         app.role = body.role
+        needs_upsert = True
+    if body.source_portal is not None:
+        app.source_portal = body.source_portal
+        needs_upsert = True
+    if body.application_method is not None:
+        app.application_method = body.application_method
         needs_upsert = True
     if body.job_url is not None:
         app.job_url = body.job_url
@@ -911,7 +973,7 @@ async def get_rejection_data(request: Request) -> dict:
 
 @router.get("/insights", response_model=InsightReportResponse)
 async def get_insights(request: Request) -> InsightReportResponse:
-    cache_key = f"{_INSIGHTS_CACHE_PREFIX}report"
+    cache_key = f"{_INSIGHTS_CACHE_PREFIX}report:v2"
     cached = cache.get_json(cache_key)
     if cached is not None:
         return InsightReportResponse(**cached)
@@ -926,8 +988,28 @@ async def get_insights(request: Request) -> InsightReportResponse:
                 shortlisted=c.shortlisted,
                 interviewed=c.interviewed,
                 offered=c.offered,
+                responded=c.responded,
+                response_rate=c.response_rate(),
+                median_response_days=c.median_response_days,
+                applications_per_interview=c.applications_per_interview(),
+                confidence=c.confidence(),
             )
             for c in report.channels
+        ],
+        methods=[
+            ChannelStatResponse(
+                source=c.source,
+                total=c.total,
+                shortlisted=c.shortlisted,
+                interviewed=c.interviewed,
+                offered=c.offered,
+                responded=c.responded,
+                response_rate=c.response_rate(),
+                median_response_days=c.median_response_days,
+                applications_per_interview=c.applications_per_interview(),
+                confidence=c.confidence(),
+            )
+            for c in report.methods
         ],
         insights=[
             ChannelInsightResponse(source=i.source, flag=i.flag, message=i.message)

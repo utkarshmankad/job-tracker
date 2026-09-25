@@ -185,8 +185,12 @@ function ChannelTable({ channels }) {
         <tr className="border-b border-gray-100 dark:border-gray-700 text-left text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wider">
           <th className="pb-2 pr-4">Source</th>
           <th className="pb-2 pr-4">Apps</th>
+          <th className="pb-2 pr-4">Response %</th>
           <th className="pb-2 pr-4">Interview %</th>
           <th className="pb-2 pr-4">Offer %</th>
+          <th className="pb-2 pr-4">Apps / Interview</th>
+          <th className="pb-2 pr-4">Median Response</th>
+          <th className="pb-2 pr-4">Confidence</th>
           <th className="pb-2">Signal</th>
         </tr>
       </thead>
@@ -196,11 +200,17 @@ function ChannelTable({ channels }) {
             <td className="py-2 pr-4 font-medium text-gray-800 dark:text-gray-200">{ch.source}</td>
             <td className="py-2 pr-4 text-gray-600 dark:text-gray-400">{ch.application_count ?? ch.total}</td>
             <td className="py-2 pr-4 text-gray-600 dark:text-gray-400">
+              {ch.response_rate != null ? formatPercent(ch.response_rate) : "—"}
+            </td>
+            <td className="py-2 pr-4 text-gray-600 dark:text-gray-400">
               {ch.interview_rate != null ? formatPercent(ch.interview_rate) : "—"}
             </td>
             <td className="py-2 pr-4 text-gray-600 dark:text-gray-400">
               {ch.offer_rate != null ? formatPercent(ch.offer_rate) : "—"}
             </td>
+            <td className="py-2 pr-4 text-gray-600 dark:text-gray-400">{ch.applications_per_interview ?? "—"}</td>
+            <td className="py-2 pr-4 text-gray-600 dark:text-gray-400">{ch.median_response_days == null ? "—" : `${ch.median_response_days}d`}</td>
+            <td className="py-2 pr-4 text-gray-600 dark:text-gray-400 capitalize">{ch.confidence ?? "low"}</td>
             <td className="py-2">
               <SignalBadge signal={ch.signal ?? ch.flag} />
             </td>
@@ -335,6 +345,13 @@ export default function AnalyticsPanel() {
     offer_rate: c.total > 0 ? c.offered / c.total : null,
     signal: insights.insights?.find((ins) => ins.source === c.source)?.flag ?? "neutral",
   })) ?? [];
+  const methodData = insights?.methods?.map((method) => ({
+    ...method,
+    application_count: method.total,
+    interview_rate: method.total > 0 ? method.interviewed / method.total : null,
+    offer_rate: method.total > 0 ? method.offered / method.total : null,
+    signal: "neutral",
+  })) ?? [];
 
   const hasRejectionData = rejection && !rejection.insufficient_data;
 
@@ -402,6 +419,14 @@ export default function AnalyticsPanel() {
         <div className={card}>
           <h2 className="text-base font-semibold text-gray-800 dark:text-gray-200 mb-4">Channel Performance</h2>
           <ChannelTable channels={channelData} />
+        </div>
+      )}
+
+      {methodData.length > 0 && (
+        <div className={`${card} overflow-x-auto`}>
+          <h2 className="text-base font-semibold text-gray-800 dark:text-gray-200 mb-1">Application Method Performance</h2>
+          <p className="mb-4 text-xs text-gray-400">Low-confidence samples are descriptive only; wait for at least 15 applications before changing strategy.</p>
+          <ChannelTable channels={methodData} />
         </div>
       )}
 

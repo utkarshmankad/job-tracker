@@ -1,11 +1,13 @@
 import { useState, useEffect, useRef, useId } from "react";
 import { Search, X } from "lucide-react";
-import { STATUS_OPTIONS, SOURCE_PORTALS } from "../utils/constants";
+import { STATUS_OPTIONS, SOURCE_PORTALS, APPLICATION_METHODS } from "../utils/constants";
+import { api } from "../api/client";
 
 const EMPTY = {
   search: "",
   status: "",
   source_portal: "",
+  application_method: "",
   date_from: "",
   date_to: "",
   is_stale: null,
@@ -16,6 +18,7 @@ const inputCls =
 
 export default function Filters({ filters, onChange }) {
   const [searchDraft, setSearchDraft] = useState(filters.search || "");
+  const [taxonomy, setTaxonomy] = useState({ sources: SOURCE_PORTALS, methods: APPLICATION_METHODS });
   const timerRef = useRef(null);
   const onChangeRef = useRef(onChange);
   const filtersRef = useRef(filters);
@@ -28,17 +31,29 @@ export default function Filters({ filters, onChange }) {
   const searchId = `${uid}-search`;
   const statusId = `${uid}-status`;
   const sourceId = `${uid}-source`;
+  const methodId = `${uid}-method`;
   const dateFromId = `${uid}-date-from`;
   const dateToId = `${uid}-date-to`;
 
   const isActive =
-    !!filters.search || !!filters.status || !!filters.source_portal ||
+    !!filters.search || !!filters.status || !!filters.source_portal || !!filters.application_method ||
     !!filters.date_from || !!filters.date_to;
 
   // Sync draft when parent clears all filters
   useEffect(() => {
+    // Draft intentionally mirrors externally cleared filters.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setSearchDraft(filters.search || "");
   }, [filters.search]);
+
+  useEffect(() => {
+    api.getApplicationTaxonomy()
+      .then((data) => setTaxonomy({
+        sources: [...new Set([...SOURCE_PORTALS, ...(data.sources ?? [])])].sort(),
+        methods: [...new Set([...APPLICATION_METHODS, ...(data.methods ?? [])])],
+      }))
+      .catch(() => {});
+  }, []);
 
   const update = (key, value) => onChange({ ...filters, [key]: value });
   const clear = () => { setSearchDraft(""); onChange({ ...EMPTY }); };
@@ -104,10 +119,27 @@ export default function Filters({ filters, onChange }) {
           className={`${inputCls} w-40`}
         >
           <option value="">All</option>
-          {SOURCE_PORTALS.map((s) => (
+          {taxonomy.sources.map((s) => (
             <option key={s} value={s}>
               {s}
             </option>
+          ))}
+        </select>
+      </div>
+
+      <div className="flex flex-col gap-1">
+        <label htmlFor={methodId} className="text-xs text-gray-500 dark:text-gray-400">
+          Method
+        </label>
+        <select
+          id={methodId}
+          value={filters.application_method || ""}
+          onChange={(e) => update("application_method", e.target.value)}
+          className={`${inputCls} w-40`}
+        >
+          <option value="">All</option>
+          {taxonomy.methods.map((method) => (
+            <option key={method} value={method}>{method}</option>
           ))}
         </select>
       </div>
