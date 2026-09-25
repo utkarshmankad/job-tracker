@@ -12,12 +12,17 @@ export default function ProspectsInbox() {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [applications, setApplications] = useState([]);
+  const [selectedApplication, setSelectedApplication] = useState({});
 
   useEffect(() => {
     let active = true;
-    api.listProspects({ limit: 100 }).then(
-      (data) => {
-        if (active) setItems(data);
+    Promise.all([api.listProspects({ limit: 100 }), api.listApplications({ page_size: 500 })]).then(
+      ([data, appResult]) => {
+        if (active) {
+          setItems(data);
+          setApplications(appResult.items ?? []);
+        }
       },
       (e) => {
         if (active) setError(e.message);
@@ -28,9 +33,9 @@ export default function ProspectsInbox() {
     return () => { active = false; };
   }, []);
 
-  const setStatus = async (id, status) => {
+  const setStatus = async (id, status, applicationId = null) => {
     try {
-      const updated = await api.updateProspectStatus(id, status);
+      const updated = await api.updateProspectStatus(id, status, applicationId);
       setItems((current) => current.map((item) => item.id === id ? updated : item));
     } catch (e) {
       setError(e.message);
@@ -72,6 +77,16 @@ export default function ProspectsInbox() {
                     <p className="mt-2 text-xs text-gray-500">{item.classification_reason}</p>
                   </div>
                   <div className="flex shrink-0 gap-2">
+                    {item.status !== "Converted" && (
+                      <div className="flex flex-col gap-1">
+                        <select aria-label={`Link application for ${item.title}`} value={selectedApplication[item.id] ?? ""} onChange={(event) => setSelectedApplication((current) => ({ ...current, [item.id]: event.target.value }))} className="min-h-11 max-w-56 rounded-lg border bg-white px-2 text-sm dark:border-gray-700 dark:bg-gray-800">
+                          <option value="">Link to application…</option>
+                          {applications.map((application) => <option key={application.id} value={application.id}>{application.company || "Unknown"} — {application.role || "Unknown role"}</option>)}
+                        </select>
+                        <button disabled={!selectedApplication[item.id]} onClick={() => setStatus(item.id, "Converted", Number(selectedApplication[item.id]))} className="min-h-9 rounded-lg bg-emerald-600 px-3 text-sm font-medium text-white disabled:opacity-50">Mark converted</button>
+                      </div>
+                    )}
+                    {item.status === "Converted" && <span className="rounded-full bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-700">Linked to application #{item.application_id}</span>}
                     {item.status === "New" && (
                       <button onClick={() => setStatus(item.id, "Reviewed")} className="min-h-11 rounded-lg border px-3 text-sm font-medium dark:border-gray-700">Mark reviewed</button>
                     )}

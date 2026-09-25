@@ -43,8 +43,13 @@ export const api = {
 
   listProspects: (params = {}) =>
     request(`/prospects?${new URLSearchParams(params)}`),
-  updateProspectStatus: (id, status) =>
-    request(`/prospects/${id}`, { method: "PATCH", body: JSON.stringify({ status }) }),
+  updateProspectStatus: (id, status, applicationId = null) =>
+    request(`/prospects/${id}`, { method: "PATCH", body: JSON.stringify({ status, application_id: applicationId }) }),
+
+  listApplicationEvents: (applicationId) => request(`/applications/${applicationId}/events`),
+  createApplicationEvent: (applicationId, body) =>
+    request(`/applications/${applicationId}/events`, { method: "POST", body: JSON.stringify(body) }),
+  getConversionData: (months = 6) => request(`/insights/conversions?months=${months}`),
 
   bulkWithdraw: (companies) =>
     request("/applications/bulk-withdraw", { method: "POST", body: JSON.stringify({ companies }) }),
