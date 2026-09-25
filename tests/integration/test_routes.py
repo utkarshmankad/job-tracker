@@ -12,7 +12,7 @@ from starlette.testclient import TestClient
 
 from backend.config import STALE_DAYS_THRESHOLD
 from backend.db.data_store import DataStore
-from backend.db.models import Application, utc_now
+from backend.db.models import Application, Prospect, utc_now
 from backend.engine.duplicate_detector import DuplicateDetector
 from backend.engine.status_updater import StatusUpdater
 from backend.main import app
@@ -453,6 +453,73 @@ def test_search_pulse_rejects_invalid_window(seeded_client):
     client, _ = seeded_client
     resp = client.get(f"{_BASE}/insights/pulse?window_days=14")
     assert resp.status_code == 422
+
+
+def test_application_events_drive_interview_filter_and_conversion_report(seeded_client):
+    client, db = seeded_client
+    app = db.upsert_application(
+        Application(
+            company="Interview Co",
+            role="Director",
+            source_portal="Naukri",
+            application_method="Recruiter",
+            applied_date=utc_now(),
+        )
+    )
+    assert app.id is not None
+    created = client.post(
+        f"{_BASE}/applications/{app.id}/events",
+        json={
+            "event_type": "Interview Attended",
+            "interview_round": "Hiring Manager",
+            "occurred_at": utc_now().isoformat(),
+        },
+    )
+    assert created.status_code == 201
+    assert created.json()["interview_round"] == "Hiring Manager"
+
+    listed = client.get(f"{_BASE}/applications/{app.id}/events")
+    assert listed.status_code == 200
+    assert len(listed.json()) == 1
+
+    filtered = client.get(f"{_BASE}/applications?interviewed=true")
+    assert filtered.status_code == 200
+    assert [item["id"] for item in filtered.json()["items"]] == [app.id]
+
+    conversions = client.get(f"{_BASE}/insights/conversions?months=6")
+    assert conversions.status_code == 200
+    assert conversions.json()["interviews"]["attended_events"] == 1
+
+
+def test_prospect_can_link_to_converted_application(seeded_client):
+    client, db = seeded_client
+    app = db.upsert_application(
+        Application(
+            company="Converted Co",
+            role="Manager",
+            source_portal="LinkedIn",
+            applied_date=utc_now(),
+        )
+    )
+    prospect, _ = db.upsert_prospect(
+        Prospect(
+            category="recruiter_outreach",
+            title="Opportunity",
+            sender="recruiter@linkedin.com",
+            received_at=utc_now(),
+            gmail_message_id="link-prospect",
+            gmail_thread_id="link-thread",
+            classification_reason="test",
+        )
+    )
+    assert app.id is not None and prospect.id is not None
+
+    response = client.patch(
+        f"{_BASE}/prospects/{prospect.id}",
+        json={"status": "Converted", "application_id": app.id},
+    )
+    assert response.status_code == 200
+    assert response.json()["application_id"] == app.id
 
 
 def test_reauth_poller_endpoint(seeded_client):

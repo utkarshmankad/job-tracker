@@ -8,11 +8,28 @@ from datetime import datetime
 import structlog
 
 from backend.db.data_store import DataStore
-from backend.db.models import Application, ApplicationStatus, utc_now
+from backend.db.models import (
+    Application,
+    ApplicationEvent,
+    ApplicationEventType,
+    ApplicationStatus,
+    utc_now,
+)
 from backend.engine.duplicate_detector import DuplicateDetector
 from backend.parser.email_parser import ParsedApplication
 
 log = structlog.get_logger(__name__)
+
+_STATUS_EVENT_MAP = {
+    ApplicationStatus.APPLIED: ApplicationEventType.APPLICATION_SUBMITTED,
+    ApplicationStatus.RESUME_SHORTLISTED: ApplicationEventType.RECRUITER_RESPONSE,
+    ApplicationStatus.INTERVIEW_SCHEDULED: ApplicationEventType.INTERVIEW_SCHEDULED,
+    ApplicationStatus.INTERVIEW_IN_PROGRESS: ApplicationEventType.INTERVIEW_ATTENDED,
+    ApplicationStatus.OFFER_NEGOTIATION: ApplicationEventType.OFFER_RECEIVED,
+    ApplicationStatus.OFFER: ApplicationEventType.OFFER_RECEIVED,
+    ApplicationStatus.JOINED: ApplicationEventType.OFFER_RECEIVED,
+    ApplicationStatus.REJECTED: ApplicationEventType.REJECTED,
+}
 
 # Forward-only transitions valid for automated (email) signals.
 # Allow skipping stages because emails are processed newest-first during backfill,
@@ -118,12 +135,36 @@ class StatusUpdater:
         record.current_status = signal
         record.updated_at = utc_now()
         self._db.upsert_application(record)
-        self._db.append_status_history(
+        history = self._db.append_status_history(
             application_id=record.id,
             from_status=from_val,
             to_status=signal.value,
             trigger="email",
             message_id=message_id,
+        )
+        self._record_status_event(record.id, signal, record.updated_at, message_id, history.id)
+
+    def _record_status_event(
+        self,
+        application_id: int,
+        status: ApplicationStatus,
+        occurred_at: datetime,
+        message_id: str | None,
+        status_history_id: int | None,
+        source: str = "email",
+    ) -> None:
+        event_type = _STATUS_EVENT_MAP.get(status)
+        if event_type is None:
+            return
+        self._db.add_application_event(
+            ApplicationEvent(
+                application_id=application_id,
+                event_type=event_type,
+                occurred_at=occurred_at,
+                source=source,
+                source_message_id=message_id,
+                status_history_id=status_history_id,
+            )
         )
 
     def _create_new(self, parsed: ParsedApplication) -> Application:
@@ -143,12 +184,19 @@ class StatusUpdater:
         )
         saved = self._db.upsert_application(app)
         assert saved.id is not None
-        self._db.append_status_history(
+        history = self._db.append_status_history(
             application_id=saved.id,
             from_status=None,
             to_status=ApplicationStatus.APPLIED.value,
             trigger="email",
             message_id=parsed.message_id,
+        )
+        self._record_status_event(
+            saved.id,
+            ApplicationStatus.APPLIED,
+            parsed.applied_date,
+            parsed.message_id,
+            history.id,
         )
         if parsed.status_signal is not None:
             self._advance_status(saved, parsed.status_signal, parsed.message_id)
@@ -181,12 +229,20 @@ class StatusUpdater:
         )
         saved = self._db.upsert_application(app)
         assert saved.id is not None
-        self._db.append_status_history(
+        history = self._db.append_status_history(
             application_id=saved.id,
             from_status=None,
             to_status=ApplicationStatus.APPLIED.value,
             trigger="manual",
             message_id=None,
+        )
+        self._record_status_event(
+            saved.id,
+            ApplicationStatus.APPLIED,
+            applied_date,
+            None,
+            history.id,
+            source="manual",
         )
         if target_status != ApplicationStatus.APPLIED:
             saved = self.manual_update(saved.id, target_status)
@@ -210,11 +266,19 @@ class StatusUpdater:
         elif record.withdraw_reason is not None:
             record.withdraw_reason = None
         updated = self._db.upsert_application(record)
-        self._db.append_status_history(
+        history = self._db.append_status_history(
             application_id=application_id,
             from_status=from_val,
             to_status=new_status.value,
             trigger="manual",
             message_id=None,
+        )
+        self._record_status_event(
+            application_id,
+            new_status,
+            updated.updated_at,
+            None,
+            history.id,
+            source="manual",
         )
         return updated

@@ -8,7 +8,14 @@ from pathlib import Path
 import pytest
 
 from backend.db.data_store import DataStore
-from backend.db.models import Application, ApplicationStatus, utc_now
+from backend.db.models import (
+    Application,
+    ApplicationEvent,
+    ApplicationEventType,
+    ApplicationStatus,
+    Prospect,
+    utc_now,
+)
 from backend.engine.insights_engine import ChannelStat, InsightsEngine
 
 # --------------------------------------------------------------------------- #
@@ -312,6 +319,56 @@ def test_search_pulse_rejects_unsupported_window(tmp_path: Path) -> None:
         assert "7, 28, or 90" in str(exc)
     else:
         raise AssertionError("Expected unsupported window to be rejected")
+
+
+def test_conversion_data_counts_opportunities_interviews_and_outcomes(tmp_path: Path) -> None:
+    db = _make_db(tmp_path)
+    offered = _seed_app(db, source_portal="Naukri", status=ApplicationStatus.OFFER)
+    rejected = _seed_app(db, source_portal="LinkedIn", status=ApplicationStatus.REJECTED)
+    assert offered.id is not None and rejected.id is not None
+    for app in (offered, rejected):
+        db.add_application_event(
+            ApplicationEvent(
+                application_id=app.id,
+                event_type=ApplicationEventType.INTERVIEW_ATTENDED,
+                occurred_at=utc_now() - timedelta(days=5),
+                source="email",
+            )
+        )
+    db.upsert_prospect(
+        Prospect(
+            category="recruiter_outreach",
+            title="Naukri opportunity",
+            sender="recruiter@example.com",
+            received_at=utc_now() - timedelta(days=10),
+            gmail_message_id="prospect-1",
+            gmail_thread_id="thread-1",
+            classification_reason="test",
+            application_id=offered.id,
+        )
+    )
+    db.upsert_prospect(
+        Prospect(
+            category="recruiter_outreach",
+            title="Unconverted opportunity",
+            sender="recruiter@example.com",
+            received_at=utc_now() - timedelta(days=10),
+            gmail_message_id="prospect-2",
+            gmail_thread_id="thread-2",
+            classification_reason="test",
+        )
+    )
+
+    result = InsightsEngine(db).conversion_data(months=6)
+
+    assert result["opportunities"]["received"] == 2
+    assert result["opportunities"]["converted_to_application"] == 1
+    assert result["opportunities"]["converted_to_interview"] == 1
+    assert result["opportunities"]["converted_to_offer"] == 1
+    assert result["interviews"]["attended_events"] == 2
+    assert result["interviews"]["interviewed_applications"] == 2
+    assert result["interviews"]["outcomes"]["offer"] == 1
+    assert result["interviews"]["outcomes"]["rejected"] == 1
 
 
 # --------------------------------------------------------------------------- #
