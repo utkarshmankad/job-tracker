@@ -11,6 +11,8 @@ const EMPTY = {
   date_from: "",
   date_to: "",
   is_stale: null,
+  interviewed: null,
+  outcome: "",
 };
 
 const inputCls =
@@ -34,10 +36,12 @@ export default function Filters({ filters, onChange }) {
   const methodId = `${uid}-method`;
   const dateFromId = `${uid}-date-from`;
   const dateToId = `${uid}-date-to`;
+  const interviewedId = `${uid}-interviewed`;
+  const outcomeId = `${uid}-outcome`;
 
   const isActive =
     !!filters.search || !!filters.status || !!filters.source_portal || !!filters.application_method ||
-    !!filters.date_from || !!filters.date_to;
+    !!filters.date_from || !!filters.date_to || filters.interviewed != null || !!filters.outcome;
 
   // Sync draft when parent clears all filters
   useEffect(() => {
@@ -174,6 +178,26 @@ export default function Filters({ filters, onChange }) {
           />
         </div>
       </fieldset>
+
+      <div className="flex flex-col gap-1">
+        <label htmlFor={interviewedId} className="text-xs text-gray-500 dark:text-gray-400">Interview attended</label>
+        <select id={interviewedId} value={filters.interviewed == null ? "" : String(filters.interviewed)} onChange={(e) => update("interviewed", e.target.value === "" ? null : e.target.value === "true")} className={`${inputCls} w-36`}>
+          <option value="">All</option>
+          <option value="true">Yes</option>
+          <option value="false">No</option>
+        </select>
+      </div>
+
+      <div className="flex flex-col gap-1">
+        <label htmlFor={outcomeId} className="text-xs text-gray-500 dark:text-gray-400">Outcome</label>
+        <select id={outcomeId} value={filters.outcome || ""} onChange={(e) => update("outcome", e.target.value)} className={`${inputCls} w-36`}>
+          <option value="">All</option>
+          <option value="active">Active</option>
+          <option value="offer">Offer / Joined</option>
+          <option value="rejected">Rejected</option>
+          <option value="withdrawn">Withdrawn</option>
+        </select>
+      </div>
 
       {isActive && (
         <button

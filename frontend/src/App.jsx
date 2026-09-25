@@ -14,6 +14,7 @@ import AnalyticsPanel from "./components/AnalyticsPanel";
 import StatusPage from "./components/StatusPage";
 import ProspectsInbox from "./components/ProspectsInbox";
 import DataQualityPanel from "./components/DataQualityPanel";
+import ConversionPanel from "./components/ConversionPanel";
 // LinkedIn import/withdraw tools removed — see CLAUDE.md task; endpoints in
 // backend/api/routes.py (linkedin_import_preview/confirmed) are now unused
 // by the UI but left intact server-side.
@@ -192,6 +193,7 @@ export default function App() {
         {visitedTabs.has("home") && (
           <div className={activeTab === "home" ? "" : "hidden"}>
             <AnalyticsPanel />
+            <div className="mt-6"><ConversionPanel /></div>
           </div>
         )}
         {visitedTabs.has("applications") && (

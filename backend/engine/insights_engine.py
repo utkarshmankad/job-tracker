@@ -10,7 +10,13 @@ import structlog
 
 from backend.config import INTERVIEW_RATE_GREEN_THRESHOLD, MIN_APPLICATIONS_FOR_INSIGHTS
 from backend.db.data_store import ApplicationFilter, DataStore, is_application_stale
-from backend.db.models import Application, ApplicationStatus, StatusHistory, utc_now
+from backend.db.models import (
+    Application,
+    ApplicationEventType,
+    ApplicationStatus,
+    StatusHistory,
+    utc_now,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -443,6 +449,104 @@ class InsightsEngine:
             }
             for week in week_starts
         ]
+
+    # ------------------------------------------------------------------ #
+    # Opportunity and interview conversion                                #
+    # ------------------------------------------------------------------ #
+
+    def conversion_data(self, months: int = 6) -> dict:
+        if months not in (1, 3, 6, 12):
+            raise ValueError("months must be one of 1, 3, 6, or 12")
+        cutoff = utc_now() - timedelta(days=months * 30)
+        apps = self._fetch_active_apps()
+        apps_by_id = {app.id: app for app in apps if app.id is not None}
+        events = self._db.get_application_events_for_apps(set(apps_by_id))
+
+        attended_events = [
+            event
+            for event in events
+            if event.event_type == ApplicationEventType.INTERVIEW_ATTENDED
+            and event.occurred_at >= cutoff
+        ]
+        interviewed_ids = {event.application_id for event in attended_events}
+        interviewed_apps = [
+            apps_by_id[app_id] for app_id in interviewed_ids if app_id in apps_by_id
+        ]
+
+        outcomes = {"offer": 0, "rejected": 0, "withdrawn": 0, "active": 0}
+        for app in interviewed_apps:
+            if app.current_status in _OFFER_STAGES:
+                outcomes["offer"] += 1
+            elif app.current_status == ApplicationStatus.REJECTED:
+                outcomes["rejected"] += 1
+            elif app.current_status == ApplicationStatus.WITHDRAWN:
+                outcomes["withdrawn"] += 1
+            else:
+                outcomes["active"] += 1
+
+        def breakdown(field: str) -> list[dict]:
+            groups: dict[str, list[Application]] = {}
+            for app in interviewed_apps:
+                groups.setdefault(getattr(app, field) or "Unknown", []).append(app)
+            return [
+                {
+                    "name": name,
+                    "interviewed_applications": len(group),
+                    "offers": sum(1 for app in group if app.current_status in _OFFER_STAGES),
+                    "rejections": sum(
+                        1 for app in group if app.current_status == ApplicationStatus.REJECTED
+                    ),
+                    "offer_rate": round(
+                        sum(1 for app in group if app.current_status in _OFFER_STAGES) / len(group),
+                        4,
+                    ),
+                }
+                for name, group in sorted(groups.items())
+            ]
+
+        prospects = [
+            prospect
+            for prospect in self._db.get_prospects(limit=10_000)
+            if prospect.received_at >= cutoff
+        ]
+        converted = [
+            prospect
+            for prospect in prospects
+            if prospect.application_id is not None and prospect.application_id in apps_by_id
+        ]
+        converted_apps: list[Application] = []
+        for prospect in converted:
+            assert prospect.application_id is not None
+            converted_apps.append(apps_by_id[prospect.application_id])
+        converted_interviews = sum(1 for app in converted_apps if app.id in interviewed_ids)
+        converted_offers = sum(1 for app in converted_apps if app.current_status in _OFFER_STAGES)
+
+        return {
+            "months": months,
+            "from": cutoff.date().isoformat(),
+            "opportunities": {
+                "received": len(prospects),
+                "converted_to_application": len(converted),
+                "converted_to_interview": converted_interviews,
+                "converted_to_offer": converted_offers,
+                "application_conversion_rate": round(len(converted) / len(prospects), 4)
+                if prospects
+                else None,
+            },
+            "interviews": {
+                "attended_events": len(attended_events),
+                "interviewed_applications": len(interviewed_apps),
+                "outcomes": outcomes,
+                "offer_rate": round(outcomes["offer"] / len(interviewed_apps), 4)
+                if interviewed_apps
+                else None,
+                "rejection_rate": round(outcomes["rejected"] / len(interviewed_apps), 4)
+                if interviewed_apps
+                else None,
+            },
+            "by_source": breakdown("source_portal"),
+            "by_method": breakdown("application_method"),
+        }
 
     # ------------------------------------------------------------------ #
     # Rejection analytics                                                  #

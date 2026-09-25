@@ -14,6 +14,8 @@ from sqlmodel import Session, SQLModel, col, create_engine, select
 from backend.config import DB_PATH, STALE_DAYS_THRESHOLD
 from backend.db.models import (
     Application,
+    ApplicationEvent,
+    ApplicationEventType,
     ApplicationStatus,
     ApplicationThreadId,
     PollerState,
@@ -56,6 +58,8 @@ class ApplicationFilter:
     date_to: datetime | None = None
     search: str | None = None  # matches company or role (case-insensitive)
     is_stale: bool | None = None
+    interviewed: bool | None = None
+    outcome: str | None = None
     page: int = 1
     page_size: int = 50
 
@@ -79,6 +83,7 @@ class DataStore:
         self._migrate_schema()
         self._ensure_poller_state()
         self._backfill_thread_id_index()
+        self._backfill_application_events()
 
     def _migrate_schema(self) -> None:
         # Column introspection uses SQLAlchemy Core's inspect() — no raw SQL needed.
@@ -105,7 +110,45 @@ class DataStore:
                     "WHERE source_portal = 'Instahire'"
                 )
             )
+            prospect_cols = {c["name"] for c in inspect(conn).get_columns("prospect")}
+            if "application_id" not in prospect_cols:
+                conn.execute(text("ALTER TABLE prospect ADD COLUMN application_id INTEGER"))
             conn.commit()
+
+    def _backfill_application_events(self) -> None:
+        """Create idempotent milestone events from existing status history."""
+        mapping = {
+            ApplicationStatus.APPLIED.value: ApplicationEventType.APPLICATION_SUBMITTED,
+            ApplicationStatus.RESUME_SHORTLISTED.value: ApplicationEventType.RECRUITER_RESPONSE,
+            ApplicationStatus.INTERVIEW_SCHEDULED.value: ApplicationEventType.INTERVIEW_SCHEDULED,
+            ApplicationStatus.INTERVIEW_IN_PROGRESS.value: ApplicationEventType.INTERVIEW_ATTENDED,
+            ApplicationStatus.OFFER_NEGOTIATION.value: ApplicationEventType.OFFER_RECEIVED,
+            ApplicationStatus.OFFER.value: ApplicationEventType.OFFER_RECEIVED,
+            ApplicationStatus.JOINED.value: ApplicationEventType.OFFER_RECEIVED,
+            ApplicationStatus.REJECTED.value: ApplicationEventType.REJECTED,
+        }
+        with Session(self._engine) as session:
+            existing_history_ids = set(
+                session.exec(
+                    select(ApplicationEvent.status_history_id).where(
+                        col(ApplicationEvent.status_history_id).is_not(None)
+                    )
+                ).all()
+            )
+            for history in session.exec(select(StatusHistory)).all():
+                if history.id in existing_history_ids or history.to_status not in mapping:
+                    continue
+                session.add(
+                    ApplicationEvent(
+                        application_id=history.application_id,
+                        event_type=mapping[history.to_status],
+                        occurred_at=history.changed_at,
+                        source="backfill",
+                        source_message_id=history.message_id,
+                        status_history_id=history.id,
+                    )
+                )
+            session.commit()
 
     def _backfill_thread_id_index(self) -> None:
         """One-time backfill for DBs created before ApplicationThreadId existed — populates
@@ -190,17 +233,63 @@ class DataStore:
             stmt = stmt.order_by(col(Prospect.received_at).desc()).limit(limit)
             return list(session.exec(stmt).all())
 
-    def update_prospect_status(self, prospect_id: int, status: ProspectStatus) -> Prospect:
+    def update_prospect_status(
+        self,
+        prospect_id: int,
+        status: ProspectStatus,
+        application_id: int | None = None,
+    ) -> Prospect:
         with Session(self._engine, expire_on_commit=False) as session:
             prospect = session.get(Prospect, prospect_id)
             if prospect is None:
                 raise ValueError(f"Prospect {prospect_id} not found")
             prospect.status = status
+            if application_id is not None:
+                if session.get(Application, application_id) is None:
+                    raise ValueError(f"Application {application_id} not found")
+                prospect.application_id = application_id
             prospect.updated_at = utc_now()
             session.add(prospect)
             session.commit()
             session.refresh(prospect)
             return prospect
+
+    # ------------------------------------------------------------------ #
+    # Application events                                                   #
+    # ------------------------------------------------------------------ #
+
+    def add_application_event(self, event: ApplicationEvent) -> ApplicationEvent:
+        with Session(self._engine, expire_on_commit=False) as session:
+            if session.get(Application, event.application_id) is None:
+                raise ValueError(f"Application {event.application_id} not found")
+            if event.status_history_id is not None:
+                existing = session.exec(
+                    select(ApplicationEvent).where(
+                        ApplicationEvent.status_history_id == event.status_history_id
+                    )
+                ).first()
+                if existing is not None:
+                    return existing
+            session.add(event)
+            session.commit()
+            session.refresh(event)
+            return event
+
+    def get_application_events(self, application_id: int) -> list[ApplicationEvent]:
+        with Session(self._engine, expire_on_commit=False) as session:
+            stmt = (
+                select(ApplicationEvent)
+                .where(ApplicationEvent.application_id == application_id)
+                .order_by(col(ApplicationEvent.occurred_at))
+            )
+            return list(session.exec(stmt).all())
+
+    def get_application_events_for_apps(self, app_ids: set[int]) -> list[ApplicationEvent]:
+        if not app_ids:
+            return []
+        with Session(self._engine, expire_on_commit=False) as session:
+            stmt = select(ApplicationEvent).where(col(ApplicationEvent.application_id).in_(app_ids))
+            return list(session.exec(stmt).all())
 
     def _sync_thread_ids(
         self, session: Session, application_id: int | None, thread_ids_json: str | None
@@ -260,6 +349,30 @@ class DataStore:
                         & (col(Application.applied_date) < stale_cutoff)
                     )
                 )
+            if filters.interviewed is not None:
+                attended_ids = select(ApplicationEvent.application_id).where(
+                    ApplicationEvent.event_type == ApplicationEventType.INTERVIEW_ATTENDED
+                )
+                if filters.interviewed:
+                    conditions.append(col(Application.id).in_(attended_ids))
+                else:
+                    conditions.append(col(Application.id).notin_(attended_ids))
+            if filters.outcome is not None:
+                outcome_statuses = {
+                    "offer": [ApplicationStatus.OFFER, ApplicationStatus.JOINED],
+                    "rejected": [ApplicationStatus.REJECTED],
+                    "withdrawn": [ApplicationStatus.WITHDRAWN],
+                    "active": [
+                        ApplicationStatus.APPLIED,
+                        ApplicationStatus.RESUME_SHORTLISTED,
+                        ApplicationStatus.INTERVIEW_SCHEDULED,
+                        ApplicationStatus.INTERVIEW_IN_PROGRESS,
+                        ApplicationStatus.OFFER_NEGOTIATION,
+                    ],
+                }
+                statuses = outcome_statuses.get(filters.outcome.lower())
+                if statuses:
+                    conditions.append(col(Application.current_status).in_(statuses))
 
             base_stmt = select(Application)
             for cond in conditions:
@@ -401,6 +514,15 @@ class DataStore:
                 select(ApplicationThreadId).where(ApplicationThreadId.application_id == id)
             ).all():
                 session.delete(thread_row)
+            for event_row in session.exec(
+                select(ApplicationEvent).where(ApplicationEvent.application_id == id)
+            ).all():
+                session.delete(event_row)
+            for prospect in session.exec(
+                select(Prospect).where(Prospect.application_id == id)
+            ).all():
+                prospect.application_id = None
+                session.add(prospect)
             # Flush child deletes before deleting the parent — SQLAlchemy's unit-of-work
             # dependency sort doesn't reliably order these plain foreign_key=... columns
             # (no relationship()) ahead of the parent delete in the same flush, which trips
@@ -455,6 +577,16 @@ class DataStore:
             ).all():
                 history.application_id = primary_id
                 session.add(history)
+            for application_event in session.exec(
+                select(ApplicationEvent).where(ApplicationEvent.application_id == duplicate_id)
+            ).all():
+                application_event.application_id = primary_id
+                session.add(application_event)
+            for prospect in session.exec(
+                select(Prospect).where(Prospect.application_id == duplicate_id)
+            ).all():
+                prospect.application_id = primary_id
+                session.add(prospect)
             for thread_link in session.exec(
                 select(ApplicationThreadId).where(
                     ApplicationThreadId.application_id == duplicate_id
@@ -480,8 +612,8 @@ class DataStore:
         to_status: str,
         trigger: str,
         message_id: str | None = None,
-    ) -> None:
-        with Session(self._engine) as session:
+    ) -> StatusHistory:
+        with Session(self._engine, expire_on_commit=False) as session:
             entry = StatusHistory(
                 application_id=application_id,
                 from_status=from_status,
@@ -491,6 +623,8 @@ class DataStore:
             )
             session.add(entry)
             session.commit()
+            session.refresh(entry)
+            return entry
 
     def get_status_history(self, application_id: int) -> list[StatusHistory]:
         with Session(self._engine, expire_on_commit=False) as session:

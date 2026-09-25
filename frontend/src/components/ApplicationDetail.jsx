@@ -4,6 +4,7 @@ import { api } from "../api/client";
 import { STATUS_OPTIONS, STATUS_COLORS, SOURCE_PORTALS, APPLICATION_METHODS } from "../utils/constants";
 import { formatDate } from "../utils/formatters";
 import { useModalA11y } from "../hooks/useModalA11y";
+import ApplicationEvents from "./ApplicationEvents";
 
 const inputCls =
   "border border-gray-300 dark:border-gray-600 rounded px-2 py-1 text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 w-full";
@@ -348,6 +349,8 @@ export default function ApplicationDetail({ applicationId, onClose, onDelete }) 
                   </button>
                 </div>
               )}
+
+              <ApplicationEvents applicationId={applicationId} />
 
               <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">
                 Status History

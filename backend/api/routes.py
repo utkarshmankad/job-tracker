@@ -22,7 +22,15 @@ from backend.config import (
     REEXTRACT_BATCH_LIMIT,
 )
 from backend.db.data_store import ApplicationFilter, DataStore, is_application_stale
-from backend.db.models import Application, ApplicationStatus, ProspectStatus, utc_now
+from backend.db.models import (
+    Application,
+    ApplicationEvent,
+    ApplicationEventType,
+    ApplicationStatus,
+    InterviewRound,
+    ProspectStatus,
+    utc_now,
+)
 from backend.diagnostics import DiagnosticRunner
 from backend.engine.duplicate_detector import DuplicateDetector
 from backend.engine.insights_engine import InsightsEngine
@@ -99,6 +107,7 @@ class ProspectResponse(BaseModel):
     received_at: datetime
     gmail_message_id: str
     gmail_thread_id: str
+    application_id: int | None
     status: ProspectStatus
     classification_reason: str
     created_at: datetime
@@ -107,6 +116,27 @@ class ProspectResponse(BaseModel):
 
 class ProspectStatusPatch(BaseModel):
     status: ProspectStatus
+    application_id: int | None = None
+
+
+class ApplicationEventResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    application_id: int
+    event_type: ApplicationEventType
+    occurred_at: datetime
+    interview_round: InterviewRound | None
+    source: str
+    source_message_id: str | None
+    notes: str | None
+
+
+class ApplicationEventCreate(BaseModel):
+    event_type: ApplicationEventType
+    occurred_at: datetime
+    interview_round: InterviewRound | None = None
+    notes: str | None = None
 
 
 class ChannelStatResponse(BaseModel):
@@ -388,10 +418,65 @@ async def update_prospect_status(
 ) -> ProspectResponse:
     db: DataStore = request.app.state.db
     try:
-        prospect = db.update_prospect_status(prospect_id, body.status)
+        prospect = db.update_prospect_status(
+            prospect_id, body.status, application_id=body.application_id
+        )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return ProspectResponse.model_validate(prospect)
+
+
+@router.get(
+    "/applications/{application_id}/events",
+    response_model=list[ApplicationEventResponse],
+)
+async def list_application_events(
+    application_id: int, request: Request
+) -> list[ApplicationEventResponse]:
+    db: DataStore = request.app.state.db
+    if db.get_application(application_id) is None:
+        raise HTTPException(status_code=404, detail="Application not found")
+    return [
+        ApplicationEventResponse.model_validate(event)
+        for event in db.get_application_events(application_id)
+    ]
+
+
+@router.post(
+    "/applications/{application_id}/events",
+    response_model=ApplicationEventResponse,
+    status_code=201,
+)
+async def create_application_event(
+    application_id: int, body: ApplicationEventCreate, request: Request
+) -> ApplicationEventResponse:
+    if (
+        body.event_type
+        in (
+            ApplicationEventType.INTERVIEW_SCHEDULED,
+            ApplicationEventType.INTERVIEW_ATTENDED,
+            ApplicationEventType.INTERVIEW_RESCHEDULED,
+            ApplicationEventType.INTERVIEW_CANCELLED,
+        )
+        and body.interview_round is None
+    ):
+        raise HTTPException(status_code=422, detail="Interview round is required")
+    db: DataStore = request.app.state.db
+    try:
+        event = db.add_application_event(
+            ApplicationEvent(
+                application_id=application_id,
+                event_type=body.event_type,
+                occurred_at=body.occurred_at,
+                interview_round=body.interview_round,
+                source="manual",
+                notes=body.notes,
+            )
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _invalidate_applications_cache()
+    return ApplicationEventResponse.model_validate(event)
 
 
 @router.get("/applications", response_model=ApplicationListResponse)
@@ -404,6 +489,8 @@ async def list_applications(
     date_to: str | None = None,
     search: str | None = None,
     is_stale: bool | None = None,
+    interviewed: bool | None = None,
+    outcome: str | None = Query(default=None, pattern="^(active|offer|rejected|withdrawn)$"),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=500),
 ) -> ApplicationListResponse:
@@ -424,12 +511,14 @@ async def list_applications(
         date_to=date_to_dt,
         search=search,
         is_stale=is_stale,
+        interviewed=interviewed,
+        outcome=outcome,
         page=page,
         page_size=page_size,
     )
     cache_key = (
         f"{_APPLICATIONS_CACHE_PREFIX}{status}:{source_portal}:{application_method}:{date_from}:{date_to}:"
-        f"{search}:{is_stale}:{page}:{page_size}"
+        f"{search}:{is_stale}:{interviewed}:{outcome}:{page}:{page_size}"
     )
     cached = cache.get_json(cache_key)
     if cached is not None:
@@ -967,6 +1056,20 @@ async def get_rejection_data(request: Request) -> dict:
         return cached
     db: DataStore = request.app.state.db
     result = InsightsEngine(db).rejection_data()
+    cache.set_json(cache_key, result, INSIGHTS_CACHE_TTL_SECONDS)
+    return result
+
+
+@router.get("/insights/conversions")
+async def get_conversion_data(request: Request, months: int = 6) -> dict:
+    if months not in (1, 3, 6, 12):
+        raise HTTPException(status_code=422, detail="months must be 1, 3, 6, or 12")
+    cache_key = f"{_INSIGHTS_CACHE_PREFIX}conversions:{months}"
+    cached = cache.get_json(cache_key)
+    if cached is not None:
+        return cached
+    db: DataStore = request.app.state.db
+    result = InsightsEngine(db).conversion_data(months)
     cache.set_json(cache_key, result, INSIGHTS_CACHE_TTL_SECONDS)
     return result
 

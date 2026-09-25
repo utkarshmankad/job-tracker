@@ -94,6 +94,55 @@ class StatusHistory(SQLModel, table=True):
     application: Application | None = Relationship(back_populates="status_history")
 
 
+class ApplicationEventType(str, enum.Enum):
+    APPLICATION_SUBMITTED = "Application Submitted"
+    RECRUITER_RESPONSE = "Recruiter Response"
+    INTERVIEW_SCHEDULED = "Interview Scheduled"
+    INTERVIEW_ATTENDED = "Interview Attended"
+    INTERVIEW_RESCHEDULED = "Interview Rescheduled"
+    INTERVIEW_CANCELLED = "Interview Cancelled"
+    OFFER_RECEIVED = "Offer Received"
+    REJECTED = "Rejected"
+
+
+class InterviewRound(str, enum.Enum):
+    RECRUITER_SCREEN = "Recruiter Screen"
+    HIRING_MANAGER = "Hiring Manager"
+    TECHNICAL = "Technical / System Design"
+    LEADERSHIP = "Leadership / Behavioural"
+    EXECUTIVE_FINAL = "Executive / Final"
+    OTHER = "Other"
+
+
+class ApplicationEvent(SQLModel, table=True):
+    """A distinct milestone; interview rounds are events, not applications."""
+
+    id: int | None = Field(default=None, primary_key=True)
+    application_id: int = Field(foreign_key="application.id", index=True)
+    event_type: ApplicationEventType = Field(
+        sa_column=Column(
+            "event_type",
+            SAEnum(ApplicationEventType, values_callable=lambda obj: [e.value for e in obj]),
+            index=True,
+            nullable=False,
+        )
+    )
+    occurred_at: datetime = Field(index=True, sa_type=UTCDateTime)
+    interview_round: InterviewRound | None = Field(
+        default=None,
+        sa_column=Column(
+            "interview_round",
+            SAEnum(InterviewRound, values_callable=lambda obj: [e.value for e in obj]),
+            nullable=True,
+        ),
+    )
+    source: str = "email"  # email | manual | backfill | calendar
+    source_message_id: str | None = Field(default=None, index=True)
+    status_history_id: int | None = Field(default=None, index=True, unique=True)
+    notes: str | None = None
+    created_at: datetime = Field(default_factory=utc_now, sa_type=UTCDateTime)
+
+
 class ApplicationThreadId(SQLModel, table=True):
     """Indexed lookup table for Application.thread_ids (still the JSON source of truth on
     Application itself). Kept in sync by DataStore.upsert_application — replaces an
@@ -144,6 +193,7 @@ class Prospect(SQLModel, table=True):
     received_at: datetime = Field(index=True, sa_type=UTCDateTime)
     gmail_message_id: str = Field(index=True, unique=True)
     gmail_thread_id: str = Field(index=True)
+    application_id: int | None = Field(default=None, foreign_key="application.id", index=True)
     status: ProspectStatus = Field(
         default=ProspectStatus.NEW,
         sa_column=Column(

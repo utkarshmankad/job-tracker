@@ -11,7 +11,14 @@ import pytest
 from sqlmodel import Session
 
 from backend.db.data_store import ApplicationFilter, DataStore, is_application_stale
-from backend.db.models import Application, ApplicationStatus, utc_now
+from backend.db.models import (
+    Application,
+    ApplicationEvent,
+    ApplicationEventType,
+    ApplicationStatus,
+    InterviewRound,
+    utc_now,
+)
 
 
 def _make_app(**kwargs) -> Application:
@@ -371,3 +378,48 @@ def test_merge_applications_preserves_threads_history_and_best_data(tmp_path: Pa
     assert ds.find_application_by_thread_id("thread-b").id == primary.id
     assert ds.get_application(duplicate.id) is None
     assert all(h.application_id == primary.id for h in ds.get_status_history(primary.id))
+
+
+def test_application_events_and_status_history_backfill_are_idempotent(tmp_path: Path) -> None:
+    db_path = tmp_path / "test.db"
+    ds = DataStore(db_path)
+    app = ds.upsert_application(_make_app(company="Event Co"))
+    assert app.id is not None
+    history = ds.append_status_history(
+        app.id,
+        ApplicationStatus.APPLIED.value,
+        ApplicationStatus.INTERVIEW_IN_PROGRESS.value,
+        "email",
+        "message-1",
+    )
+
+    reloaded = DataStore(db_path)
+    events = reloaded.get_application_events(app.id)
+    assert len(events) == 1
+    assert events[0].event_type == ApplicationEventType.INTERVIEW_ATTENDED
+    assert events[0].status_history_id == history.id
+
+    reloaded_again = DataStore(db_path)
+    assert len(reloaded_again.get_application_events(app.id)) == 1
+
+
+def test_add_distinct_interview_rounds(tmp_path: Path) -> None:
+    ds = DataStore(tmp_path / "test.db")
+    app = ds.upsert_application(_make_app(company="Rounds Co"))
+    assert app.id is not None
+    for round_name in (InterviewRound.RECRUITER_SCREEN, InterviewRound.TECHNICAL):
+        ds.add_application_event(
+            ApplicationEvent(
+                application_id=app.id,
+                event_type=ApplicationEventType.INTERVIEW_ATTENDED,
+                interview_round=round_name,
+                occurred_at=utc_now(),
+                source="manual",
+            )
+        )
+
+    events = ds.get_application_events(app.id)
+    assert [event.interview_round for event in events] == [
+        InterviewRound.RECRUITER_SCREEN,
+        InterviewRound.TECHNICAL,
+    ]
