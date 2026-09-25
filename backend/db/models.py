@@ -52,6 +52,7 @@ class Application(SQLModel, table=True):
     company: str | None = None
     role: str | None = None
     source_portal: str = Field(index=True)
+    application_method: str = Field(default="Unknown", index=True)
     job_url: str | None = None
     applied_date: datetime = Field(index=True, sa_type=UTCDateTime)
     current_status: ApplicationStatus = Field(

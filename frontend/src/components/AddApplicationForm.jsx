@@ -1,13 +1,14 @@
 import { useState } from "react";
 import { X, Save } from "lucide-react";
 import { api } from "../api/client";
-import { STATUS_OPTIONS, SOURCE_PORTALS } from "../utils/constants";
+import { STATUS_OPTIONS, SOURCE_PORTALS, APPLICATION_METHODS } from "../utils/constants";
 import { useModalA11y } from "../hooks/useModalA11y";
 
 const EMPTY = {
   company: "",
   role: "",
   source_portal: "",
+  application_method: "Unknown",
   job_url: "",
   applied_date: new Date().toISOString().split("T")[0],
   current_status: "Applied",
@@ -100,6 +101,22 @@ export default function AddApplicationForm({ onSuccess, onClose }) {
               className={inputCls}
             />
             {errors.company && <p className="text-xs text-red-600 mt-1">{errors.company}</p>}
+          </div>
+
+          <div>
+            <label htmlFor="application_method" className="block text-sm text-gray-600 dark:text-gray-400 mb-1">
+              Application Method
+            </label>
+            <select
+              id="application_method"
+              value={form.application_method}
+              onChange={(e) => update("application_method", e.target.value)}
+              className={inputCls}
+            >
+              {APPLICATION_METHODS.map((method) => (
+                <option key={method} value={method}>{method}</option>
+              ))}
+            </select>
           </div>
 
           <div>

@@ -135,6 +135,7 @@ class StatusUpdater:
             company=parsed.company,
             role=parsed.role,
             source_portal=parsed.source_portal,
+            application_method="Unknown",
             job_url=parsed.job_url,
             applied_date=parsed.applied_date,
             current_status=ApplicationStatus.APPLIED,
@@ -165,12 +166,14 @@ class StatusUpdater:
         job_url: str | None,
         applied_date: datetime,
         target_status: ApplicationStatus,
+        application_method: str = "Unknown",
     ) -> Application:
         """Create a new application from a manual (non-email) source, e.g. LinkedIn import."""
         app = Application(
             company=company,
             role=role,
             source_portal=source_portal,
+            application_method=application_method,
             job_url=job_url,
             applied_date=applied_date,
             current_status=ApplicationStatus.APPLIED,

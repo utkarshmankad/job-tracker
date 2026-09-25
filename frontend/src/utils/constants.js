@@ -26,8 +26,17 @@ export const SOURCE_PORTALS = [
   "Naukri",
   "LinkedIn",
   "Hirest.Tech",
-  "Instahire",
   "Wellfound",
   "Instahyre",
   "Direct/Consultancy",
+];
+
+export const APPLICATION_METHODS = [
+  "Unknown",
+  "Easy Apply",
+  "Company Site",
+  "Recruiter",
+  "Referral",
+  "Agency",
+  "Inbound",
 ];

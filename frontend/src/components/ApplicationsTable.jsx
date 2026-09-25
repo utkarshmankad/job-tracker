@@ -131,6 +131,11 @@ export default function ApplicationsTable({ filters, onSelectId }) {
         header: "Source",
       },
       {
+        accessorKey: "application_method",
+        header: "Method",
+        cell: (info) => info.getValue() || "Unknown",
+      },
+      {
         accessorKey: "applied_date",
         header: "Applied Date",
         cell: (info) => formatDate(info.getValue()),

@@ -12,6 +12,7 @@ async function request(path, options = {}) {
 export const api = {
   listApplications: (params = {}) =>
     request(`/applications?${new URLSearchParams(params)}`),
+  getApplicationTaxonomy: () => request("/applications/meta/taxonomy"),
   getApplication: (id, signal) => request(`/applications/${id}`, { signal }),
   createApplication: (body) =>
     request("/applications", { method: "POST", body: JSON.stringify(body) }),

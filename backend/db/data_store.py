@@ -51,6 +51,7 @@ log = structlog.get_logger(__name__)
 class ApplicationFilter:
     status: ApplicationStatus | None = None
     source_portal: str | None = None
+    application_method: str | None = None
     date_from: datetime | None = None
     date_to: datetime | None = None
     search: str | None = None  # matches company or role (case-insensitive)
@@ -91,7 +92,19 @@ class DataStore:
             cols = {c["name"] for c in inspect(conn).get_columns("application")}
             if "withdraw_reason" not in cols:
                 conn.execute(text("ALTER TABLE application ADD COLUMN withdraw_reason VARCHAR"))
-                conn.commit()
+            if "application_method" not in cols:
+                conn.execute(
+                    text(
+                        "ALTER TABLE application ADD COLUMN application_method "
+                        "VARCHAR NOT NULL DEFAULT 'Unknown'"
+                    )
+                )
+            conn.execute(
+                text(
+                    "UPDATE application SET source_portal = 'Instahyre' WHERE source_portal = 'Instahire'"
+                )
+            )
+            conn.commit()
 
     def _backfill_thread_id_index(self) -> None:
         """One-time backfill for DBs created before ApplicationThreadId existed — populates
@@ -220,6 +233,8 @@ class DataStore:
                 conditions.append(col(Application.current_status) == filters.status)
             if filters.source_portal is not None:
                 conditions.append(col(Application.source_portal) == filters.source_portal)
+            if filters.application_method is not None:
+                conditions.append(col(Application.application_method) == filters.application_method)
             if filters.date_from is not None:
                 conditions.append(col(Application.applied_date) >= filters.date_from)
             if filters.date_to is not None:
@@ -257,6 +272,24 @@ class DataStore:
             items = list(session.exec(items_stmt).all())
 
             return items, total
+
+    def get_application_taxonomy(self) -> dict[str, list[str]]:
+        """Return actual stored values so UI filters never drift from imported data."""
+        with Session(self._engine) as session:
+            sources = session.exec(
+                select(col(Application.source_portal).distinct()).order_by(
+                    col(Application.source_portal)
+                )
+            ).all()
+            methods = session.exec(
+                select(col(Application.application_method).distinct()).order_by(
+                    col(Application.application_method)
+                )
+            ).all()
+        return {
+            "sources": [value for value in sources if value],
+            "methods": [value for value in methods if value],
+        }
 
     def get_application(self, id: int) -> Application | None:
         with Session(self._engine, expire_on_commit=False) as session:

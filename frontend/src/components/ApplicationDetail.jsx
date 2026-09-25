@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { X, ExternalLink, Mail, Trash2, Pencil, Check } from "lucide-react";
 import { api } from "../api/client";
-import { STATUS_OPTIONS, STATUS_COLORS } from "../utils/constants";
+import { STATUS_OPTIONS, STATUS_COLORS, SOURCE_PORTALS, APPLICATION_METHODS } from "../utils/constants";
 import { formatDate } from "../utils/formatters";
 import { useModalA11y } from "../hooks/useModalA11y";
 
@@ -21,7 +21,7 @@ export default function ApplicationDetail({ applicationId, onClose, onDelete }) 
 
   // Edit mode state
   const [editMode, setEditMode] = useState(false);
-  const [editValues, setEditValues] = useState({ company: "", role: "", job_url: "", applied_date: "" });
+  const [editValues, setEditValues] = useState({ company: "", role: "", source_portal: "", application_method: "Unknown", job_url: "", applied_date: "" });
   const [editSaving, setEditSaving] = useState(false);
 
   const fetchApp = (signal) => {
@@ -42,6 +42,8 @@ export default function ApplicationDetail({ applicationId, onClose, onDelete }) 
 
   useEffect(() => {
     const controller = new AbortController();
+    // Fetch state is intentionally reset when the selected application changes.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchApp(controller.signal);
     return () => controller.abort();
   }, [applicationId]);
@@ -77,6 +79,8 @@ export default function ApplicationDetail({ applicationId, onClose, onDelete }) 
     setEditValues({
       company: app.company || "",
       role: app.role || "",
+      source_portal: app.source_portal || "Direct/Unknown",
+      application_method: app.application_method || "Unknown",
       job_url: app.job_url || "",
       applied_date: app.applied_date ? app.applied_date.slice(0, 10) : "",
     });
@@ -91,6 +95,8 @@ export default function ApplicationDetail({ applicationId, onClose, onDelete }) 
       const patch = {};
       if (editValues.company !== (app.company || "")) patch.company = editValues.company || null;
       if (editValues.role !== (app.role || "")) patch.role = editValues.role || null;
+      if (editValues.source_portal !== app.source_portal) patch.source_portal = editValues.source_portal;
+      if (editValues.application_method !== (app.application_method || "Unknown")) patch.application_method = editValues.application_method;
       if (editValues.job_url !== (app.job_url || "")) patch.job_url = editValues.job_url || null;
       const originalDate = app.applied_date ? app.applied_date.slice(0, 10) : "";
       if (editValues.applied_date !== originalDate && editValues.applied_date) {
@@ -230,7 +236,21 @@ export default function ApplicationDetail({ applicationId, onClose, onDelete }) 
                 <div>
                   <dt className="text-gray-500 dark:text-gray-400">Source</dt>
                   <dd className="font-medium text-gray-900 dark:text-gray-100">
-                    {app.source_portal}
+                    {editMode ? (
+                      <select className={inputCls} value={editValues.source_portal} onChange={(e) => setEditValues((v) => ({ ...v, source_portal: e.target.value }))}>
+                        {[...new Set([...SOURCE_PORTALS, app.source_portal])].map((source) => <option key={source} value={source}>{source}</option>)}
+                      </select>
+                    ) : app.source_portal}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-gray-500 dark:text-gray-400">Method</dt>
+                  <dd className="font-medium text-gray-900 dark:text-gray-100">
+                    {editMode ? (
+                      <select className={inputCls} value={editValues.application_method} onChange={(e) => setEditValues((v) => ({ ...v, application_method: e.target.value }))}>
+                        {APPLICATION_METHODS.map((method) => <option key={method} value={method}>{method}</option>)}
+                      </select>
+                    ) : (app.application_method || "Unknown")}
                   </dd>
                 </div>
                 <div>
