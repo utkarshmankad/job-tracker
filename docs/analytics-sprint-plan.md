@@ -29,19 +29,29 @@ Success criteria:
 - [x] Detect likely duplicate applications across channels and canonical job URLs.
 - [x] Add reviewed duplicate merging that preserves Gmail threads and status history.
 
-## Sprint 3 — Find the best-fit market segments
+## Sprint 3 — Opportunity and interview conversion
+
+- [x] Add event-level milestones for submissions, responses, interview scheduling/attendance, offers, and rejections.
+- [x] Backfill existing status history into idempotent activity events.
+- [x] Track distinct interview rounds without creating duplicate applications.
+- [x] Link recruiting opportunities to the applications they produce.
+- [x] Add 1/3/6/12-month opportunity and interview conversion analytics.
+- [x] Show attended interview outcomes by source portal and application method.
+- [x] Add application-table filters for interview attendance and final outcome.
+
+## Sprint 4 — Find the best-fit market segments
 
 - Capture role family, seniority, company type, industry, location/work mode, resume variant, job age, and fit score.
 - Add segment comparisons and surface high-performing combinations.
 - Add interview-stage and outcome-reason analysis.
 
-## Sprint 4 — Turn insights into weekly experiments
+## Sprint 5 — Turn insights into weekly experiments
 
 - Add weekly targets for qualified applications, warm outreach, referrals, and conversations.
 - Add an experiment board with hypotheses, allocations, thresholds, and results.
 - Generate dated recommendations from personal conversion data.
 
-## Sprint 5 — Add external market context
+## Sprint 6 — Add external market context
 
 - Add a dated Market Lens for India hiring, IT/GCC demand, specialization trends, and applicant competition.
 - Show source and methodology for every external metric.

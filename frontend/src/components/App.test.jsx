@@ -13,6 +13,7 @@ vi.mock("../api/client", () => ({
     getSearchPulse: vi.fn().mockResolvedValue({ recent: {}, matured_cohort: {}, activity: [] }),
     getApplicationTaxonomy: vi.fn().mockResolvedValue({ sources: [], methods: [] }),
     listDuplicateCandidates: vi.fn().mockResolvedValue([]),
+    getConversionData: vi.fn().mockResolvedValue({ opportunities: {}, interviews: { outcomes: {} }, by_source: [], by_method: [] }),
     getInsights: vi.fn().mockResolvedValue({ channels: [], insights: [] }),
     getRejectionData: vi.fn().mockResolvedValue({ insufficient_data: true }),
     exportApplications: vi.fn(),
