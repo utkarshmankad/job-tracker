@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
@@ -379,6 +380,62 @@ def test_insights_flow_endpoint(seeded_client):
     assert "nodes" in body
     assert "links" in body
     assert "kpis" in body
+
+
+def test_application_taxonomy_uses_stored_values(seeded_client):
+    client, db = seeded_client
+    db.upsert_application(
+        Application(
+            company="Taxonomy Co",
+            role="Engineer",
+            source_portal="LinkedIn",
+            application_method="Referral",
+            applied_date=utc_now(),
+        )
+    )
+    resp = client.get(f"{_BASE}/applications/meta/taxonomy")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "LinkedIn" in body["sources"]
+    assert "Referral" in body["methods"]
+
+
+def test_duplicate_review_and_merge_endpoints(seeded_client):
+    client, db = seeded_client
+    first = db.upsert_application(
+        Application(
+            company="Duplicate Co",
+            role="Engineering Manager",
+            source_portal="LinkedIn",
+            applied_date=utc_now(),
+            thread_ids='["thread-one"]',
+        )
+    )
+    second = db.upsert_application(
+        Application(
+            company="Duplicate Co Pvt Ltd",
+            role="Engineering Manager",
+            source_portal="Naukri",
+            applied_date=utc_now(),
+            thread_ids='["thread-two"]',
+        )
+    )
+    assert first.id is not None and second.id is not None
+
+    candidates = client.get(f"{_BASE}/applications/duplicates")
+    assert candidates.status_code == 200
+    assert any(
+        {pair["primary"]["id"], pair["duplicate"]["id"]} == {first.id, second.id}
+        for pair in candidates.json()
+    )
+
+    merged = client.post(
+        f"{_BASE}/applications/duplicates/merge",
+        json={"primary_id": first.id, "duplicate_id": second.id},
+    )
+    assert merged.status_code == 200
+    assert set(json.loads(merged.json()["thread_ids"])) == {"thread-one", "thread-two"}
+    assert db.get_application(second.id) is None
 
 
 def test_search_pulse_endpoint(seeded_client):

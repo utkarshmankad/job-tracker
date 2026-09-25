@@ -101,7 +101,8 @@ class DataStore:
                 )
             conn.execute(
                 text(
-                    "UPDATE application SET source_portal = 'Instahyre' WHERE source_portal = 'Instahire'"
+                    "UPDATE application SET source_portal = 'Instahyre' "
+                    "WHERE source_portal = 'Instahire'"
                 )
             )
             conn.commit()

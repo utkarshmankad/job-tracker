@@ -22,10 +22,12 @@ Success criteria:
 
 ## Sprint 2 — Identify which search methods work
 
-- Split source portal from application method: Easy Apply, company site, recruiter, referral, agency, and inbound.
-- Add response count, median response time, applications per interview, and sample-confidence indicators by channel.
-- Align source filters with every source value present in stored data.
-- Add a guided cleanup path for `Direct/Unknown` records.
+- [x] Split source portal from application method: Easy Apply, company site, recruiter, referral, agency, and inbound.
+- [x] Add response count, median response time, applications per interview, and sample-confidence indicators by channel.
+- [x] Align source filters with every source value present in stored data.
+- [x] Add a guided cleanup path for `Direct/Unknown` records.
+- [x] Detect likely duplicate applications across channels and canonical job URLs.
+- [x] Add reviewed duplicate merging that preserves Gmail threads and status history.
 
 ## Sprint 3 — Find the best-fit market segments
 
