@@ -25,6 +25,7 @@ from backend.db.data_store import ApplicationFilter, DataStore, is_application_s
 from backend.db.models import Application, ApplicationStatus, ProspectStatus, utc_now
 from backend.diagnostics import DiagnosticRunner
 from backend.engine.insights_engine import InsightsEngine
+from backend.engine.duplicate_detector import DuplicateDetector
 from backend.engine.status_updater import StatusUpdater
 
 log = structlog.get_logger(__name__)
@@ -216,6 +217,11 @@ class ApplicationPatch(BaseModel):
     applied_date: datetime | None = None
     is_false_positive: bool | None = None
     withdraw_reason: str | None = None
+
+
+class DuplicateMergeRequest(BaseModel):
+    primary_id: int
+    duplicate_id: int
 
 
 class BulkWithdrawRequest(BaseModel):
@@ -456,6 +462,34 @@ async def create_application(body: ApplicationCreate, request: Request) -> Appli
 async def get_application_taxonomy(request: Request) -> dict[str, list[str]]:
     db: DataStore = request.app.state.db
     return db.get_application_taxonomy()
+
+
+@router.get("/applications/duplicates")
+async def list_duplicate_candidates(request: Request) -> list[dict]:
+    db: DataStore = request.app.state.db
+    detector = DuplicateDetector(db)
+    return [
+        {
+            "primary": _to_response(pair["primary"]).model_dump(mode="json"),
+            "duplicate": _to_response(pair["duplicate"]).model_dump(mode="json"),
+            "score": pair["score"],
+            "reasons": pair["reasons"],
+        }
+        for pair in detector.find_candidate_pairs()
+    ]
+
+
+@router.post("/applications/duplicates/merge", response_model=ApplicationResponse)
+async def merge_duplicate_applications(
+    body: DuplicateMergeRequest, request: Request
+) -> ApplicationResponse:
+    db: DataStore = request.app.state.db
+    try:
+        merged = db.merge_applications(body.primary_id, body.duplicate_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _invalidate_applications_cache()
+    return _to_response(merged)
 
 
 # NOTE: /applications/export must be registered before /applications/{id}

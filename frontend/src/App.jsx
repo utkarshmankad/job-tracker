@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import {
   LayoutList, Activity, Home, AlertTriangle,
-  Download, PlusCircle, Sun, Moon, MailSearch,
+  Download, PlusCircle, Sun, Moon, MailSearch, ShieldCheck,
 } from "lucide-react";
 import { api } from "./api/client";
 import { useTheme } from "./contexts/ThemeContext";
@@ -13,6 +13,7 @@ import AddApplicationForm from "./components/AddApplicationForm";
 import AnalyticsPanel from "./components/AnalyticsPanel";
 import StatusPage from "./components/StatusPage";
 import ProspectsInbox from "./components/ProspectsInbox";
+import DataQualityPanel from "./components/DataQualityPanel";
 // LinkedIn import/withdraw tools removed — see CLAUDE.md task; endpoints in
 // backend/api/routes.py (linkedin_import_preview/confirmed) are now unused
 // by the UI but left intact server-side.
@@ -21,6 +22,7 @@ const NAV_TABS = [
   { id: "home", label: "Home", Icon: Home },
   { id: "applications", label: "Applications", Icon: LayoutList },
   { id: "prospects", label: "Opportunities", Icon: MailSearch },
+  { id: "quality", label: "Data Quality", Icon: ShieldCheck },
   { id: "stale", label: "Stale", Icon: AlertTriangle },
   { id: "status", label: "Status", Icon: Activity },
 ];
@@ -33,6 +35,7 @@ const TAB_TITLES = {
   home: "Dashboard",
   applications: "Applications",
   prospects: "Opportunities",
+  quality: "Data Quality",
   stale: "Stale Applications",
   status: "System Status",
 };
@@ -203,6 +206,11 @@ export default function App() {
         {visitedTabs.has("prospects") && (
           <div className={activeTab === "prospects" ? "" : "hidden"}>
             <ProspectsInbox />
+          </div>
+        )}
+        {visitedTabs.has("quality") && (
+          <div className={activeTab === "quality" ? "" : "hidden"}>
+            <DataQualityPanel />
           </div>
         )}
         {visitedTabs.has("stale") && (

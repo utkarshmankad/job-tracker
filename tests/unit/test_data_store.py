@@ -341,3 +341,33 @@ def test_update_poller_state_missing_raises_runtime_error(tmp_path: Path) -> Non
 
     with pytest.raises(RuntimeError, match="PollerState row missing"):
         ds.update_poller_state(status="ERROR")
+
+
+def test_merge_applications_preserves_threads_history_and_best_data(tmp_path: Path) -> None:
+    ds = DataStore(tmp_path / "test.db")
+    primary = _make_app(company="Acme", current_status=ApplicationStatus.APPLIED)
+    primary.source_portal = "Direct/Unknown"
+    primary.thread_ids = '["thread-a"]'
+    primary = ds.upsert_application(primary)
+    duplicate = _make_app(company="Acme", current_status=ApplicationStatus.OFFER)
+    duplicate.source_portal = "Naukri"
+    duplicate.application_method = "Recruiter"
+    duplicate.thread_ids = '["thread-b"]'
+    duplicate = ds.upsert_application(duplicate)
+    assert primary.id is not None and duplicate.id is not None
+    ds.append_status_history(
+        duplicate.id,
+        ApplicationStatus.INTERVIEW_SCHEDULED.value,
+        ApplicationStatus.OFFER.value,
+        "email",
+    )
+
+    merged = ds.merge_applications(primary.id, duplicate.id)
+
+    assert merged.current_status == ApplicationStatus.OFFER
+    assert merged.source_portal == "Naukri"
+    assert merged.application_method == "Recruiter"
+    assert set(json.loads(merged.thread_ids)) == {"thread-a", "thread-b"}
+    assert ds.find_application_by_thread_id("thread-b").id == primary.id
+    assert ds.get_application(duplicate.id) is None
+    assert all(h.application_id == primary.id for h in ds.get_status_history(primary.id))

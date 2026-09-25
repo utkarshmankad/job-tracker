@@ -409,6 +409,65 @@ class DataStore:
             session.commit()
             return True
 
+    def merge_applications(self, primary_id: int, duplicate_id: int) -> Application:
+        """Merge a duplicate into a primary while preserving threads and status history."""
+        if primary_id == duplicate_id:
+            raise ValueError("Primary and duplicate must be different applications")
+        status_rank = {
+            ApplicationStatus.APPLIED: 0,
+            ApplicationStatus.RESUME_SHORTLISTED: 1,
+            ApplicationStatus.INTERVIEW_SCHEDULED: 2,
+            ApplicationStatus.INTERVIEW_IN_PROGRESS: 3,
+            ApplicationStatus.OFFER_NEGOTIATION: 4,
+            ApplicationStatus.REJECTED: 4,
+            ApplicationStatus.WITHDRAWN: 4,
+            ApplicationStatus.OFFER: 5,
+            ApplicationStatus.JOINED: 6,
+        }
+        with Session(self._engine, expire_on_commit=False) as session:
+            primary = session.get(Application, primary_id)
+            duplicate = session.get(Application, duplicate_id)
+            if primary is None or duplicate is None:
+                raise ValueError("One or both applications were not found")
+
+            threads = list(
+                dict.fromkeys(
+                    json.loads(primary.thread_ids or "[]")
+                    + json.loads(duplicate.thread_ids or "[]")
+                )
+            )
+            primary.thread_ids = json.dumps(threads)
+            primary.applied_date = min(primary.applied_date, duplicate.applied_date)
+            if status_rank[duplicate.current_status] > status_rank[primary.current_status]:
+                primary.current_status = duplicate.current_status
+            for field_name in ("company", "role", "job_url"):
+                if not getattr(primary, field_name) and getattr(duplicate, field_name):
+                    setattr(primary, field_name, getattr(duplicate, field_name))
+            if primary.source_portal in ("Direct/Unknown", "Unknown"):
+                primary.source_portal = duplicate.source_portal
+            if primary.application_method == "Unknown":
+                primary.application_method = duplicate.application_method
+            primary.updated_at = utc_now()
+
+            for history in session.exec(
+                select(StatusHistory).where(StatusHistory.application_id == duplicate_id)
+            ).all():
+                history.application_id = primary_id
+                session.add(history)
+            for thread_link in session.exec(
+                select(ApplicationThreadId).where(
+                    ApplicationThreadId.application_id == duplicate_id
+                )
+            ).all():
+                session.delete(thread_link)
+            session.flush()
+            session.delete(duplicate)
+            session.add(primary)
+            session.commit()
+            session.refresh(primary)
+            self._sync_thread_ids(session, primary.id, primary.thread_ids)
+            return primary
+
     # ------------------------------------------------------------------ #
     # Status history                                                       #
     # ------------------------------------------------------------------ #
