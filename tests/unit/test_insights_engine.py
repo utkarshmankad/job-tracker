@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import timedelta
 from pathlib import Path
 
+import pytest
+
 from backend.db.data_store import DataStore
 from backend.db.models import Application, ApplicationStatus, utc_now
 from backend.engine.insights_engine import ChannelStat, InsightsEngine
@@ -84,7 +86,7 @@ def test_funnel_counts_correct(tmp_path: Path) -> None:
 
 def test_red_flag_channel(tmp_path: Path) -> None:
     db = _make_db(tmp_path)
-    for _ in range(10):
+    for _ in range(15):
         _seed_app(db, source_portal="LinkedIn", status=ApplicationStatus.APPLIED)
 
     report = InsightsEngine(db).generate_report()
@@ -92,14 +94,14 @@ def test_red_flag_channel(tmp_path: Path) -> None:
     linkedin = next(i for i in report.insights if i.source == "LinkedIn")
     assert linkedin.flag == "red"
     assert "LinkedIn" in linkedin.message
-    assert "10" in linkedin.message
+    assert "15" in linkedin.message
 
 
 def test_green_flag_channel(tmp_path: Path) -> None:
     db = _make_db(tmp_path)
-    for _ in range(7):
+    for _ in range(11):
         _seed_app(db, source_portal="LinkedIn", status=ApplicationStatus.APPLIED)
-    for _ in range(3):
+    for _ in range(4):
         _seed_app(db, source_portal="LinkedIn", status=ApplicationStatus.INTERVIEW_SCHEDULED)
 
     report = InsightsEngine(db).generate_report()
@@ -107,7 +109,7 @@ def test_green_flag_channel(tmp_path: Path) -> None:
     linkedin = next(i for i in report.insights if i.source == "LinkedIn")
     assert linkedin.flag == "green"
     assert "LinkedIn" in linkedin.message
-    assert "30%" in linkedin.message
+    assert "27%" in linkedin.message
 
 
 def test_no_division_by_zero(tmp_path: Path) -> None:
@@ -118,13 +120,38 @@ def test_no_division_by_zero(tmp_path: Path) -> None:
 
     # Engine must not raise even with an all-zero channel that somehow gets through
     db = _make_db(tmp_path)
-    for _ in range(10):
+    for _ in range(15):
         _seed_app(db, source_portal="Naukri", status=ApplicationStatus.APPLIED)
 
     report = InsightsEngine(db).generate_report()
-    assert report.total_applications == 10
+    assert report.total_applications == 15
     naukri = next(i for i in report.insights if i.source == "Naukri")
-    assert naukri.flag == "red"  # 10 apps, 0 interviews
+    assert naukri.flag == "red"  # 15 apps, 0 interviews
+
+
+def test_channel_stats_include_response_efficiency_and_confidence(tmp_path: Path) -> None:
+    db = _make_db(tmp_path)
+    for _ in range(14):
+        _seed_app(db, source_portal="LinkedIn", status=ApplicationStatus.APPLIED)
+    interviewed = _seed_app(
+        db, source_portal="LinkedIn", status=ApplicationStatus.INTERVIEW_SCHEDULED
+    )
+    assert interviewed.id is not None
+    db.append_status_history(
+        interviewed.id,
+        ApplicationStatus.APPLIED.value,
+        ApplicationStatus.INTERVIEW_SCHEDULED.value,
+        "email",
+    )
+
+    report = InsightsEngine(db).generate_report()
+    linkedin = next(channel for channel in report.channels if channel.source == "LinkedIn")
+
+    assert linkedin.responded == 1
+    assert linkedin.response_rate() == pytest.approx(1 / 15)
+    assert linkedin.applications_per_interview() == 15.0
+    assert linkedin.confidence() == "medium"
+    assert report.methods[0].source == "Unknown"
 
 
 # ------------------------------------------------------------------ #

@@ -24,8 +24,8 @@ from backend.config import (
 from backend.db.data_store import ApplicationFilter, DataStore, is_application_stale
 from backend.db.models import Application, ApplicationStatus, ProspectStatus, utc_now
 from backend.diagnostics import DiagnosticRunner
-from backend.engine.insights_engine import InsightsEngine
 from backend.engine.duplicate_detector import DuplicateDetector
+from backend.engine.insights_engine import InsightsEngine
 from backend.engine.status_updater import StatusUpdater
 
 log = structlog.get_logger(__name__)
@@ -115,6 +115,11 @@ class ChannelStatResponse(BaseModel):
     shortlisted: int
     interviewed: int
     offered: int
+    responded: int
+    response_rate: float
+    median_response_days: float | None
+    applications_per_interview: float | None
+    confidence: str
 
 
 class ChannelInsightResponse(BaseModel):
@@ -126,6 +131,7 @@ class ChannelInsightResponse(BaseModel):
 class InsightReportResponse(BaseModel):
     funnel: dict[str, int]
     channels: list[ChannelStatResponse]
+    methods: list[ChannelStatResponse]
     insights: list[ChannelInsightResponse]
     total_applications: int
     insufficient_data: bool
@@ -967,7 +973,7 @@ async def get_rejection_data(request: Request) -> dict:
 
 @router.get("/insights", response_model=InsightReportResponse)
 async def get_insights(request: Request) -> InsightReportResponse:
-    cache_key = f"{_INSIGHTS_CACHE_PREFIX}report"
+    cache_key = f"{_INSIGHTS_CACHE_PREFIX}report:v2"
     cached = cache.get_json(cache_key)
     if cached is not None:
         return InsightReportResponse(**cached)
@@ -982,8 +988,28 @@ async def get_insights(request: Request) -> InsightReportResponse:
                 shortlisted=c.shortlisted,
                 interviewed=c.interviewed,
                 offered=c.offered,
+                responded=c.responded,
+                response_rate=c.response_rate(),
+                median_response_days=c.median_response_days,
+                applications_per_interview=c.applications_per_interview(),
+                confidence=c.confidence(),
             )
             for c in report.channels
+        ],
+        methods=[
+            ChannelStatResponse(
+                source=c.source,
+                total=c.total,
+                shortlisted=c.shortlisted,
+                interviewed=c.interviewed,
+                offered=c.offered,
+                responded=c.responded,
+                response_rate=c.response_rate(),
+                median_response_days=c.median_response_days,
+                applications_per_interview=c.applications_per_interview(),
+                confidence=c.confidence(),
+            )
+            for c in report.methods
         ],
         insights=[
             ChannelInsightResponse(source=i.source, flag=i.flag, message=i.message)

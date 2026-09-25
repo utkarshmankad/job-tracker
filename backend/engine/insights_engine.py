@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from statistics import median
 
 import structlog
 
 from backend.config import INTERVIEW_RATE_GREEN_THRESHOLD, MIN_APPLICATIONS_FOR_INSIGHTS
 from backend.db.data_store import ApplicationFilter, DataStore, is_application_stale
-from backend.db.models import Application, ApplicationStatus, utc_now
+from backend.db.models import Application, ApplicationStatus, StatusHistory, utc_now
 
 log = structlog.get_logger(__name__)
 
@@ -49,12 +50,27 @@ class ChannelStat:
     shortlisted: int
     interviewed: int
     offered: int
+    responded: int = 0
+    median_response_days: float | None = None
 
     def interview_rate(self) -> float:
         return self.interviewed / self.total if self.total > 0 else 0.0
 
     def offer_rate(self) -> float:
         return self.offered / self.total if self.total > 0 else 0.0
+
+    def response_rate(self) -> float:
+        return self.responded / self.total if self.total > 0 else 0.0
+
+    def applications_per_interview(self) -> float | None:
+        return round(self.total / self.interviewed, 1) if self.interviewed else None
+
+    def confidence(self) -> str:
+        if self.total < 15:
+            return "low"
+        if self.total < 30:
+            return "medium"
+        return "high"
 
 
 @dataclass
@@ -68,6 +84,7 @@ class ChannelInsight:
 class InsightReport:
     funnel: dict[str, int]
     channels: list[ChannelStat]
+    methods: list[ChannelStat]
     insights: list[ChannelInsight]
     total_applications: int
     insufficient_data: bool
@@ -87,18 +104,21 @@ class InsightsEngine:
             return InsightReport(
                 funnel=funnel,
                 channels=[],
+                methods=[],
                 insights=[],
                 total_applications=total,
                 insufficient_data=True,
                 generated_at=utc_now(),
             )
 
-        channels = self._channel_stats(apps)
+        channels = self._channel_stats(apps, "source_portal")
+        methods = self._channel_stats(apps, "application_method")
         insights = self._flag_channels(channels)
 
         return InsightReport(
             funnel=funnel,
             channels=channels,
+            methods=methods,
             insights=insights,
             total_applications=total,
             insufficient_data=False,
@@ -183,13 +203,32 @@ class InsightsEngine:
             counts[app.current_status.value] += 1
         return counts
 
-    def _channel_stats(self, apps: list[Application]) -> list[ChannelStat]:
+    def _channel_stats(self, apps: list[Application], group_field: str) -> list[ChannelStat]:
         groups: dict[str, list[Application]] = {}
         for app in apps:
-            groups.setdefault(app.source_portal, []).append(app)
+            groups.setdefault(getattr(app, group_field) or "Unknown", []).append(app)
+
+        app_ids = {app.id for app in apps if app.id is not None}
+        histories = self._db.get_status_history_for_apps(app_ids)
+        history_by_app: dict[int, list[StatusHistory]] = {}
+        for history in histories:
+            history_by_app.setdefault(history.application_id, []).append(history)
+        response_values = self._SHORTLISTED_VALUES | {ApplicationStatus.REJECTED.value}
 
         stats: list[ChannelStat] = []
         for source, group in groups.items():
+            response_days: list[float] = []
+            responded = 0
+            for app in group:
+                app_history = history_by_app.get(app.id or -1, [])
+                response_events = [h for h in app_history if h.to_status in response_values]
+                has_response = bool(response_events) or app.current_status.value in response_values
+                if has_response:
+                    responded += 1
+                if response_events:
+                    first_response = min(event.changed_at for event in response_events)
+                    elapsed = max(0.0, (first_response - app.applied_date).total_seconds() / 86400)
+                    response_days.append(elapsed)
             stats.append(
                 ChannelStat(
                     source=source,
@@ -197,6 +236,8 @@ class InsightsEngine:
                     shortlisted=sum(1 for a in group if a.current_status in _SHORTLISTED_STAGES),
                     interviewed=sum(1 for a in group if a.current_status in _INTERVIEW_STAGES),
                     offered=sum(1 for a in group if a.current_status in _OFFER_STAGES),
+                    responded=responded,
+                    median_response_days=round(median(response_days), 1) if response_days else None,
                 )
             )
         return stats
@@ -543,13 +584,19 @@ class InsightsEngine:
         insights: list[ChannelInsight] = []
         for stat in stats:
             rate = stat.interview_rate()
-            if rate > INTERVIEW_RATE_GREEN_THRESHOLD:
+            if stat.total < 15:
+                flag = "neutral"
+                message = (
+                    f"{stat.source} has only {stat.total} applications — collect at least 15 "
+                    "before changing strategy."
+                )
+            elif rate > INTERVIEW_RATE_GREEN_THRESHOLD:
                 flag = "green"
                 message = (
                     f"{stat.source} is converting at {rate:.0%} interview rate"
                     f" — prioritize this channel."
                 )
-            elif stat.total >= 10 and rate == 0.0:
+            elif rate == 0.0:
                 flag = "red"
                 message = (
                     f"No responses from {stat.source} after {stat.total} applications"
