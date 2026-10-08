@@ -109,21 +109,24 @@ happens after backups and migrations exist.
 
 ### Step 1 — Protect the production API
 
-- New `backend/api/auth.py`: a FastAPI dependency applied at router level. Accepts
-  `Authorization: Bearer <API_TOKEN>` (machine/CLI use) or an HttpOnly session cookie issued by
-  `POST /api/v1/auth/session` after presenting the token. Constant-time comparison
-  (`hmac.compare_digest`). Signed, expiring cookie; `Secure`, `HttpOnly`, `SameSite=Strict`.
-- Recommended topology: Vercel rewrite `/api/*` → Fly backend so the browser sees one origin
-  (first-party cookie, no third-party-cookie blocking, CORS no longer needed in prod). The API
-  token is **never** placed in a `VITE_*` variable or the bundle.
-- `config.py`: `API_TOKEN`, `SESSION_SECRET`, `SESSION_TTL_SECONDS`, `AUTH_REQUIRED`
-  (defaults to true when `API_HOST` is not a loopback/`*.localhost` host). Startup refuses to
-  boot when auth is required and secrets are missing.
-- Exemptions: a minimal unauthenticated liveness route for Fly/CI smoke checks (no data), and
-  `/poller/reauth/callback` (protected by its `state`). `reauth/start` moves under normal auth;
-  the query-string token is removed. Reauth `state` gains an expiry.
-- Login attempts rate-limited in-process; failures logged via structlog without the token.
-- Frontend: login screen, `credentials: "include"`, handle 401 by returning to login.
+Implemented; see [`docs/authentication.md`](authentication.md). Final design (changed from the
+original API-token sketch in favour of Google identity):
+
+- Google Identity Services in the browser → `POST /auth/google` with the ID token → server-side
+  verification (signature, issuer, audience, expiry, single-use nonce, verified email equal to
+  `AUTH_ALLOWED_EMAIL`) → HMAC-signed `HttpOnly`, `SameSite=Lax` session cookie (`__Host-`,
+  `Secure` in production) plus an in-memory CSRF token required on state-changing requests.
+- `backend/api/auth.py` holds the single `require_user` dependency; `backend/main.py` mounts
+  the whole data router with it. Public surface: `/health` and `/auth/*` only.
+- Vercel rewrites `/api/*` to Fly, so production is same-origin; CORS is an explicit
+  credentialed allow-list for local development.
+- `APP_ENV=production` (Docker image, `fly.toml`) fails closed at startup without complete
+  `AUTH_*` configuration. `AUTH_MODE=local` is an explicit, loopback-only developer mode,
+  refused in production. `ADMIN_TOKEN` removed; Gmail re-auth `state` is bound to the session
+  and expires; the callback requires the session (via `PUBLIC_BASE_URL` = Vercel origin).
+- In-process rate limits on sign-in and sensitive operations; consistent `{"detail", "code"}`
+  401/403/429 bodies; query strings redacted from access logs.
+- Frontend: login screen, session restore, account display, sign-out, 401/expiry handling.
 
 ### Step 2 — Backups and restore
 
@@ -278,7 +281,7 @@ Make the E2E job blocking in CI. Flows, all against a seeded temporary DB with G
 
 | Risk | Today | Mitigation in Phase 1 |
 |---|---|---|
-| Public unauthenticated API exposes job-search PII (companies, roles, senders, snippets) and allows deletes, merges, bulk edits, poller triggers | **Live** | Step 1: router-level auth, fail closed |
+| Public unauthenticated API exposes job-search PII (companies, roles, senders, snippets) and allows deletes, merges, bulk edits, poller triggers | Fixed by Step 1 once deployed | Router-level auth, fail closed |
 | `reauth/start` open when `ADMIN_TOKEN` unset → attacker could bind their own Gmail account | **Live** if secret unset in Fly | Moves under required auth; startup check |
 | Secrets in URLs (`?token=`) captured by logs/proxies/history | Live on `reauth/start` | Header/cookie only |
 | Token shipped in the frontend bundle via `VITE_*` | Risk of naive implementation | Same-origin proxy + HttpOnly cookie; no client-side secret |

@@ -176,6 +176,13 @@ Open [http://jobtracker.localhost:5173](http://jobtracker.localhost:5173) — yo
 
 ---
 
+## Authentication
+
+The dashboard and every data endpoint require sign-in. In production the owner signs in with
+Google and only `AUTH_ALLOWED_EMAIL` is accepted; locally, set `AUTH_MODE=local` in `.env` for
+an explicit developer sign-in. Setup, environment variables, Vercel/Fly configuration and
+rotation: [docs/authentication.md](docs/authentication.md).
+
 ## Useful commands
 
 ```bash

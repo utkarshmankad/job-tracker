@@ -10,6 +10,28 @@ from backend.db.models import Application, ApplicationStatus, utc_now
 
 
 @pytest.fixture
+def test_auth_user():
+    """Explicit test authentication for route tests.
+
+    Overrides the router-level `require_user` dependency on the real FastAPI app with a
+    fixed signed-in owner, so tests exercise endpoint behaviour without minting Google
+    tokens. Auth itself is covered without this override in tests/integration/test_auth.py.
+    Sessions and CSRF are bypassed only while this fixture is active.
+    """
+    from backend.api.auth import AuthenticatedUser, require_user
+    from backend.main import app
+
+    user = AuthenticatedUser(
+        email="owner@example.com",
+        session_id="test-session",
+        expires_at=int(utc_now().timestamp()) + 3600,
+    )
+    app.dependency_overrides[require_user] = lambda: user
+    yield user
+    app.dependency_overrides.pop(require_user, None)
+
+
+@pytest.fixture
 def db(tmp_path):
     return DataStore(db_path=tmp_path / "test.db")
 

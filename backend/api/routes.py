@@ -5,20 +5,34 @@ from __future__ import annotations
 import csv
 import io
 import re
+import secrets
 from datetime import UTC, datetime
 
 import structlog
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from backend import cache
+from backend.api.auth import (
+    CSRF_HEADER,
+    AuthenticatedUser,
+    AuthError,
+    AuthService,
+    Session,
+    client_address,
+    get_auth_service,
+    login_rate_limit,
+    require_allowed_origin,
+    require_user,
+    sensitive_rate_limit,
+)
 from backend.config import (
-    ADMIN_TOKEN,
     APPLICATIONS_CACHE_TTL_SECONDS,
     DB_PATH,
     INSIGHTS_CACHE_TTL_SECONDS,
     PUBLIC_BASE_URL,
+    REAUTH_STATE_TTL_SECONDS,
     REEXTRACT_BATCH_LIMIT,
 )
 from backend.db.data_store import ApplicationFilter, DataStore, is_application_stale
@@ -47,7 +61,14 @@ def _invalidate_applications_cache() -> None:
     cache.invalidate_prefix(_INSIGHTS_CACHE_PREFIX)
 
 
+# `router` holds every protected endpoint; backend/main.py mounts it with
+# Depends(require_user), so nothing on it is reachable without a session.
+# `public_router` holds only the sanitized health check and the sign-in endpoints.
 router = APIRouter()
+public_router = APIRouter()
+
+# Destructive or expensive operations share a per-client rate limit.
+_SENSITIVE = [Depends(sensitive_rate_limit)]
 
 
 # ------------------------------------------------------------------ #
@@ -559,7 +580,7 @@ async def get_application_taxonomy(request: Request) -> dict[str, list[str]]:
     return db.get_application_taxonomy()
 
 
-@router.get("/applications/duplicates")
+@router.get("/applications/duplicates", dependencies=_SENSITIVE)
 async def list_duplicate_candidates(request: Request) -> list[dict]:
     db: DataStore = request.app.state.db
     detector = DuplicateDetector(db)
@@ -574,7 +595,9 @@ async def list_duplicate_candidates(request: Request) -> list[dict]:
     ]
 
 
-@router.post("/applications/duplicates/merge", response_model=ApplicationResponse)
+@router.post(
+    "/applications/duplicates/merge", response_model=ApplicationResponse, dependencies=_SENSITIVE
+)
 async def merge_duplicate_applications(
     body: DuplicateMergeRequest, request: Request
 ) -> ApplicationResponse:
@@ -589,7 +612,7 @@ async def merge_duplicate_applications(
 
 # NOTE: /applications/export must be registered before /applications/{id}
 # so that the literal path segment "export" is not captured as an id.
-@router.get("/applications/export")
+@router.get("/applications/export", dependencies=_SENSITIVE)
 async def export_applications(
     request: Request,
     format: str = Query(default="json", pattern="^(csv|json)$"),
@@ -615,7 +638,7 @@ async def export_applications(
 
 # NOTE: /applications/reextract must be registered before /applications/{id}
 # so that "reextract" is not captured as an integer id.
-@router.post("/applications/reextract", response_model=ReextractResponse)
+@router.post("/applications/reextract", response_model=ReextractResponse, dependencies=_SENSITIVE)
 def reextract_missing_fields(request: Request, offset: int = Query(0, ge=0)) -> ReextractResponse:
     """Re-fetch and re-extract company/role for applications missing them.
 
@@ -722,7 +745,9 @@ async def patch_application(
     return _to_response(app)
 
 
-@router.post("/applications/bulk-withdraw", response_model=BulkWithdrawResponse)
+@router.post(
+    "/applications/bulk-withdraw", response_model=BulkWithdrawResponse, dependencies=_SENSITIVE
+)
 async def bulk_withdraw_by_companies(
     body: BulkWithdrawRequest, request: Request
 ) -> BulkWithdrawResponse:
@@ -741,7 +766,9 @@ async def bulk_withdraw_by_companies(
     return BulkWithdrawResponse(updated=len(ids), application_ids=ids)
 
 
-@router.post("/applications/bulk-status", response_model=BulkActionResponse)
+@router.post(
+    "/applications/bulk-status", response_model=BulkActionResponse, dependencies=_SENSITIVE
+)
 async def bulk_update_status(body: BulkStatusRequest, request: Request) -> BulkActionResponse:
     """Set current_status on a set of applications via the same manual-update path as
     a single-record PATCH — status transitions still go through StatusUpdater, never
@@ -760,7 +787,9 @@ async def bulk_update_status(body: BulkStatusRequest, request: Request) -> BulkA
     return BulkActionResponse(updated=len(updated_ids), failed_ids=failed_ids)
 
 
-@router.post("/applications/bulk-delete", response_model=BulkActionResponse)
+@router.post(
+    "/applications/bulk-delete", response_model=BulkActionResponse, dependencies=_SENSITIVE
+)
 async def bulk_delete_applications(body: BulkDeleteRequest, request: Request) -> BulkActionResponse:
     """Delete a set of applications. Unlike the single-record DELETE endpoint, this does
     not auto-add a sender-suppress rule per row — that requires a live Gmail API call per
@@ -864,7 +893,11 @@ async def linkedin_import_preview(
     return LinkedInPreviewResponse(entries=entries, garbage_lines=garbage_lines, llm_used=llm_used)
 
 
-@router.post("/applications/linkedin-import/confirmed", response_model=LinkedInImportResponse)
+@router.post(
+    "/applications/linkedin-import/confirmed",
+    response_model=LinkedInImportResponse,
+    dependencies=_SENSITIVE,
+)
 async def linkedin_import_confirmed(
     body: LinkedInImportConfirmedRequest, request: Request
 ) -> LinkedInImportResponse:
@@ -978,7 +1011,7 @@ async def linkedin_import_confirmed(
     )
 
 
-@router.delete("/applications/{id}")
+@router.delete("/applications/{id}", dependencies=_SENSITIVE)
 def delete_application(id: int, request: Request) -> dict:
     db: DataStore = request.app.state.db
     application = db.get_application(id)
@@ -1142,7 +1175,7 @@ async def get_poller_status(request: Request) -> PollerStatusResponse:
     )
 
 
-@router.post("/poller/trigger")
+@router.post("/poller/trigger", dependencies=_SENSITIVE)
 async def trigger_poll(request: Request) -> dict:
     scheduler = getattr(request.app.state, "poller_scheduler", None)
     if scheduler is None:
@@ -1152,7 +1185,7 @@ async def trigger_poll(request: Request) -> dict:
     return {"triggered": True, "skipped": already_running}
 
 
-@router.post("/poller/backfill-portal")
+@router.post("/poller/backfill-portal", dependencies=_SENSITIVE)
 def backfill_portal(sender_domains: list[str], request: Request) -> dict:
     """Re-scan Gmail for a portal's sender domains to pick up applications missed
     before a portal_rules.yaml rule existed for it — reclassifies threads already
@@ -1172,7 +1205,7 @@ def _reauth_redirect_uri() -> str:
     return f"{PUBLIC_BASE_URL}/api/v1/poller/reauth/callback"
 
 
-@router.post("/poller/reauth")
+@router.post("/poller/reauth", dependencies=_SENSITIVE)
 async def reauth_poller(request: Request) -> dict:
     """Mark the poller AUTH_REQUIRED and point the operator at the web re-auth flow."""
     db: DataStore = request.app.state.db
@@ -1184,22 +1217,26 @@ async def reauth_poller(request: Request) -> dict:
     }
 
 
-@router.get("/poller/reauth/start")
-async def reauth_start(request: Request, token: str | None = None) -> dict:
+class ReauthState(BaseModel):
+    """Single outstanding Gmail re-auth `state`, bound to the session that minted it."""
+
+    value: str
+    session_id: str
+    expires_at: int
+
+
+@router.get("/poller/reauth/start", dependencies=_SENSITIVE)
+async def reauth_start(request: Request, user: AuthenticatedUser = Depends(require_user)) -> dict:
     """Return a Google authorization URL for the operator to open in their own browser.
 
     This is a redirect-based web OAuth flow, not the InstalledAppFlow local-server flow —
     it works from a remote deployment (no browser/local port needed on the backend host).
     redirect_uri must be registered on the OAuth client in Google Cloud Console.
 
-    Gated by ADMIN_TOKEN: this endpoint mints the `state` that /callback trusts, so an
-    unauthenticated caller could otherwise bind their own Gmail account into this app's
-    keyring. /callback itself doesn't need the token — Google's redirect can't carry
-    custom headers/params, so it's protected by the unguessable state alone, which only
-    an authorized /start call can mint.
+    Requires a signed-in session like every protected route. The minted `state` is bound
+    to that session and expires after REAUTH_STATE_TTL_SECONDS, so /callback only accepts
+    a redirect that completes a flow this session started.
     """
-    if ADMIN_TOKEN and token != ADMIN_TOKEN:
-        raise HTTPException(status_code=403, detail="Invalid or missing token")
     scheduler = getattr(request.app.state, "poller_scheduler", None)
     if scheduler is None:
         raise HTTPException(status_code=503, detail="Poller not running")
@@ -1207,18 +1244,33 @@ async def reauth_start(request: Request, token: str | None = None) -> dict:
         auth_url, state = scheduler.poller.build_reauth_url(_reauth_redirect_uri())
     except FileNotFoundError:
         raise HTTPException(status_code=500, detail="client_secret.json not found on server")
-    request.app.state.reauth_state = state
+    request.app.state.reauth_state = ReauthState(
+        value=state,
+        session_id=user.session_id,
+        expires_at=get_auth_service(request).now() + REAUTH_STATE_TTL_SECONDS,
+    )
     return {"auth_url": auth_url}
 
 
-@router.get("/poller/reauth/callback")
-async def reauth_callback(code: str, state: str, request: Request) -> dict:
-    """Google redirects here after the operator approves access in their browser."""
+@router.get("/poller/reauth/callback", dependencies=_SENSITIVE)
+async def reauth_callback(
+    code: str, state: str, request: Request, user: AuthenticatedUser = Depends(require_user)
+) -> dict:
+    """Google redirects here after the operator approves access in their browser.
+
+    The browser reaches this through the frontend origin (PUBLIC_BASE_URL), so the
+    SameSite=Lax session cookie accompanies Google's top-level redirect.
+    """
     scheduler = getattr(request.app.state, "poller_scheduler", None)
     if scheduler is None:
         raise HTTPException(status_code=503, detail="Poller not running")
-    expected_state = getattr(request.app.state, "reauth_state", None)
-    if expected_state is None or state != expected_state:
+    expected: ReauthState | None = getattr(request.app.state, "reauth_state", None)
+    if (
+        expected is None
+        or not secrets.compare_digest(state, expected.value)
+        or expected.session_id != user.session_id
+        or expected.expires_at <= get_auth_service(request).now()
+    ):
         raise HTTPException(status_code=400, detail="Invalid or expired reauth state — start again")
     request.app.state.reauth_state = None
 
@@ -1226,7 +1278,7 @@ async def reauth_callback(code: str, state: str, request: Request) -> dict:
     try:
         scheduler.poller.complete_reauth(code, _reauth_redirect_uri())
     except Exception as exc:
-        log.error("reauth_callback_failed", error=str(exc))
+        log.error("reauth_callback_failed", error_type=type(exc).__name__)
         raise HTTPException(status_code=502, detail="Re-authentication failed. Check server logs.")
 
     db.update_poller_state(status="RUNNING", clear_error=True)
@@ -1245,7 +1297,9 @@ async def list_suppress_rules(request: Request) -> list[SuppressRuleResponse]:
     return [SuppressRuleResponse.model_validate(r) for r in db.get_suppress_rules()]
 
 
-@router.post("/suppress-rules", response_model=SuppressRuleResponse, status_code=201)
+@router.post(
+    "/suppress-rules", response_model=SuppressRuleResponse, status_code=201, dependencies=_SENSITIVE
+)
 async def create_suppress_rule(body: SuppressRuleCreate, request: Request) -> SuppressRuleResponse:
     try:
         re.compile(body.sender_pattern)
@@ -1264,7 +1318,7 @@ async def create_suppress_rule(body: SuppressRuleCreate, request: Request) -> Su
     return SuppressRuleResponse.model_validate(rule)
 
 
-@router.delete("/suppress-rules/{id}")
+@router.delete("/suppress-rules/{id}", dependencies=_SENSITIVE)
 async def delete_suppress_rule(id: int, request: Request) -> dict:
     db: DataStore = request.app.state.db
     deleted = db.delete_suppress_rule(id)
@@ -1278,7 +1332,7 @@ async def delete_suppress_rule(id: int, request: Request) -> dict:
 # ------------------------------------------------------------------ #
 
 
-@router.get("/diagnostics", response_model=DiagnosticsResponse)
+@router.get("/diagnostics", response_model=DiagnosticsResponse, dependencies=_SENSITIVE)
 async def run_diagnostics(request: Request) -> DiagnosticsResponse:
     now = utc_now()
     runner = DiagnosticRunner()
@@ -1410,3 +1464,139 @@ async def get_system_status(request: Request) -> SystemStatusResponse:
         },
         checked_at=now,
     )
+
+
+# ------------------------------------------------------------------ #
+# Public: health and sign-in                                           #
+# ------------------------------------------------------------------ #
+
+
+class HealthResponse(BaseModel):
+    status: str
+
+
+@public_router.get("/health", response_model=HealthResponse)
+async def health() -> HealthResponse:
+    """Liveness only. Deliberately reveals no counts, database, Gmail or poller details."""
+    return HealthResponse(status="ok")
+
+
+class AuthConfigResponse(BaseModel):
+    mode: str
+    configured: bool
+    google_client_id: str | None
+    nonce: str | None
+
+
+class GoogleLoginRequest(BaseModel):
+    credential: str = Field(min_length=1, max_length=8192)
+
+
+class SessionUserResponse(BaseModel):
+    email: str
+
+
+class SessionResponse(BaseModel):
+    user: SessionUserResponse
+    expires_at: datetime
+    csrf_token: str
+
+
+def _session_response(service: AuthService, session: Session) -> SessionResponse:
+    return SessionResponse(
+        user=SessionUserResponse(email=session.email),
+        expires_at=datetime.fromtimestamp(session.expires_at, tz=UTC),
+        csrf_token=service.csrf_token(session),
+    )
+
+
+def _set_session_cookie(
+    response: Response, service: AuthService, token: str, session: Session
+) -> None:
+    response.set_cookie(
+        key=service.config.cookie_name,
+        value=token,
+        max_age=max(0, session.expires_at - service.now()),
+        path="/",
+        secure=service.config.cookie_secure,
+        httponly=True,
+        samesite="lax",
+    )
+
+
+def _no_store(response: Response) -> None:
+    response.headers["Cache-Control"] = "no-store"
+
+
+@public_router.get("/auth/config", response_model=AuthConfigResponse)
+async def auth_config(request: Request, response: Response) -> AuthConfigResponse:
+    """Everything the login screen needs. The client ID is public by design; the nonce is
+    single-use and binds the Google ID token to this sign-in attempt."""
+    service = get_auth_service(request)
+    _no_store(response)
+    return AuthConfigResponse(
+        mode=service.config.mode,
+        configured=service.ready,
+        google_client_id=service.config.google_client_id if service.ready else None,
+        nonce=service.new_login_nonce(),
+    )
+
+
+@public_router.post(
+    "/auth/google",
+    response_model=SessionResponse,
+    dependencies=[Depends(require_allowed_origin), Depends(login_rate_limit)],
+)
+async def login_with_google(
+    body: GoogleLoginRequest, request: Request, response: Response
+) -> SessionResponse:
+    service = get_auth_service(request)
+    token, session = service.login_with_google(body.credential)
+    _set_session_cookie(response, service, token, session)
+    _no_store(response)
+    return _session_response(service, session)
+
+
+@public_router.post(
+    "/auth/local",
+    response_model=SessionResponse,
+    dependencies=[Depends(require_allowed_origin), Depends(login_rate_limit)],
+)
+async def login_local(request: Request, response: Response) -> SessionResponse:
+    """Explicit developer sign-in. Only when AUTH_MODE=local, outside production, from
+    loopback."""
+    service = get_auth_service(request)
+    token, session = service.login_local(client_address(request))
+    _set_session_cookie(response, service, token, session)
+    _no_store(response)
+    return _session_response(service, session)
+
+
+@public_router.get("/auth/session", response_model=SessionResponse)
+async def current_session(request: Request, response: Response) -> SessionResponse:
+    service = get_auth_service(request)
+    session = service.authenticate(request.cookies.get(service.config.cookie_name))
+    _no_store(response)
+    return _session_response(service, session)
+
+
+@public_router.post("/auth/logout", status_code=204)
+async def logout(request: Request) -> Response:
+    service = get_auth_service(request)
+    response = Response(status_code=204)
+    try:
+        session = service.authenticate(request.cookies.get(service.config.cookie_name))
+    except AuthError:
+        session = None
+    if session is not None:
+        service.check_csrf(session, request.headers.get(CSRF_HEADER))
+        service.revoke(session)
+    response.delete_cookie(
+        key=service.config.cookie_name,
+        path="/",
+        secure=service.config.cookie_secure,
+        httponly=True,
+        samesite="lax",
+    )
+    _no_store(response)
+    return response

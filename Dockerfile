@@ -18,6 +18,8 @@ COPY backend/ backend/
 COPY alembic.ini .
 
 ENV JOB_TRACKER_DIR=/data
+# Fail closed: production requires complete AUTH_* configuration to start.
+ENV APP_ENV=production
 ENV API_HOST=0.0.0.0
 ENV API_PORT=8000
 

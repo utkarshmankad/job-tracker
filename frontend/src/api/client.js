@@ -1,13 +1,81 @@
-const BASE = (import.meta.env.VITE_API_BASE ?? "http://jobtracker.localhost:8000") + "/api/v1";
+// Production builds call the API same-origin: Vercel rewrites /api/* to the Fly backend,
+// so the session cookie is first-party. Local dev talks to the backend directly.
+const API_ORIGIN =
+  import.meta.env.VITE_API_BASE ?? (import.meta.env.PROD ? "" : "http://jobtracker.localhost:8000");
+const BASE = `${API_ORIGIN}/api/v1`;
 
-async function request(path, options = {}) {
-  const res = await fetch(`${BASE}${path}`, {
-    headers: { "Content-Type": "application/json" },
-    ...options,
-  });
-  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
+// The CSRF token lives only in memory (never localStorage): the AuthProvider sets it from
+// the /auth/session response and clears it on logout or expiry.
+let csrfToken = null;
+let unauthorizedHandler = null;
+
+export function setCsrfToken(token) {
+  csrfToken = token;
+}
+
+// Called with the ApiError whenever a protected request returns 401 (expired or revoked
+// session) so the app can return to the login screen.
+export function setUnauthorizedHandler(handler) {
+  unauthorizedHandler = handler;
+}
+
+export class ApiError extends Error {
+  constructor(status, code, detail, body) {
+    super(`${status} ${body}`);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+    this.detail = detail;
+  }
+}
+
+async function toApiError(res) {
+  const body = await res.text();
+  let code = null;
+  let detail = null;
+  try {
+    const parsed = JSON.parse(body);
+    code = parsed.code ?? null;
+    detail = typeof parsed.detail === "string" ? parsed.detail : null;
+  } catch {
+    // non-JSON error body — keep the raw text in the message
+  }
+  return new ApiError(res.status, code, detail, body);
+}
+
+async function send(path, options = {}, { authRequest = false } = {}) {
+  const method = (options.method ?? "GET").toUpperCase();
+  const headers = { "Content-Type": "application/json", ...(options.headers ?? {}) };
+  if (!SAFE_METHODS.has(method) && csrfToken) headers["X-CSRF-Token"] = csrfToken;
+  const res = await fetch(`${BASE}${path}`, { ...options, headers, credentials: "include" });
+  if (!res.ok) {
+    const error = await toApiError(res);
+    if (res.status === 401 && !authRequest && unauthorizedHandler) unauthorizedHandler(error);
+    throw error;
+  }
+  return res;
+}
+
+async function request(path, options = {}, flags = {}) {
+  const res = await send(path, options, flags);
+  if (res.status === 204) return null;
   return res.json();
 }
+
+export const auth = {
+  getConfig: () => request("/auth/config", {}, { authRequest: true }),
+  getSession: () => request("/auth/session", {}, { authRequest: true }),
+  loginWithGoogle: (credential) =>
+    request(
+      "/auth/google",
+      { method: "POST", body: JSON.stringify({ credential }) },
+      { authRequest: true },
+    ),
+  loginLocal: () => request("/auth/local", { method: "POST" }, { authRequest: true }),
+  logout: () => request("/auth/logout", { method: "POST" }, { authRequest: true }),
+};
 
 export const api = {
   listApplications: (params = {}) =>
@@ -26,11 +94,7 @@ export const api = {
     request(`/applications/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteApplication: (id) =>
     request(`/applications/${id}`, { method: "DELETE" }),
-  exportApplications: async (format = "csv") => {
-    const res = await fetch(`${BASE}/applications/export?format=${format}`);
-    if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
-    return res;
-  },
+  exportApplications: (format = "csv") => send(`/applications/export?format=${format}`),
 
   getInsights: () => request("/insights"),
   getFlowData: () => request("/insights/flow"),

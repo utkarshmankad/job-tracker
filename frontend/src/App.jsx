@@ -1,10 +1,13 @@
 import { useState, useEffect, useCallback } from "react";
 import {
   LayoutList, Activity, Home, AlertTriangle,
-  Download, PlusCircle, Sun, Moon, MailSearch, ShieldCheck,
+  Download, PlusCircle, Sun, Moon, MailSearch, ShieldCheck, LogOut, Loader2,
 } from "lucide-react";
 import { api } from "./api/client";
 import { useTheme } from "./contexts/ThemeContext";
+import { useAuth } from "./contexts/auth-context";
+import BrandMark from "./components/BrandMark";
+import LoginScreen from "./components/LoginScreen";
 import PollerStatusBar from "./components/PollerStatusBar";
 import Filters from "./components/Filters";
 import ApplicationsTable from "./components/ApplicationsTable";
@@ -41,7 +44,28 @@ const TAB_TITLES = {
   status: "System Status",
 };
 
+// Tracker data components only mount once a session is confirmed, so nothing is fetched
+// before sign-in succeeds.
 export default function App() {
+  const { status } = useAuth();
+  if (status === "loading") return <SessionCheck />;
+  if (status !== "authenticated") return <LoginScreen />;
+  return <Dashboard />;
+}
+
+function SessionCheck() {
+  return (
+    <div className="min-h-screen bg-gray-50 dark:bg-gray-950 transition-colors flex items-center justify-center">
+      <p role="status" className="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
+        <Loader2 size={16} className="animate-spin" aria-hidden="true" />
+        Checking your session…
+      </p>
+    </div>
+  );
+}
+
+function Dashboard() {
+  const { user, logout } = useAuth();
   const [activeTab, setActiveTab] = useState("home");
   // Tabs mount lazily on first visit, then stay mounted (kept alive, hidden via CSS)
   // so revisiting one is instant instead of re-fetching from scratch every time.
@@ -103,18 +127,7 @@ export default function App() {
             className="flex items-center gap-2.5"
             aria-label="Go to home"
           >
-            <svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-              <defs>
-                <linearGradient id="logo-grad" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
-                  <stop offset="0%" stopColor="#38bdf8"/>
-                  <stop offset="100%" stopColor="#0369a1"/>
-                </linearGradient>
-              </defs>
-              <rect width="32" height="32" rx="7" fill="url(#logo-grad)"/>
-              <path d="M12 15V12a4 4 0 0 1 8 0v3" stroke="white" strokeWidth="2.5" strokeLinecap="round"/>
-              <rect x="4" y="15" width="24" height="13" rx="3" fill="white"/>
-              <path d="M10 22.5l3.5 3.5 8.5-8.5" stroke="#0ea5e9" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/>
-            </svg>
+            <BrandMark />
             <span className="text-2xl font-bold text-gray-900 dark:text-gray-100">
               Job Tracker
             </span>
@@ -169,6 +182,23 @@ export default function App() {
               >
                 {dark ? <Sun size={16} aria-hidden="true" /> : <Moon size={16} aria-hidden="true" />}
               </button>
+              <div className="flex items-center gap-2 pl-2 border-l border-gray-200 dark:border-gray-700">
+                <span
+                  className="hidden sm:inline max-w-[14rem] truncate text-sm text-gray-600 dark:text-gray-300"
+                  title={user?.email}
+                >
+                  <span className="sr-only">Signed in as </span>
+                  {user?.email}
+                </span>
+                <button
+                  type="button"
+                  onClick={logout}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+                >
+                  <LogOut size={15} aria-hidden="true" />
+                  Sign out
+                </button>
+              </div>
             </div>
           </div>
         </div>

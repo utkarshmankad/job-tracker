@@ -115,10 +115,13 @@ jobs:
           uvicorn backend.main:app --host 127.0.0.1 --port 8000 &
           SERVER_PID=$!
           for i in $(seq 1 20); do
-            curl -sf http://127.0.0.1:8000/api/v1/status && break
+            curl -sf http://127.0.0.1:8000/api/v1/health && break
             sleep 1
           done
-          curl -sf http://127.0.0.1:8000/api/v1/status || (echo "smoke test failed: /status unreachable" && kill $SERVER_PID && exit 1)
+          curl -sf http://127.0.0.1:8000/api/v1/health || (echo "smoke test failed: /health unreachable" && kill $SERVER_PID && exit 1)
+          # Protected data must be refused without a session.
+          STATUS=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/api/v1/applications)
+          [ "$STATUS" = "401" ] || (echo "smoke test failed: /applications returned $STATUS without auth" && kill $SERVER_PID && exit 1)
           kill $SERVER_PID
 
   coverage-gate:
