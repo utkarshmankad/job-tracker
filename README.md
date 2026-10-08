@@ -183,6 +183,13 @@ Google and only `AUTH_ALLOWED_EMAIL` is accepted; locally, set `AUTH_MODE=local`
 an explicit developer sign-in. Setup, environment variables, Vercel/Fly configuration and
 rotation: [docs/authentication.md](docs/authentication.md).
 
+## Database migrations and backups
+
+The schema is versioned with Alembic. Locally an older database is backed up and upgraded
+automatically on startup; in production the API waits in maintenance mode until an operator
+runs `scripts/migrate_database.py upgrade`. Backups, restores and the Fly.io runbooks:
+[docs/database-operations.md](docs/database-operations.md).
+
 ## Useful commands
 
 ```bash

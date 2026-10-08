@@ -15,10 +15,23 @@ CREDENTIALS_PATH = JOB_TRACKER_DIR / "client_secret.json"
 LOG_DIR = JOB_TRACKER_DIR / "logs"
 PORTAL_RULES_PATH = Path(__file__).parent / "parser" / "portal_rules.yaml"
 
+# Database recovery and migrations — see docs/database-operations.md.
+# Backups live beside the database (on the Fly volume in production), one directory each.
+BACKUP_DIR_NAME = "backups"
+BACKUP_DIR = JOB_TRACKER_DIR / BACKUP_DIR_NAME
+# Default number of verified backups kept when a backup run is asked to prune (--keep).
+BACKUP_RETENTION_COUNT = 14
+# While this file exists the API starts in maintenance mode: no DataStore, no poller, every
+# data endpoint returns 503. Used to quiesce writers before a migration or restore.
+MAINTENANCE_FLAG_PATH = JOB_TRACKER_DIR / "MAINTENANCE"
+
 # API
 GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 GMAIL_KEYCHAIN_SERVICE = "job-tracker-gmail"
 GMAIL_KEYCHAIN_USERNAME = "oauth-token"
+# Environment variable carrying the Gmail authorized-user token JSON (used on Fly instead of
+# the keychain). When set, client_secret.json is only needed for the web re-auth flow.
+GMAIL_TOKEN_ENV_VAR = "GMAIL_TOKEN_JSON"
 
 # Poller
 POLL_INTERVAL_SECONDS = 300  # 5 minutes
@@ -63,6 +76,12 @@ AUTH_LOGIN_NONCE_TTL_SECONDS = 600
 GOOGLE_ID_TOKEN_CLOCK_SKEW_SECONDS = 10
 # Gmail re-auth `state` minted by /poller/reauth/start is only honoured this long.
 REAUTH_STATE_TTL_SECONDS = 600
+
+# Schema migrations at startup. Outside production an outdated database is backed up and
+# upgraded automatically unless DB_AUTO_MIGRATE=false. In production this flag is ignored:
+# an outdated schema puts the API in maintenance mode until an operator runs
+# scripts/migrate_database.py (see docs/database-operations.md).
+DB_AUTO_MIGRATE: bool = os.environ.get("DB_AUTO_MIGRATE", "true").lower() == "true"
 
 # Rate limits (in-process, per client address): sign-in attempts, and sensitive operations
 # (deletes, merges, bulk edits, imports, exports, poller and Gmail re-auth controls,

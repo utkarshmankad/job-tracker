@@ -128,41 +128,60 @@ original API-token sketch in favour of Google identity):
   401/403/429 bodies; query strings redacted from access logs.
 - Frontend: login screen, session restore, account display, sign-out, 401/expiry handling.
 
-### Step 2 — Backups and restore
+### Steps 2–3 — Versioned migrations and verified recovery
 
-- `DataStore.backup_to(dest: Path) -> BackupResult` using the SQLite online backup API (WAL-safe;
-  lives in `data_store.py`, the only place raw `sqlite3` is allowed), followed by
-  `PRAGMA integrity_check` on the copy and a SHA-256 recorded in a sidecar manifest (time, size,
-  Alembic revision, app version).
-- CLI `backend/db/backup_cli.py`: `backup`, `list`, `verify <file>`, `restore <file>`.
-  Restore refuses while the API/poller holds the DB (lock file / PID check), verifies integrity
-  and revision compatibility, moves the current DB aside (never deletes), then swaps in the copy.
-- Scheduled backups (APScheduler, daily) plus mandatory automatic backup before every migration
-  and before every reconciliation apply. Retention count from `config.py`
-  (`BACKUP_DIR`, `BACKUP_RETENTION_COUNT`). Files `0600`, under `JOB_TRACKER_DIR`, gitignored and
-  dockerignored.
-- Fly: backups land on the mounted `/data` volume; verify `fly volumes snapshots` retention is
-  enabled for `job_tracker_data_sin`; document `fly ssh sftp get` for pulling a copy offsite
-  manually. An authenticated `GET /admin/backups/latest` download is optional.
-- A restore drill (backup → mutate → restore → compare) runs as an integration test.
+Implemented together; the operator runbook is [`docs/database-operations.md`](database-operations.md).
 
-### Step 3 — Versioned migrations
+**Migration design**
 
-- Wire `backend/db/alembic/env.py` to `SQLModel.metadata` and `config.DB_PATH`;
-  `render_as_batch=True` for SQLite; remove the placeholder `sqlalchemy.url` and the empty
-  `backend/db/migrations/` directory.
-- Revision `0001_baseline` reproduces the current schema exactly, including the three
-  `_migrate_schema` columns and enum storage format (value vs. name — see the SAEnum issue the
-  diagnostics endpoint detects).
-- Existing databases: on first run, back up, verify the live schema matches the baseline
-  (table/column comparison), then `alembic stamp 0001`. Mismatch aborts with a diagnostic rather
-  than guessing.
-- Startup: backup → `alembic upgrade head` → open `DataStore`. `create_all()` and
-  `_migrate_schema()` are removed; one-off backfills become data migrations.
-- CI check: `alembic upgrade head` on an empty DB produces the same schema as the models
-  (autogenerate diff is empty), and every revision round-trips `upgrade` → `downgrade` → `upgrade`.
-- Update `CLAUDE.md`: the `_migrate_schema` raw-SQL exception is replaced by "Alembic revisions
-  under `backend/db/alembic/versions/`".
+- Alembic is wired (`backend/db/alembic/env.py`: `SQLModel.metadata`, `render_as_batch=True`,
+  URL from `DB_PATH` or `-x db=`; programmatic use shares DataStore's connection).
+- Revision `0001_baseline` reproduces the `origin/main` schema exactly (a test compares
+  `sqlite_master` DDL with a dump taken from `origin/main`) and is idempotent: it creates an
+  empty database, adopts an unversioned `origin/main` database without changing any object,
+  and completes older databases (missing tables/columns/indexes and the `Instahire` data fix)
+  exactly as `create_all()` + `_migrate_schema()` used to. It refuses to downgrade.
+- `DataStore._migrate_schema()` and `create_all()` are gone. `backend/db/schema.py` applies a
+  startup policy: empty → create at head; outdated → in development back up then upgrade
+  (`DB_AUTO_MIGRATE`, default on), in production refuse with `SchemaOutdatedError`; unknown
+  revision → refuse. A refused database puts the API in **maintenance mode** (no DataStore, no
+  poller, data endpoints 503, health unchanged). Diagnostics use an inspect-only policy.
+- Idempotent runtime data maintenance (poller-state row, thread-ID and milestone-event
+  backfills) still runs at startup, but only on a current schema.
+- Schema-version diagnostic: `scripts/migrate_database.py status`, the `schema_revision` and
+  complete `schema_tables` checks in `backend/diagnostics.py`, and a *Database Schema*
+  component on the authenticated `/status`.
+
+**Backup strategy**
+
+- SQLite online backup API only (`DataStore.online_backup`), never file copies; the copy is
+  converted to a standalone file, integrity-checked, and described by a manifest (timestamp,
+  schema revision, SHA-256, size, application and per-table counts, tool version) written
+  last. Directories are created exclusively; nothing is ever overwritten. Files 0600.
+- `scripts/backup_database.py` (verifies by default; `--keep N` prunes only after a verified
+  backup and only tool-written backups). Pre-migration backups are automatic and mandatory in
+  `scripts/migrate_database.py upgrade`.
+- Fly: backups on `/data/backups`; opt-in daily GitHub Actions workflow over `fly ssh`
+  (`FLY_BACKUPS_ENABLED`), Fly volume snapshots, and manual off-provider pulls.
+
+**Restore procedure**
+
+`scripts/restore_database.py <backup> --destination <file> [--force]`: validates manifest,
+size, checksum and `PRAGMA integrity_check`; builds the copy beside the destination,
+re-checks integrity, revision and application count; then atomically moves it into place.
+An existing destination (or `-wal`/`-shm`) is refused without `--force`, and with `--force`
+moved aside to `*.pre-restore-<ts>`. The live `DB_PATH` additionally requires the maintenance
+flag (or `--allow-live` with the API stopped). `scripts/verify_backup.py` restores into a
+temporary directory, trial-migrates older backups there, and opens the copy through DataStore.
+
+**Rollback procedure** — see §5 and the runbook: restore the printed pre-migration backup
+while in maintenance mode, then deploy the matching release; or roll forward.
+
+**Operational risks** — backups share the Fly volume (mitigated by snapshots and off-provider
+copies); SQLite DDL is not fully transactional (mandatory backup, trial migration, post-checks);
+maintenance windows pause Gmail polling (history ID catch-up; backfill after ~7 days);
+restores lose post-backup manual edits; backups contain personal data. Full table in the
+runbook.
 
 ### Step 4 — Evidence model (additive migration `0002`)
 
@@ -258,24 +277,34 @@ Make the E2E job blocking in CI. Flows, all against a seeded temporary DB with G
 
 ## 5. Migration and rollback strategy
 
+Concrete procedures (production migration sequence, rollback, Fly backup/restore) are in
+[`docs/database-operations.md`](database-operations.md). Summary:
+
 - **Expand only.** Every Phase 1 revision adds tables/columns/indexes; nothing is dropped or
-  renamed. The previous application release therefore runs against the new schema, so an app
-  rollback never requires a schema rollback.
-- **Backup before change.** Startup takes a verified backup before `alembic upgrade`;
-  reconciliation apply takes one before writing. Backups carry their Alembic revision.
-- **Downgrades exist and are tested** (`upgrade → downgrade → upgrade` in CI), but the primary
-  recovery path for data problems is restore from the pre-change backup.
+  renamed. The pre-Phase-1 release runs against any Phase 1 schema. A Phase 1 release whose
+  head is older than the database's revision deliberately starts in maintenance mode, so a
+  code rollback across a migration is paired with restoring the pre-migration backup (or a
+  roll-forward).
+- **Backup before change.** `migrate_database.py upgrade` always creates and verifies a backup
+  (including a trial migration of a temporary copy) before migrating; development
+  auto-upgrades take one too; reconciliation apply (Step 7) will do the same. Backups carry
+  their Alembic revision.
+- **Restore, not downgrade.** `0001_baseline` refuses to downgrade. Later revisions provide
+  downgrades where they are safe, but the primary recovery path is restoring the
+  pre-migration backup, which the migration command prints.
 - **Dual-write before cut-over.** Evidence is written alongside the legacy thread fields
   (Step 4) before the resolver reads from it (Step 5). Legacy fields remain authoritative until
   the resolver ships; removal is a later phase.
-- **Production rollout per step:** deploy to Fly → confirm `/status` and the poller → spot-check
-  data. Rollback: `fly releases` → redeploy the previous image; if data is wrong, stop the
-  machine, restore the pre-deploy backup with `backup_cli.py restore`, restart.
+- **Production rollout per step:** quiesce (maintenance flag) → `migrate_database.py upgrade`
+  → diagnostics → resume → confirm `/status` and the poller → spot-check data. Rollback:
+  restore the pre-migration backup in maintenance mode, then `fly releases` → redeploy the
+  matching image.
 - **Merges are reversible by design** (soft delete + snapshot), so reconciliation mistakes are
   undone per operation without a full restore.
-- **Auth rollout:** set `API_TOKEN`/`SESSION_SECRET` Fly secrets and the Vercel rewrite before
-  deploying Step 1, so the fail-closed check does not take the API down. Rollback: redeploy the
-  previous release (do not ship a "disable auth" flag to production).
+- **Auth rollout:** set the `AUTH_*`, `FRONTEND_ORIGIN` and `PUBLIC_BASE_URL` Fly secrets and
+  remove `VITE_API_BASE` from Vercel before deploying Step 1, so the fail-closed check does
+  not take the API down (see `docs/authentication.md`). Rollback: redeploy the previous
+  release (never ship a "disable auth" flag to production).
 
 ## 6. Security risks
 
@@ -297,7 +326,7 @@ Make the E2E job blocking in CI. Flows, all against a seeded temporary DB with G
 ## 7. Test strategy
 
 - **Unit** (mirrors source per `CLAUDE.md`): `test_auth.py`, `test_identity_resolver.py`,
-  `test_backup_cli.py`, `test_reconcile_cli.py`, plus extensions to `test_data_store.py`,
+  `test_backup.py`, `test_schema.py`, `test_recovery_cli.py`, `test_reconcile_cli.py`, plus extensions to `test_data_store.py`,
   `test_status_updater.py`, `test_email_parser.py`. Resolver rules are table-driven, one case per
   rule and per known false-positive from the May 2026 parser fixes.
 - **Email fixtures**: anonymized header/snippet fixtures for confirmations, status updates,
@@ -320,10 +349,10 @@ Make the E2E job blocking in CI. Flows, all against a seeded temporary DB with G
 
 ## 8. Definition of done
 
-- [ ] All Fly-deployed `/api/v1` routes except the documented liveness and OAuth-callback
+- [ ] All Fly-deployed `/api/v1` routes except the documented liveness and sign-in
       routes return 401 without valid credentials; the server refuses to start in production
       without secrets; no secret appears in the frontend bundle or in URLs.
-- [ ] Daily and pre-migration backups run on Fly and locally; `backup_cli.py restore` has been
+- [ ] Daily and pre-migration backups run on Fly and locally; `scripts/restore_database.py` has been
       exercised end to end against a copy of production data; Fly volume snapshots confirmed.
 - [ ] Alembic is the only schema-change path; production DB is stamped and at `head`;
       `create_all()`/`_migrate_schema()` removed; `CLAUDE.md` updated.

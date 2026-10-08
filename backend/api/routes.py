@@ -70,6 +70,22 @@ public_router = APIRouter()
 # Destructive or expensive operations share a per-client rate limit.
 _SENSITIVE = [Depends(sensitive_rate_limit)]
 
+# Reachable in maintenance mode (no DataStore) so the operator can see why.
+_MAINTENANCE_ALLOWED_PATHS = frozenset({"/api/v1/status", "/api/v1/diagnostics"})
+
+
+def require_database(request: Request) -> None:
+    """Router-level dependency (after authentication): data endpoints return 503 while the
+    API is in maintenance mode for a migration or restore."""
+    if getattr(request.app.state, "db", None) is not None:
+        return
+    if request.url.path in _MAINTENANCE_ALLOWED_PATHS:
+        return
+    raise HTTPException(
+        status_code=503,
+        detail="Job Tracker is in maintenance mode (database migration or restore in progress).",
+    )
+
 
 # ------------------------------------------------------------------ #
 # Response models                                                      #
@@ -1357,10 +1373,26 @@ async def run_diagnostics(request: Request) -> DiagnosticsResponse:
 
 @router.get("/status", response_model=SystemStatusResponse)
 async def get_system_status(request: Request) -> SystemStatusResponse:
-    db: DataStore = request.app.state.db
+    db: DataStore | None = request.app.state.db
     now = utc_now()
     started_at: datetime | None = getattr(request.app.state, "started_at", None)
     components: list[ComponentStatusResponse] = []
+
+    if db is None:
+        reason = getattr(request.app.state, "maintenance_reason", None) or "unknown"
+        return SystemStatusResponse(
+            overall="outage",
+            components=[
+                ComponentStatusResponse(
+                    name="Database",
+                    status="outage",
+                    description=f"Maintenance mode: {reason}",
+                    checked_at=now,
+                )
+            ],
+            stats={"maintenance": True},
+            checked_at=now,
+        )
 
     # API Server — always operational if the request arrived
     components.append(
@@ -1395,6 +1427,21 @@ async def get_system_status(request: Request) -> SystemStatusResponse:
                 checked_at=now,
             )
         )
+
+    # Schema version
+    schema_status = db.schema_status
+    components.append(
+        ComponentStatusResponse(
+            name="Database Schema",
+            status="operational" if schema_status.is_current else "outage",
+            description=(
+                f"Revision {schema_status.current_revision} (head)"
+                if schema_status.is_current
+                else schema_status.describe()
+            ),
+            checked_at=now,
+        )
+    )
 
     # Gmail Poller
     poller = db.get_poller_state()
@@ -1461,6 +1508,7 @@ async def get_system_status(request: Request) -> SystemStatusResponse:
             "db_size_kb": db_size_kb,
             "last_poll_at": poller.last_sync_at.isoformat() if poller.last_sync_at else None,
             "uptime_seconds": uptime_seconds,
+            "schema_revision": schema_status.current_revision,
         },
         checked_at=now,
     )

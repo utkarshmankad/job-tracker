@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import structlog
 from sqlalchemy import ColumnElement, event, func, inspect, or_
-from sqlmodel import Session, SQLModel, col, create_engine, select
+from sqlmodel import Session, col, create_engine, select
 
 from backend.config import DB_PATH, STALE_DAYS_THRESHOLD
+from backend.db import schema
 from backend.db.models import (
     Application,
     ApplicationEvent,
@@ -26,6 +28,7 @@ from backend.db.models import (
     SuppressRule,
     utc_now,
 )
+from backend.db.schema import SchemaPolicy, SchemaStatus
 
 
 def is_application_stale(app: Application, threshold_days: int = STALE_DAYS_THRESHOLD) -> bool:
@@ -65,8 +68,16 @@ class ApplicationFilter:
 
 
 class DataStore:
-    def __init__(self, db_path: Path = DB_PATH) -> None:
+    def __init__(self, db_path: Path = DB_PATH, schema_policy: SchemaPolicy | None = None) -> None:
+        """Open the database and apply the schema policy (backend/db/schema.py).
+
+        Schema changes happen only through Alembic revisions. An empty database is created
+        at head; an outdated one is upgraded (with a backup first) under the AUTO policy or
+        rejected with SchemaOutdatedError under VERIFY (production). Runtime data
+        maintenance below runs only once the schema is current.
+        """
         db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._db_path = db_path
         self._engine = create_engine(
             f"sqlite:///{db_path}",
             connect_args={"check_same_thread": False},
@@ -79,41 +90,22 @@ class DataStore:
             cursor.execute("PRAGMA foreign_keys=ON")
             cursor.close()
 
-        SQLModel.metadata.create_all(self._engine)
-        self._migrate_schema()
-        self._ensure_poller_state()
-        self._backfill_thread_id_index()
-        self._backfill_application_events()
+        self.schema_status: SchemaStatus = schema.prepare(
+            self._engine, db_path, schema_policy or schema.default_policy()
+        )
+        if self.schema_status.is_current:
+            self._ensure_poller_state()
+            self._backfill_thread_id_index()
+            self._backfill_application_events()
 
-    def _migrate_schema(self) -> None:
-        # Column introspection uses SQLAlchemy Core's inspect() — no raw SQL needed.
-        # ALTER TABLE ADD COLUMN has no portable Core/ORM construct in SQLAlchemy, so it
-        # stays a raw DDL string via text() — a documented exception to "no raw SQL
-        # strings" (see CLAUDE.md), kept local to DataStore so it's still the single
-        # point of DB access.
-        from sqlalchemy import text
+    def upgrade_schema(self) -> SchemaStatus:
+        """Apply pending Alembic revisions now (operator/maintenance use)."""
+        self.schema_status = schema.upgrade(self._engine)
+        return self.schema_status
 
-        with self._engine.connect() as conn:
-            cols = {c["name"] for c in inspect(conn).get_columns("application")}
-            if "withdraw_reason" not in cols:
-                conn.execute(text("ALTER TABLE application ADD COLUMN withdraw_reason VARCHAR"))
-            if "application_method" not in cols:
-                conn.execute(
-                    text(
-                        "ALTER TABLE application ADD COLUMN application_method "
-                        "VARCHAR NOT NULL DEFAULT 'Unknown'"
-                    )
-                )
-            conn.execute(
-                text(
-                    "UPDATE application SET source_portal = 'Instahyre' "
-                    "WHERE source_portal = 'Instahire'"
-                )
-            )
-            prospect_cols = {c["name"] for c in inspect(conn).get_columns("prospect")}
-            if "application_id" not in prospect_cols:
-                conn.execute(text("ALTER TABLE prospect ADD COLUMN application_id INTEGER"))
-            conn.commit()
+    def close(self) -> None:
+        """Dispose of pooled connections (lets backup/restore tooling release the file)."""
+        self._engine.dispose()
 
     def _backfill_application_events(self) -> None:
         """Create idempotent milestone events from existing status history."""
@@ -639,13 +631,84 @@ class DataStore:
     def inspect_schema_tables(db_path: Path) -> set[str]:
         """Return table names actually present on disk, without creating missing ones.
 
-        Deliberately bypasses DataStore's normal constructor — that calls
-        SQLModel.metadata.create_all(), which would silently create the missing tables
-        this check exists to detect. Uses a throwaway engine for inspection only.
+        Deliberately bypasses DataStore's normal constructor — that applies the schema
+        policy, which could create the very tables this check exists to detect. Uses a
+        throwaway read-only engine for inspection only.
         """
-        engine = create_engine(f"sqlite:///{db_path}")
+        engine = schema.readonly_engine(db_path)
         try:
             return set(inspect(engine).get_table_names())
+        finally:
+            engine.dispose()
+
+    # ------------------------------------------------------------------ #
+    # Backup primitives — the only raw sqlite3 use in the codebase         #
+    # (see CLAUDE.md). Higher-level workflow lives in backend/db/backup.py #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def online_backup(source: Path, destination: Path) -> None:
+        """Copy a database with SQLite's online backup API.
+
+        Safe while the app is running: the backup API reads a consistent snapshot through
+        SQLite itself (including pages still in the WAL), unlike copying the .db/-wal/-shm
+        files. `destination` must not exist; the copy is converted to a standalone
+        rollback-journal file so it has no -wal/-shm companions.
+        """
+        if not source.is_file():
+            raise FileNotFoundError(f"Database not found: {source}")
+        # Exclusive create: never overwrite an existing file, even in a race.
+        with open(destination, "xb"):
+            pass
+        src = sqlite3.connect(str(source))
+        try:
+            dst = sqlite3.connect(str(destination))
+            try:
+                src.backup(dst)
+                dst.execute("PRAGMA journal_mode=DELETE")
+                dst.commit()
+            finally:
+                dst.close()
+        finally:
+            src.close()
+
+    @staticmethod
+    def integrity_check(db_path: Path, *, read_only: bool = True) -> list[str]:
+        """Run PRAGMA integrity_check. Returns ["ok"] when healthy, otherwise SQLite's list
+        of problems. Use read_only=False for a live WAL database (a read-only connection
+        cannot create the -shm file it needs); the check itself never writes."""
+        if not db_path.is_file():
+            return [f"database file not found: {db_path}"]
+        target = f"file:{db_path}?mode=ro" if read_only else f"file:{db_path}?mode=rw"
+        conn = sqlite3.connect(target, uri=True)
+        try:
+            return [str(row[0]) for row in conn.execute("PRAGMA integrity_check").fetchall()]
+        except sqlite3.DatabaseError as exc:
+            return [f"not a valid SQLite database: {exc}"]
+        finally:
+            conn.close()
+
+    @staticmethod
+    def count_rows_readonly(db_path: Path) -> dict[str, int]:
+        """Row counts for the main tables of a database file, opened read-only through
+        SQLAlchemy Core. Tables that do not exist are omitted."""
+        tables = {
+            "application": Application,
+            "statushistory": StatusHistory,
+            "applicationevent": ApplicationEvent,
+            "applicationthreadid": ApplicationThreadId,
+            "prospect": Prospect,
+            "processedmessage": ProcessedMessage,
+        }
+        engine = schema.readonly_engine(db_path)
+        try:
+            present = set(inspect(engine).get_table_names())
+            counts: dict[str, int] = {}
+            with Session(engine) as session:
+                for name, model in tables.items():
+                    if name in present:
+                        counts[name] = session.exec(select(func.count()).select_from(model)).one()
+            return counts
         finally:
             engine.dispose()
 

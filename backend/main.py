@@ -16,7 +16,7 @@ from backend.api.auth import (
     require_user,
     validate_auth_config,
 )
-from backend.api.routes import public_router, router
+from backend.api.routes import public_router, require_database, router
 from backend.config import (
     API_HOST,
     API_PORT,
@@ -31,6 +31,7 @@ from backend.config import (
 )
 from backend.db.data_store import DataStore
 from backend.db.models import utc_now
+from backend.db.schema import SchemaOutdatedError
 from backend.engine.duplicate_detector import DuplicateDetector
 from backend.engine.status_updater import StatusUpdater
 from backend.parser.llm_extractor import LLMExtractor
@@ -61,18 +62,47 @@ def build_auth_service() -> AuthService:
     return AuthService(auth_config)
 
 
+def _open_database() -> tuple[DataStore | None, str | None]:
+    """Open the database, or explain why the API must stay in maintenance mode.
+
+    Maintenance mode (no DataStore, no poller, data endpoints return 503) is entered when
+    the maintenance flag file exists — the operator is migrating or restoring — or when the
+    schema needs a migration that the startup policy will not run unattended (always the
+    case in production). See docs/database-operations.md.
+    """
+    from backend import config as app_config
+
+    if app_config.MAINTENANCE_FLAG_PATH.exists():
+        return None, "maintenance flag present"
+    try:
+        return DataStore(app_config.DB_PATH), None
+    except SchemaOutdatedError as exc:
+        return None, exc.status.describe()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from backend.poller.scheduler import PollerScheduler, build_poller
 
     # First, before any data is opened: refuse to serve with broken production auth.
     app.state.auth = build_auth_service()
-
-    db = DataStore()
-    app.state.db = db
-    app.state.updater = StatusUpdater(db, DuplicateDetector(db))
     app.state.started_at = utc_now()
     app.state.reauth_state = None
+
+    db, maintenance_reason = _open_database()
+    app.state.db = db
+    app.state.maintenance_reason = maintenance_reason
+    if db is None:
+        # Quiesced: no writers at all, so an operator can migrate or restore safely.
+        app.state.updater = None
+        app.state.llm_extractor = None
+        app.state.poller_scheduler = None
+        log.warning("app_started_in_maintenance_mode", reason=maintenance_reason)
+        yield
+        log.info("app_shutdown")
+        return
+
+    app.state.updater = StatusUpdater(db, DuplicateDetector(db))
     app.state.llm_extractor = (
         LLMExtractor(LLM_BASE_URL, LLM_MODEL, LLM_TIMEOUT_SECONDS, LLM_API_KEY)
         if LLM_ENABLED
@@ -135,7 +165,11 @@ app.add_middleware(
 )
 
 app.include_router(public_router, prefix="/api/v1")
-app.include_router(router, prefix="/api/v1", dependencies=[Depends(require_user)])
+app.include_router(
+    router,
+    prefix="/api/v1",
+    dependencies=[Depends(require_user), Depends(require_database)],
+)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 """Shared pytest fixtures."""
 
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 from sqlmodel import Session
@@ -76,3 +77,84 @@ def stale_app(db):
         session.add(record)
         session.commit()
     return saved
+
+
+SCHEMA_FIXTURES = Path(__file__).parent / "fixtures" / "schema"
+
+
+def build_legacy_database(path: Path, fixture: str = "pre_phase1_schema.sql") -> Path:
+    """Create an unversioned database from a verbatim schema dump (tests only).
+
+    Test-fixture exception to the "no raw sqlite3 / raw SQL" rule: the point is to reproduce
+    the exact DDL older releases left on disk, which the ORM cannot express.
+    """
+    import sqlite3
+
+    conn = sqlite3.connect(path)
+    try:
+        conn.executescript((SCHEMA_FIXTURES / fixture).read_text())
+        conn.commit()
+    finally:
+        conn.close()
+    return path
+
+
+def seed_legacy_rows(path: Path, *, with_phase1_tables: bool = True) -> dict[str, int]:
+    """Insert representative rows the way origin/main stored them. Returns row counts."""
+    import sqlite3
+
+    conn = sqlite3.connect(path)
+    try:
+        app_cols = (
+            "company, role, source_portal, applied_date, current_status, thread_ids, "
+            "is_false_positive, created_at, updated_at"
+        )
+        if with_phase1_tables:
+            app_cols += ", application_method"
+        rows = [
+            ("Acme", "Engineer", "LinkedIn", "2026-05-01 10:00:00", "Applied", '["t-1"]'),
+            ("Globex", "Analyst", "Instahire", "2026-05-02 10:00:00", "Rejected", '["t-2","t-3"]'),
+            ("Initech", "SRE", "Naukri", "2026-05-03 10:00:00", "Interview Scheduled", "[]"),
+        ]
+        for company, role, portal, applied, status, threads in rows:
+            values = [company, role, portal, applied, status, threads, 0, applied, applied]
+            if with_phase1_tables:
+                values.append("Easy Apply")
+            conn.execute(
+                f"INSERT INTO application ({app_cols}) VALUES ({','.join('?' * len(values))})",
+                values,
+            )
+        conn.execute(
+            'INSERT INTO statushistory (application_id, from_status, to_status, "trigger", '
+            "changed_at, message_id) VALUES (2, 'Applied', 'Rejected', 'email', "
+            "'2026-05-09 10:00:00', 'm-2')"
+        )
+        conn.execute(
+            "INSERT INTO processedmessage (message_id, processed_at, result) "
+            "VALUES ('m-2', '2026-05-09 10:00:00', 'status_update')"
+        )
+        conn.execute("INSERT INTO pollerstate (id, status) VALUES (1, 'SLEEPING')")
+        counts = {"application": 3, "statushistory": 1}
+        if with_phase1_tables:
+            conn.execute(
+                "INSERT INTO applicationevent (application_id, event_type, occurred_at, source, "
+                "status_history_id, created_at) VALUES (2, 'Rejected', '2026-05-09 10:00:00', "
+                "'email', 1, '2026-05-09 10:00:00')"
+            )
+            conn.execute(
+                "INSERT INTO applicationthreadid (application_id, thread_id) VALUES "
+                "(1, 't-1'), (2, 't-2'), (2, 't-3')"
+            )
+            conn.execute(
+                "INSERT INTO prospect (source_portal, category, title, sender, received_at, "
+                "gmail_message_id, gmail_thread_id, application_id, status, "
+                "classification_reason, created_at, updated_at) VALUES ('LinkedIn', "
+                "'recruiter_outreach', 'Role at Acme', 'Recruiter', '2026-05-04 10:00:00', "
+                "'p-1', 'pt-1', 1, 'New', 'outreach', '2026-05-04 10:00:00', "
+                "'2026-05-04 10:00:00')"
+            )
+            counts.update(applicationevent=1, applicationthreadid=3, prospect=1)
+        conn.commit()
+        return counts
+    finally:
+        conn.close()
