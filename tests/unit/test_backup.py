@@ -391,3 +391,14 @@ def test_prune_skips_directories_with_foreign_manifests(live_db: Path, backup_ro
     create_backup(live_db, backup_root, now=NOW)
     prune_backups(backup_root, keep=1)
     assert foreign.is_dir()
+
+
+def test_latest_backup_is_by_creation_time_not_label(live_db: Path, backup_root: Path) -> None:
+    """Regression: backups in the same second sorted by label made `--latest` pick an older
+    pre-migration backup over a newer manual one."""
+    older = create_backup(live_db, backup_root, label="zzz-older", now=NOW)
+    newer = create_backup(live_db, backup_root, label="aaa-newer", now=NOW.replace(microsecond=5))
+    assert older.path.name[:16] == newer.path.name[:16]  # same second
+    assert list_backups(backup_root) == [older.path, newer.path]
+    assert latest_backup(backup_root) == newer.path
+    assert prune_backups(backup_root, keep=1) == [older.path]

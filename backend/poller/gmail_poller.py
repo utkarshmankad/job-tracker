@@ -190,6 +190,13 @@ class GmailPoller:
         secret, so polling does not need client_secret.json; that file is only required for
         the web re-auth flow and its absence is reported as a note, not a failure.
         """
+        from backend import config as app_config
+
+        if not app_config.POLLER_ENABLED:
+            # Do not read the environment token or the keychain when polling is off.
+            return CredentialReport(
+                True, "disabled", "Polling disabled (POLLER_ENABLED=false); credentials not loaded"
+            )
         reauth_note = (
             ""
             if CREDENTIALS_PATH.exists()

@@ -346,6 +346,11 @@ Concrete procedures (production migration sequence, rollback, Fly backup/restore
   `mypy backend/` clean, ruff/ESLint clean on every touched file.
 - Gmail is always mocked with `unittest.mock`; no test calls the real API; all file I/O uses
   `tmp_path`.
+- Isolation is enforced, not just conventional: `tests/isolation.py` runs before any backend
+  import (temporary `JOB_TRACKER_DIR`, `POLLER_ENABLED=false`, Redis/LLM off, secrets and
+  `.env` excluded) and installs keyring and socket guards; a test that touches the keychain
+  or a non-loopback address fails even if the error was swallowed
+  (`tests/integration/test_app_isolation.py`).
 
 ## 8. Definition of done
 

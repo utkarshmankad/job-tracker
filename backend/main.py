@@ -2,6 +2,7 @@
 
 import logging
 from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING
 
 import structlog
 from fastapi import Depends, FastAPI, Request
@@ -35,6 +36,9 @@ from backend.db.schema import SchemaOutdatedError
 from backend.engine.duplicate_detector import DuplicateDetector
 from backend.engine.status_updater import StatusUpdater
 from backend.parser.llm_extractor import LLMExtractor
+
+if TYPE_CHECKING:
+    from backend.poller.scheduler import PollerScheduler
 
 log = structlog.get_logger()
 
@@ -82,8 +86,6 @@ def _open_database() -> tuple[DataStore | None, str | None]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from backend.poller.scheduler import PollerScheduler, build_poller
-
     # First, before any data is opened: refuse to serve with broken production auth.
     app.state.auth = build_auth_service()
     app.state.started_at = utc_now()
@@ -109,20 +111,37 @@ async def lifespan(app: FastAPI):
         else None
     )
 
+    scheduler = _start_poller()
+    app.state.poller_scheduler = scheduler
+
+    log.info("app_started", poller_enabled=scheduler is not None)
+    yield
+
+    if scheduler is not None:
+        scheduler.stop()
+    log.info("app_shutdown")
+
+
+def _start_poller() -> "PollerScheduler | None":
+    """Build, authenticate and start the Gmail poller — unless POLLER_ENABLED is false, in
+    which case nothing Gmail-related is touched (no credentials, keychain, Google client,
+    poller thread or sleep watcher)."""
+    from backend import config as app_config
+
+    if not app_config.POLLER_ENABLED:
+        log.info("poller_disabled", reason="POLLER_ENABLED=false")
+        return None
+
+    from backend.poller.scheduler import PollerScheduler, build_poller
+
     poller = build_poller()
     scheduler = PollerScheduler(poller)
-    app.state.poller_scheduler = scheduler
     try:
         poller.authenticate()
         scheduler.start()
     except Exception as exc:
         log.error("poller_start_failed", error=str(exc))
-
-    log.info("app_started")
-    yield
-
-    scheduler.stop()
-    log.info("app_shutdown")
+    return scheduler
 
 
 class _RedactQueryStringFilter(logging.Filter):

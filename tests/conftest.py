@@ -1,13 +1,84 @@
-"""Shared pytest fixtures."""
+"""Shared pytest fixtures.
 
+Isolation comes first: tests/isolation.py configures the environment (temporary
+JOB_TRACKER_DIR, poller/Redis/LLM disabled, no secrets, no .env) and installs keyring and
+socket guards *before* any backend module is imported, because backend/config.py reads the
+environment at import time. Do not import backend modules above this block.
+"""
+
+from tests import isolation
+
+isolation.install()
+
+# ruff: noqa: E402 — backend imports must follow isolation.install()
 from datetime import timedelta
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from sqlmodel import Session
 
 from backend.db.data_store import DataStore
 from backend.db.models import Application, ApplicationStatus, utc_now
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Remove the per-run temporary JOB_TRACKER_DIR created by tests/isolation.py."""
+    import shutil
+
+    if isolation.TEST_JOB_TRACKER_DIR.name.startswith("job-tracker-tests-"):
+        shutil.rmtree(isolation.TEST_JOB_TRACKER_DIR, ignore_errors=True)
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers",
+        "allow_network: the test deliberately performs (and asserts) external network access",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _forbid_external_access(request: pytest.FixtureRequest):
+    """Fail any test that reached the keychain or a non-loopback network address, even if
+    the code under test swallowed the resulting error."""
+    isolation.network_attempts.clear()
+    isolation.keyring_attempts.clear()
+    yield
+    network = list(isolation.network_attempts)
+    keychain = list(isolation.keyring_attempts)
+    isolation.network_attempts.clear()
+    isolation.keyring_attempts.clear()
+    if request.node.get_closest_marker("allow_network"):
+        return
+    if network or keychain:
+        pytest.fail(
+            f"Test isolation violated — network: {network or 'none'}; "
+            f"keychain: {keychain or 'none'}. Mock the external boundary.",
+            pytrace=False,
+        )
+
+
+class FakePollerScheduler:
+    """Stands in for PollerScheduler in route tests. The poller is a MagicMock, so nothing
+    can reach Gmail; tests patch the methods they exercise."""
+
+    def __init__(self) -> None:
+        self.poller = MagicMock(name="GmailPoller")
+        self.poller.service = None
+        self.poller.is_polling = False
+        self.triggered = 0
+        self.stopped = False
+
+    def trigger(self) -> None:
+        self.triggered += 1
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
+@pytest.fixture
+def fake_poller_scheduler() -> FakePollerScheduler:
+    return FakePollerScheduler()
 
 
 @pytest.fixture

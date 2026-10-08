@@ -18,3 +18,23 @@ frontend/dist/
 .coverage
 graphify-out/
 .vercel/
+
+# --- Personal data and secrets: never commit ------------------------------
+# SQLite databases, journals, backups, backup manifests (they hold personal metadata)
+*.sqlite
+*.sqlite3
+*.db-journal
+*.pre-restore-*
+backups/
+# Local environment files (keep only an explicit example, if one is added)
+.env.*
+!.env.example
+# Gmail / OAuth credentials and tokens
+client_secret*.json
+credentials*.json
+*token*.json
+# Browser sessions (Playwright storage state, auth captures)
+playwright/.auth/
+.auth/
+storage_state*.json
+*.storage-state.json

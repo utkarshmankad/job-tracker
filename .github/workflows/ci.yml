@@ -93,6 +93,9 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - run: pip install -r requirements.txt -r requirements-dev.txt
+      # tests/conftest.py installs tests/isolation.py: any test that opens a non-loopback
+      # connection, does DNS for an external host, or reads the keychain fails this job.
+      # tests/integration/test_app_isolation.py asserts the guards themselves.
       - run: pytest tests/integration -v --cov=backend --cov-report=xml
       - uses: actions/upload-artifact@v4
         with:
@@ -111,10 +114,15 @@ jobs:
           cache: pip
       - run: pip install -r requirements.txt -r requirements-dev.txt
       - name: Boot API and hit health endpoint
+        env:
+          # No Gmail credentials exist in CI; make that explicit so startup never tries.
+          POLLER_ENABLED: "false"
+          CACHE_ENABLED: "false"
+          LLM_ENABLED: "false"
         run: |
           uvicorn backend.main:app --host 127.0.0.1 --port 8000 &
           SERVER_PID=$!
-          for i in $(seq 1 20); do
+          for _ in $(seq 1 20); do
             curl -sf http://127.0.0.1:8000/api/v1/health && break
             sleep 1
           done

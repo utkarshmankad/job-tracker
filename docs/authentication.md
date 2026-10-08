@@ -83,14 +83,20 @@ replaced with `?[redacted]`, because the Gmail re-auth callback carries an OAuth
 | `PUBLIC_BASE_URL` | Fly secret or env | for Gmail re-auth | Must be the Vercel origin so the session cookie reaches `/poller/reauth/callback` |
 | `VITE_API_BASE` | Vercel | **must be unset** | Leave unset so production calls `/api` on the same origin. Only set it for local setups that point somewhere unusual |
 
-Generate a session secret locally with:
+**Handling the session secret.** Generate it and pipe it straight into its destination, so
+it never appears on screen, on a command line, or in shell history:
 
 ```bash
-python -c "import secrets; print(secrets.token_urlsafe(48))"
+# Fly (production): fly secrets import reads NAME=VALUE lines from stdin
+python3 -c "import secrets; print('AUTH_SESSION_SECRET=' + secrets.token_urlsafe(48))" \
+  | fly secrets import --app job-tracker-api-verdant-haze-8797
+
+# Local .env (git-ignored)
+python3 -c "import secrets; print('AUTH_SESSION_SECRET=' + secrets.token_urlsafe(48))" >> .env
 ```
 
-Put the output straight into the destination (Fly secret or `.env`). Don't store it
-anywhere else.
+Never write the value into a command such as `fly secrets set AUTH_SESSION_SECRET=<value>`.
+Shell history would keep it.
 
 ## Google Cloud setup (one time)
 
@@ -140,18 +146,32 @@ override. E2E tests run the backend with `AUTH_MODE=local` and sign in through t
 ## Fly.io configuration
 
 `fly.toml` sets `APP_ENV=production` and a health check on `/api/v1/health`. Set the
-secrets with `flyctl` from your own terminal (values are typed or piped there, never
-committed):
+secrets with `flyctl` from your own terminal. None of these values are committed:
 
 ```bash
-fly secrets set --app job-tracker-api-verdant-haze-8797 \
-  AUTH_ALLOWED_EMAIL=... \
-  AUTH_GOOGLE_CLIENT_ID=... \
-  AUTH_SESSION_SECRET=... \
+APP=job-tracker-api-verdant-haze-8797
+
+# 1. The session secret: generated and piped in, never displayed (see above).
+python3 -c "import secrets; print('AUTH_SESSION_SECRET=' + secrets.token_urlsafe(48))" \
+  | fly secrets import --app $APP --stage
+
+# 2. Non-secret settings. The client ID and origins are public. The email is personal
+#    rather than secret; to keep it out of shell history as well, enter it at a prompt:
+read -r "?Allowed Google account: " ALLOWED_EMAIL   # bash: read -rp "Allowed Google account: " ALLOWED_EMAIL
+fly secrets set --app $APP --stage \
+  AUTH_ALLOWED_EMAIL="$ALLOWED_EMAIL" \
+  AUTH_GOOGLE_CLIENT_ID=<web-client-id>.apps.googleusercontent.com \
   FRONTEND_ORIGIN=https://<your-app>.vercel.app \
   PUBLIC_BASE_URL=https://<your-app>.vercel.app
-fly secrets unset --app job-tracker-api-verdant-haze-8797 ADMIN_TOKEN   # no longer used
+unset ALLOWED_EMAIL
+
+# 3. Remove the obsolete admin token (staged too).
+fly secrets unset --app $APP --stage ADMIN_TOKEN
 ```
+
+`--stage` stores the values without restarting the running release. They take effect at
+the next deploy, which is the release that needs them. Without `--stage`, Fly restarts the
+current release; that is harmless too, because the current release ignores these values.
 
 **Order matters.** Set the secrets **before** deploying this change. Pushes to `main`
 deploy automatically, and the new release refuses to start without them. Setting secrets
@@ -180,7 +200,7 @@ curl -s -o /dev/null -w '%{http_code}\n' https://<your-app>.vercel.app/api/v1/ap
 
 | What | How | Effect |
 |---|---|---|
-| Session secret | Generate a new value, then `fly secrets set AUTH_SESSION_SECRET=...` | Fly restarts the app. Every existing session, CSRF token and pending nonce becomes invalid, so you sign in again |
+| Session secret | Pipe a newly generated value into `fly secrets import` (see *Handling the session secret*) | Fly restarts the app. Every existing session, CSRF token and pending nonce becomes invalid, so you sign in again |
 | Allowed account | `fly secrets set AUTH_ALLOWED_EMAIL=...` | Sessions issued to the previous account are rejected (`invalid_session`) |
 | Google client ID | Create a new web client with the same JavaScript origins, set `AUTH_GOOGLE_CLIENT_ID`, then delete the old client in Google Cloud | New sign-ins use the new client. Existing sessions continue until they expire |
 | Session lifetime | `fly secrets set AUTH_SESSION_TTL_SECONDS=...` | Applies to new sessions |

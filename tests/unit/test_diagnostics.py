@@ -355,8 +355,26 @@ _GOOD_TOKEN = '{"refresh_token": "r", "client_id": "c", "client_secret": "s", "t
 
 
 @pytest.fixture
-def no_keychain(monkeypatch):
+def poller_on(monkeypatch):
+    """Credential checks only run when polling is enabled (tests default to disabled)."""
+    monkeypatch.setattr("backend.config.POLLER_ENABLED", True)
+
+
+@pytest.fixture
+def no_keychain(monkeypatch, poller_on):
     monkeypatch.setattr("keyring.get_password", lambda *a, **k: None)
+
+
+def test_gmail_credentials_not_loaded_when_polling_disabled(runner: DiagnosticRunner, monkeypatch):
+    from unittest.mock import MagicMock
+
+    get_password = MagicMock()
+    monkeypatch.setattr("keyring.get_password", get_password)
+    monkeypatch.setenv("GMAIL_TOKEN_JSON", _GOOD_TOKEN)
+    result = runner._check_gmail_credentials()
+    assert result.ok
+    assert "POLLER_ENABLED=false" in result.detail
+    get_password.assert_not_called()
 
 
 def test_gmail_env_token_passes_without_client_secret_file(
@@ -389,6 +407,7 @@ def test_gmail_env_token_invalid_json_fails(runner: DiagnosticRunner, monkeypatc
     assert "not valid JSON" in result.detail
 
 
+@pytest.mark.usefixtures("poller_on")
 def test_gmail_keychain_token_passes(runner: DiagnosticRunner, monkeypatch, tmp_path: Path):
     monkeypatch.delenv("GMAIL_TOKEN_JSON", raising=False)
     monkeypatch.setattr("keyring.get_password", lambda *a, **k: _GOOD_TOKEN)
@@ -398,6 +417,7 @@ def test_gmail_keychain_token_passes(runner: DiagnosticRunner, monkeypatch, tmp_
     assert "keychain" in result.detail
 
 
+@pytest.mark.usefixtures("poller_on")
 def test_gmail_keychain_unavailable_is_handled(
     runner: DiagnosticRunner, monkeypatch, tmp_path: Path
 ):

@@ -20,13 +20,16 @@ from backend.main import app
 
 
 @pytest.fixture
-def seeded_client(tmp_path, test_auth_user):
+def seeded_client(tmp_path, test_auth_user, fake_poller_scheduler):
     db_path = tmp_path / "test.db"
     test_db = DataStore(db_path)
     with TestClient(app, raise_server_exceptions=True) as client:
         # Override AFTER lifespan runs so the test DB isn't replaced by startup event.
+        # The poller is disabled in tests (POLLER_ENABLED=false); routes that need a
+        # scheduler get a fake whose GmailPoller is a MagicMock.
         app.state.db = test_db
         app.state.updater = StatusUpdater(test_db, DuplicateDetector(test_db))
+        app.state.poller_scheduler = fake_poller_scheduler
         yield client, test_db
 
 
@@ -566,15 +569,23 @@ def test_suppress_rule_delete_nonexistent_returns_404(seeded_client):
 # ------------------------------------------------------------------ #
 
 
-def test_trigger_poll_returns_triggered(seeded_client):
-    """POST /poller/trigger must return 200 with triggered=True when scheduler runs."""
+def test_trigger_poll_returns_triggered(seeded_client, fake_poller_scheduler):
+    """POST /poller/trigger must return 200 with triggered=True when a scheduler exists."""
     client, _ = seeded_client
     resp = client.post(f"{_BASE}/poller/trigger")
-    # Scheduler is started by the lifespan, so it should be present.
     assert resp.status_code == 200
     body = resp.json()
     assert body["triggered"] is True
     assert "skipped" in body
+    assert fake_poller_scheduler.triggered == 1
+
+
+def test_trigger_poll_with_poller_disabled_returns_503(test_auth_user):
+    """With POLLER_ENABLED=false (the test default) the lifespan starts no scheduler."""
+    with TestClient(app) as client:
+        assert app.state.poller_scheduler is None
+        resp = client.post(f"{_BASE}/poller/trigger")
+    assert resp.status_code == 503
 
 
 def test_trigger_poll_no_scheduler_returns_503(test_auth_user):
@@ -693,7 +704,12 @@ def test_delete_adds_suppress_rule_for_sender_domain(seeded_client):
         ]
     }
 
-    real_poller = app.state.poller_scheduler.poller
+    # A real GmailPoller (so the real sender-domain extraction runs) whose Gmail service is
+    # a mock — no credentials, no network.
+    from backend.poller.gmail_poller import GmailPoller
+
+    real_poller = GmailPoller(test_db, MagicMock(name="EmailParser"), MagicMock(name="Updater"))
+    app.state.poller_scheduler.poller = real_poller
     original_service = real_poller.service
     real_poller.service = mock_service
     try:
@@ -701,6 +717,7 @@ def test_delete_adds_suppress_rule_for_sender_domain(seeded_client):
         assert resp.status_code == 200
         assert resp.json() == {"deleted": True}
         assert client.get(f"{_BASE}/applications/{app_id}").status_code == 404
+        mock_service.users.return_value.threads.return_value.get.assert_called_once()
 
         rules = client.get(f"{_BASE}/suppress-rules").json()
         patterns = [r["sender_pattern"] for r in rules]

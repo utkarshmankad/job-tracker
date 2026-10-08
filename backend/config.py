@@ -34,6 +34,11 @@ GMAIL_KEYCHAIN_USERNAME = "oauth-token"
 GMAIL_TOKEN_ENV_VAR = "GMAIL_TOKEN_JSON"
 
 # Poller
+# POLLER_ENABLED=false starts the API without the Gmail poller: no Gmail credentials are
+# loaded, the keychain is never read, no Google API client is built, and neither the poller
+# thread nor sleep/wake monitoring starts. The test suite always runs this way
+# (tests/conftest.py). Default true keeps local development and production unchanged.
+POLLER_ENABLED: bool = os.environ.get("POLLER_ENABLED", "true").lower() == "true"
 POLL_INTERVAL_SECONDS = 300  # 5 minutes
 BACKFILL_DAYS = 180  # 6 months on first run
 

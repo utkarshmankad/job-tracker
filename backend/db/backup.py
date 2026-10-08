@@ -407,11 +407,27 @@ def verify_backup(backup_dir: Path, *, check_migration: bool = True) -> VerifyRe
 # ------------------------------------------------------------------ #
 
 
+def _created_at(backup_dir: Path) -> str:
+    """Manifest creation time (microsecond ISO, UTC) — "" if unreadable."""
+    try:
+        data = json.loads((backup_dir / MANIFEST_NAME).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    value = data.get("created_at") if isinstance(data, dict) else None
+    return value if isinstance(value, str) else ""
+
+
 def list_backups(backup_root: Path) -> list[Path]:
-    """Backup directories with a manifest, oldest first (names sort by timestamp)."""
+    """Backup directories with a manifest, oldest first.
+
+    Ordered by the manifest's microsecond `created_at`, not the directory name: two backups
+    taken in the same second (e.g. a pre-migration backup and a manual one) share the
+    timestamp prefix, and their labels must not decide which is newest.
+    """
     if not backup_root.is_dir():
         return []
-    return sorted(p for p in backup_root.iterdir() if p.is_dir() and (p / MANIFEST_NAME).is_file())
+    found = [p for p in backup_root.iterdir() if p.is_dir() and (p / MANIFEST_NAME).is_file()]
+    return sorted(found, key=lambda p: (_created_at(p), p.name))
 
 
 def latest_backup(backup_root: Path) -> Path | None:

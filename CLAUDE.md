@@ -28,6 +28,8 @@ Local Mac app. Python 3.11. FastAPI backend on jobtracker.localhost:8000. React 
 - backend/api/routes.py — all FastAPI endpoints
 
 ## Test conventions
+- Test isolation is automatic: `tests/isolation.py` (installed first by tests/conftest.py, before any backend import) sets a temporary `JOB_TRACKER_DIR`, `POLLER_ENABLED=false`, `CACHE_ENABLED=false`, `LLM_ENABLED=false`, strips Gmail/Groq/auth secrets, skips `.env`, and installs keyring and socket guards. Any test that reaches the keychain or a non-loopback address fails, even if the code swallowed the error. Never import backend modules in conftest above `isolation.install()`.
+- Gmail, keyring and HTTP behaviour are tested only with mocks and synthetic messages. Route tests get a fake scheduler (`fake_poller_scheduler`); the real poller never starts in tests.
 - Fixtures in tests/conftest.py
 - Use tmp_path for any file I/O in tests
 - Mock Gmail API with unittest.mock — never call real API in tests
