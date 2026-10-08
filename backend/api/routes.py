@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import enum
 import io
 import re
 import secrets
@@ -35,13 +36,25 @@ from backend.config import (
     REAUTH_STATE_TTL_SECONDS,
     REEXTRACT_BATCH_LIMIT,
 )
-from backend.db.data_store import ApplicationFilter, DataStore, is_application_stale
+from backend.db.data_store import (
+    ApplicationFilter,
+    ApplicationNotFoundError,
+    DataStore,
+    EvidenceFilter,
+    EvidenceNotFoundError,
+    is_application_stale,
+)
 from backend.db.models import (
     Application,
     ApplicationEvent,
     ApplicationEventType,
     ApplicationStatus,
+    Evidence,
+    EvidenceSource,
+    EvidenceStatus,
+    EvidenceType,
     InterviewRound,
+    LinkMethod,
     ProspectStatus,
     utc_now,
 )
@@ -119,6 +132,7 @@ class ApplicationResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     is_stale: bool
+    last_evidence_at: datetime | None = None
 
 
 class ApplicationDetailResponse(ApplicationResponse):
@@ -394,6 +408,7 @@ def _to_response(app: Application) -> ApplicationResponse:
         created_at=app.created_at,
         updated_at=app.updated_at,
         is_stale=is_application_stale(app),
+        last_evidence_at=app.last_evidence_at,
     )
 
 
@@ -1512,6 +1527,178 @@ async def get_system_status(request: Request) -> SystemStatusResponse:
         },
         checked_at=now,
     )
+
+
+# ------------------------------------------------------------------ #
+# Evidence (Phase 2)                                                   #
+# ------------------------------------------------------------------ #
+
+
+class EvidenceSummary(BaseModel):
+    """Fixed, non-content subset of raw_metadata — never the whole blob."""
+
+    classification: str | None = None
+    portal: str | None = None
+    status_signal: str | None = None
+
+
+class EvidenceResponse(BaseModel):
+    """Deliberately excludes recipient (the owner's own address), raw_metadata, the
+    fingerprint, and anything resembling a message body."""
+
+    id: int
+    evidence_type: str
+    source: str
+    external_id: str | None
+    thread_id: str | None
+    sender: str | None
+    subject: str | None
+    snippet: str | None
+    occurred_at: datetime
+    captured_at: datetime
+    processing_status: str
+    review_reason: str | None
+    application_id: int | None
+    link_method: str | None
+    link_confidence: float | None
+    summary: EvidenceSummary
+    updated_at: datetime
+
+
+class EvidenceListResponse(BaseModel):
+    items: list[EvidenceResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+class EvidenceCountsResponse(BaseModel):
+    total: int
+    unlinked: int
+    needs_review: int
+
+
+class EvidenceLinkRequest(BaseModel):
+    application_id: int = Field(gt=0)
+
+
+def _evidence_response(evidence: Evidence) -> EvidenceResponse:
+    assert evidence.id is not None
+    metadata = evidence.raw_metadata or {}
+    raw_parser = metadata.get("parser")
+    parser: dict[str, object] = raw_parser if isinstance(raw_parser, dict) else {}
+    return EvidenceResponse(
+        id=evidence.id,
+        evidence_type=evidence.evidence_type,
+        source=evidence.source,
+        external_id=evidence.external_id,
+        thread_id=evidence.thread_id,
+        sender=evidence.sender,
+        subject=evidence.subject,
+        snippet=evidence.snippet,
+        occurred_at=evidence.occurred_at,
+        captured_at=evidence.captured_at,
+        processing_status=evidence.processing_status,
+        review_reason=evidence.review_reason,
+        application_id=evidence.application_id,
+        link_method=evidence.link_method,
+        link_confidence=evidence.link_confidence,
+        summary=EvidenceSummary(
+            classification=_str_or_none(metadata.get("classification")),
+            portal=_str_or_none(parser.get("portal")),
+            status_signal=_str_or_none(parser.get("status_signal")),
+        ),
+        updated_at=evidence.updated_at,
+    )
+
+
+def _str_or_none(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _choice(value: str | None, allowed: type[enum.StrEnum], name: str) -> str | None:
+    if value is not None and value not in {m.value for m in allowed}:
+        raise HTTPException(status_code=422, detail=f"Unknown {name}: {value}")
+    return value
+
+
+@router.get("/evidence", response_model=EvidenceListResponse)
+async def list_evidence(
+    request: Request,
+    linked: bool | None = None,
+    source: str | None = None,
+    evidence_type: str | None = None,
+    processing_status: str | None = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+) -> EvidenceListResponse:
+    db: DataStore = request.app.state.db
+    items, total = db.list_evidence(
+        EvidenceFilter(
+            linked=linked,
+            source=_choice(source, EvidenceSource, "source"),
+            evidence_type=_choice(evidence_type, EvidenceType, "evidence_type"),
+            processing_status=_choice(processing_status, EvidenceStatus, "processing_status"),
+            date_from=date_from,
+            date_to=date_to,
+            page=page,
+            page_size=page_size,
+        )
+    )
+    return EvidenceListResponse(
+        items=[_evidence_response(e) for e in items], total=total, page=page, page_size=page_size
+    )
+
+
+@router.get("/evidence/counts", response_model=EvidenceCountsResponse)
+async def evidence_counts(request: Request) -> EvidenceCountsResponse:
+    db: DataStore = request.app.state.db
+    return EvidenceCountsResponse(**db.count_evidence())
+
+
+@router.get("/applications/{id}/evidence", response_model=list[EvidenceResponse])
+async def application_evidence(id: int, request: Request) -> list[EvidenceResponse]:
+    db: DataStore = request.app.state.db
+    if db.get_application(id) is None:
+        raise HTTPException(status_code=404, detail="Application not found")
+    return [_evidence_response(e) for e in db.get_evidence_for_application(id)]
+
+
+@router.post(
+    "/evidence/{evidence_id}/link", response_model=EvidenceResponse, dependencies=_SENSITIVE
+)
+async def link_evidence(
+    evidence_id: int, body: EvidenceLinkRequest, request: Request
+) -> EvidenceResponse:
+    """Manually attach evidence to an application (confidence 1.0). Does not apply any
+    status change; use the application status update for that."""
+    db: DataStore = request.app.state.db
+    try:
+        evidence = db.link_evidence(evidence_id, body.application_id, LinkMethod.MANUAL.value, 1.0)
+    except (EvidenceNotFoundError, ApplicationNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _invalidate_applications_cache()
+    log.info(
+        "evidence_linked_manually", evidence_id=evidence_id, application_id=body.application_id
+    )
+    return _evidence_response(evidence)
+
+
+@router.post(
+    "/evidence/{evidence_id}/unlink", response_model=EvidenceResponse, dependencies=_SENSITIVE
+)
+async def unlink_evidence(evidence_id: int, request: Request) -> EvidenceResponse:
+    """Detach evidence; it returns to needs_review. Status history is not rewritten."""
+    db: DataStore = request.app.state.db
+    try:
+        evidence = db.unlink_evidence(evidence_id)
+    except EvidenceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _invalidate_applications_cache()
+    log.info("evidence_unlinked_manually", evidence_id=evidence_id)
+    return _evidence_response(evidence)
 
 
 # ------------------------------------------------------------------ #

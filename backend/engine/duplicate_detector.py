@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import json
-import re
 from datetime import timedelta
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import structlog
 from rapidfuzz import fuzz
@@ -13,6 +11,7 @@ from rapidfuzz import fuzz
 from backend.config import DUPLICATE_FUZZY_THRESHOLD
 from backend.db.data_store import ApplicationFilter, DataStore
 from backend.db.models import Application, utc_now
+from backend.engine.normalization import canonical_job_url, normalize_company
 from backend.parser.email_parser import ParsedApplication
 
 log = structlog.get_logger(__name__)
@@ -20,24 +19,9 @@ log = structlog.get_logger(__name__)
 _LOOKUP_DAYS = 180
 
 
-def _normalize_text(value: str | None) -> str:
-    text = re.sub(r"[^a-z0-9]+", " ", (value or "").lower()).strip()
-    return re.sub(
-        r"\b(pvt|private|limited|ltd|inc|llc|technologies|technology)\b", "", text
-    ).strip()
-
-
-def _canonical_url(value: str | None) -> str | None:
-    if not value:
-        return None
-    try:
-        parts = urlsplit(value.strip())
-    except ValueError:
-        return value.strip().lower()
-    kept = [(k, v) for k, v in parse_qsl(parts.query) if not k.lower().startswith("utm_")]
-    return urlunsplit(
-        (parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/"), urlencode(kept), "")
-    )
+# Shared with the identity resolver and the stored identity columns.
+_normalize_text = normalize_company
+_canonical_url = canonical_job_url
 
 
 class DuplicateDetector:

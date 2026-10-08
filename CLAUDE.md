@@ -19,6 +19,7 @@ Local Mac app. Python 3.11. FastAPI backend on jobtracker.localhost:8000. React 
 - Schema changes only via Alembic revisions in `backend/db/alembic/versions/` (see `docs/database-operations.md`). Never `create_all()` or runtime `ALTER TABLE`. Revisions are frozen: they must not import `backend/db/models.py`.
 - Never copy the live SQLite file; backups go through `scripts/backup_database.py` (SQLite online backup API).
 - No email body text stored in DB. Only: sender, subject, date, extracted fields, snippet.
+- Every received item (Gmail message, portal import, …) is stored once as `Evidence` via `DataStore.insert_evidence` (idempotent: unique fingerprint and `(source, external_id)`). Only an acknowledgement with no matching application may create one; follow-up/status mail that matches nothing is left `needs_review`. Identity rules live in `backend/engine/identity_resolver.py`, normalization in `backend/engine/normalization.py`. Non-job mail is stored minimally (IDs and date only). See `docs/phase-2-identity-resolution.md`.
 - Every public method must have type hints. No bare `except:` — always catch specific exceptions.
 
 ## File layout

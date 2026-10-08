@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import datetime
 
 import structlog
@@ -13,9 +14,16 @@ from backend.db.models import (
     ApplicationEvent,
     ApplicationEventType,
     ApplicationStatus,
+    EvidenceStatus,
+    LinkMethod,
     utc_now,
 )
 from backend.engine.duplicate_detector import DuplicateDetector
+from backend.engine.identity_resolver import (
+    IdentityResolver,
+    MessageKind,
+    classify_message_kind,
+)
 from backend.parser.email_parser import ParsedApplication
 
 log = structlog.get_logger(__name__)
@@ -75,23 +83,56 @@ _TRANSITIONS: dict[ApplicationStatus, set[ApplicationStatus]] = {
 }
 
 
+@dataclass(frozen=True)
+class ProcessingOutcome:
+    application: Application | None
+    is_new: bool
+    result: str  # applied | status_update | thread_merged | needs_review
+    kind: MessageKind
+    link_method: str | None = None
+    link_confidence: float | None = None
+    review_reason: str | None = None
+
+
 class StatusUpdater:
-    def __init__(self, db: DataStore, detector: DuplicateDetector) -> None:
+    def __init__(
+        self,
+        db: DataStore,
+        detector: DuplicateDetector,
+        resolver: IdentityResolver | None = None,
+    ) -> None:
         self._db = db
         self._detector = detector
+        self._resolver = resolver or IdentityResolver(db)
 
-    def process(self, parsed: ParsedApplication) -> tuple[Application, bool]:
-        """Process a parsed email. Returns (application, is_new_application)."""
-        record = self._find_existing(parsed)
-        is_new = record is None
+    def process(
+        self, parsed: ParsedApplication, evidence_id: int | None = None
+    ) -> tuple[Application | None, bool]:
+        """Process a parsed email. Returns (application or None when it needs review,
+        is_new_application). See process_evidence for the full outcome."""
+        outcome = self.process_evidence(parsed, evidence_id)
+        return outcome.application, outcome.is_new
 
-        if is_new:
-            record = self._create_new(parsed)
-        else:
-            assert record is not None
-            assert record.id is not None
-            app_id = record.id
-            self._detector.merge(record, parsed)
+    def process_evidence(
+        self, parsed: ParsedApplication, evidence_id: int | None = None
+    ) -> ProcessingOutcome:
+        """Resolve identity, then link, create, or leave for review.
+
+        Only an acknowledgement with no matching application creates one. A follow-up,
+        scheduling or status email that matches nothing — or matches ambiguously — is left
+        as needs_review evidence instead of becoming a duplicate application.
+        """
+        kind = classify_message_kind(parsed)
+        match = self._resolver.resolve(parsed)
+
+        if match.application is not None:
+            assert match.application.id is not None
+            app_id = match.application.id
+            self._detector.merge(match.application, parsed)
+            if evidence_id is not None:
+                self._db.link_evidence(
+                    evidence_id, app_id, match.method or "manual", match.confidence or 0.0
+                )
             record = self._db.get_application(app_id)
             if record is None:
                 raise RuntimeError(f"Application {app_id} vanished mid-update")
@@ -100,18 +141,34 @@ class StatusUpdater:
                 record = self._db.get_application(app_id)
                 if record is None:
                     raise RuntimeError(f"Application {app_id} vanished after status advance")
+            result = "status_update" if parsed.status_signal else "thread_merged"
+            self._db.mark_processed(parsed.message_id, result)
+            return ProcessingOutcome(record, False, result, kind, match.method, match.confidence)
 
-        result = (
-            "applied" if is_new else ("status_update" if parsed.status_signal else "thread_merged")
-        )
-        self._db.mark_processed(parsed.message_id, result)
-        return record, is_new
+        if match.ambiguity is None and kind is MessageKind.ACKNOWLEDGEMENT:
+            record = self._create_new(parsed)
+            assert record.id is not None
+            if evidence_id is not None:
+                self._db.link_evidence(
+                    evidence_id,
+                    record.id,
+                    LinkMethod.CREATED.value,
+                    1.0,
+                    status=EvidenceStatus.CREATED_APPLICATION.value,
+                )
+                refreshed = self._db.get_application(record.id)
+                record = refreshed or record
+            self._db.mark_processed(parsed.message_id, "applied")
+            return ProcessingOutcome(record, True, "applied", kind, LinkMethod.CREATED.value, 1.0)
 
-    def _find_existing(self, parsed: ParsedApplication) -> Application | None:
-        found = self._db.find_application_by_thread_id(parsed.thread_id)
-        if found is not None:
-            return found
-        return self._detector.find_duplicate(parsed)
+        reason = match.ambiguity or f"{kind.value}_without_application"
+        if evidence_id is not None:
+            self._db.update_evidence_processing(
+                evidence_id, EvidenceStatus.NEEDS_REVIEW.value, review_reason=reason
+            )
+        self._db.mark_processed(parsed.message_id, "needs_review")
+        log.info("evidence_needs_review", message_id=parsed.message_id, reason=reason)
+        return ProcessingOutcome(None, False, "needs_review", kind, review_reason=reason)
 
     def _advance_status(
         self,

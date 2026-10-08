@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from backend.db.data_store import DataStore
+from backend.db.data_store import ApplicationFilter, DataStore
 from backend.db.models import Application, ApplicationStatus, utc_now
 from backend.engine.duplicate_detector import DuplicateDetector
 from backend.engine.status_updater import StatusUpdater
@@ -145,14 +145,15 @@ def test_existing_found_by_thread_id(tmp_path: Path) -> None:
 
     # Create an application that owns thread-001
     app, _ = updater.process(_make_parsed(thread_id="thread-001", message_id="msg-001"))
-    assert app.id is not None
+    assert app is not None and app.id is not None
 
-    # _find_existing with the same thread_id should return the same record
-    # (bypassing the fuzzy detector entirely)
-    found = updater._find_existing(_make_parsed(thread_id="thread-001", message_id="msg-002"))
+    # The resolver finds it by thread, before any fuzzy matching.
+    match = updater._resolver.resolve(_make_parsed(thread_id="thread-001", message_id="msg-002"))
 
-    assert found is not None
-    assert found.id == app.id
+    assert match.application is not None
+    assert match.application.id == app.id
+    assert match.method == "thread"
+    assert match.confidence == 1.0
 
 
 def test_status_history_written_on_transition(tmp_path: Path) -> None:
@@ -178,41 +179,37 @@ def test_status_history_written_on_transition(tmp_path: Path) -> None:
 
 
 def test_find_existing_uses_thread_id_lookup(tmp_path: Path) -> None:
-    """_find_existing uses DB lookup, not a full table scan."""
+    """Thread resolution uses the indexed DB lookup, not a table scan."""
     db = _make_db(tmp_path)
     updater = _make_updater(db)
 
-    # Create app that owns the thread
     created, _ = updater.process(_make_parsed(thread_id="t-lookup", message_id="msg-1"))
-    assert created.id is not None
+    assert created is not None and created.id is not None
 
-    # _find_existing should find it via find_application_by_thread_id
-    found = updater._find_existing(_make_parsed(thread_id="t-lookup", message_id="msg-2"))
-    assert found is not None
-    assert found.id == created.id
+    with patch.object(db, "get_applications", wraps=db.get_applications) as scan:
+        match = updater._resolver.resolve(_make_parsed(thread_id="t-lookup", message_id="msg-2"))
+    assert match.application is not None
+    assert match.application.id == created.id
+    scan.assert_not_called()
 
 
-def test_find_existing_falls_back_to_detector_when_no_thread_match(tmp_path: Path) -> None:
+def test_resolution_falls_back_to_company_role_when_no_thread_match(tmp_path: Path) -> None:
     db = _make_db(tmp_path)
-    # Detector reports an existing match for a different thread
-    existing_app = Application(
-        id=1,
-        company="Acme",
-        role="Engineer",
-        source_portal="LinkedIn",
-        applied_date=utc_now(),
-        thread_ids='["different-thread"]',
-    )
-    detector = MagicMock(spec=DuplicateDetector)
-    detector.find_duplicate.return_value = existing_app
-    updater = StatusUpdater(db, detector)
+    updater = _make_updater(db)
+    created, _ = updater.process(_make_parsed(thread_id="t-original", message_id="msg-1"))
+    assert created is not None
 
-    updater._find_existing(_make_parsed(thread_id="brand-new-thread"))
-    # No DB thread match, so falls back to detector
-    detector.find_duplicate.assert_called_once()
+    match = updater._resolver.resolve(_make_parsed(thread_id="brand-new-thread"))
+    assert match.application is not None
+    assert match.application.id == created.id
+    assert match.method == "company_role"
 
 
-def test_process_with_status_signal_creates_and_advances(tmp_path: Path) -> None:
+def test_status_email_without_application_needs_review_instead_of_creating(
+    tmp_path: Path,
+) -> None:
+    """Phase 2 behaviour change: a status email that matches no application no longer
+    creates (and advances) a new one — that was the main duplicate source."""
     db = _make_db(tmp_path)
     updater = _make_updater(db)
     parsed = _make_parsed(
@@ -221,8 +218,10 @@ def test_process_with_status_signal_creates_and_advances(tmp_path: Path) -> None
     )
 
     app, is_new = updater.process(parsed)
-    assert is_new is True
-    assert app.current_status == ApplicationStatus.RESUME_SHORTLISTED
+    assert app is None
+    assert is_new is False
+    assert db.get_applications(ApplicationFilter())[1] == 0
+    assert db.is_processed("msg-001")
 
 
 def test_process_existing_with_status_signal_advances(tmp_path: Path) -> None:

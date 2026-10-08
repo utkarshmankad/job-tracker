@@ -17,6 +17,7 @@ All commands run from the repository root, or `/app` in the container. All of th
 | Command | What it does |
 |---|---|
 | `python scripts/migrate_database.py status` | Shows the schema revision. Exit code 0 means current, 1 means an upgrade is pending, 2 means the database is missing or has an unknown revision |
+| `python scripts/migrate_database.py stamp <older-revision>` | Records an older revision without touching schema objects (code-only rollback on an expand-only schema). Downward only; backup first; needs the maintenance flag on the live DB |
 | `python scripts/migrate_database.py upgrade` | Takes a pre-migration backup, verifies it (including a trial migration on a temporary copy), migrates, then runs an integrity check and diagnostics |
 | `python scripts/backup_database.py [--label L] [--keep N]` | Creates a verified backup and optionally deletes the oldest ones so N remain |
 | `python scripts/verify_backup.py <dir> \| --latest` | Restores into a temporary directory and opens the copy through DataStore |
@@ -76,6 +77,11 @@ you've stopped the API yourself (local development).
   - on older databases it adds the missing tables, columns and indexes exactly as the old
     startup code did, plus the `Instahire` → `Instahyre` data fix.
   It can't be downgraded; restore a backup instead.
+- `0002_evidence_model` (Phase 2) adds the `evidence` table and five nullable `application`
+  identity columns, backfills evidence from existing prospects, and sets
+  `application.last_evidence_at`. It is additive and idempotent ("if missing" plus
+  `ON CONFLICT DO NOTHING`), so it can be re-run after the rollback stamp below. Details:
+  [`phase-2-identity-resolution.md`](phase-2-identity-resolution.md) §5.
 - Startup policy (`backend/db/schema.py`):
 
   | Database state | Development (`DB_AUTO_MIGRATE=true`, default) | Production (`APP_ENV=production`) |
@@ -152,9 +158,18 @@ Every Phase 1 migration is additive. Choose the smallest step that fixes the pro
     (`fly releases --app $APP` → `fly deploy --app $APP --image <previous image>`), remove
     the flag and restart.
 
-  Rolling back code alone is safe only to a release that doesn't check revisions (the
-  pre-Phase-1 release). A Phase 1 release whose head is older than the database's revision
-  starts in maintenance mode by design.
+  - **Roll back code only, keep data** (expand-only revisions such as `0002`): an older
+    release refuses a revision it does not know and starts in maintenance mode. Record the
+    older revision first — the schema itself is not changed, and a verified backup is taken:
+    ```bash
+    fly ssh console --app $APP -C "touch /data/MAINTENANCE"   # then restart the machine
+    fly ssh console --app $APP -C "python /app/scripts/migrate_database.py stamp 0001_baseline"
+    ```
+    Then deploy the previous image, remove the flag and restart. `stamp` only moves the
+    recorded revision down. When the newer release returns, `migrate_database.py upgrade`
+    re-applies the idempotent revision and runtime maintenance refreshes derived columns.
+
+  A release that doesn't check revisions at all (pre-Phase-1) needs no stamp.
 - **Data loss or corruption found later.** Follow the restore runbook below with the newest
   backup taken before the problem. Anything written after that backup is lost. Gmail-derived
   data comes back on the next polls; manual edits do not.

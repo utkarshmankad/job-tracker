@@ -120,6 +120,11 @@ STALE_DAYS_THRESHOLD = 14
 INTERVIEW_RATE_GREEN_THRESHOLD = 0.20  # 20%+ = green
 DUPLICATE_FUZZY_THRESHOLD = 85  # rapidfuzz score 0-100
 
+# Evidence (Phase 2). Gmail's preview snippet is stored, capped; message bodies never are.
+EVIDENCE_SNIPPET_MAX_CHARS = 500
+# Identity matching considers applications from this many days back.
+IDENTITY_LOOKBACK_DAYS = 180
+
 # Cache — speeds up repeated reads (e.g. re-fetching /applications or /insights on every
 # tab switch) by caching short-lived GET responses in Redis. Fails open: if Redis is
 # unreachable, every request just falls through to the DB as if caching were off.

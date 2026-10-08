@@ -284,3 +284,46 @@ def migrate_upgrade(db_path: Path | None, backup_dir: Path | None, allow_live: b
     click.echo(
         "Migration complete. Remove the maintenance flag and restart the API to resume service."
     )
+
+
+@migrate_group.command("stamp")
+@click.argument("revision")
+@_db_option
+@_backup_dir_option
+@click.option(
+    "--allow-live",
+    is_flag=True,
+    help="Stamp the configured DB_PATH without the maintenance flag (API stopped).",
+)
+def migrate_stamp(
+    revision: str, db_path: Path | None, backup_dir: Path | None, allow_live: bool
+) -> None:
+    """Record an OLDER revision without changing the schema, so an older release (which
+    refuses unknown revisions) can run on an expand-only schema. Downward only; takes and
+    verifies a backup first. Re-running `upgrade` later is safe: revisions are idempotent."""
+    from backend.db import schema as schema_module
+
+    target = _db(db_path)
+    if not target.is_file():
+        raise click.ClickException(f"Database not found: {target}")
+    status = read_status(target)
+    if status.current_revision is None or status.state is SchemaState.UNKNOWN:
+        raise click.ClickException(f"Cannot stamp a database that is {status.state.value}")
+    if revision not in schema_module.ancestors(status.current_revision):
+        raise click.ClickException(
+            f"{revision} is not older than the current revision {status.current_revision}; "
+            "stamp only moves the recorded version down (use `upgrade` to move up)."
+        )
+    _require_quiesced(target, allow_live, "stamp")
+    try:
+        backup = create_backup(target, _backup_root(backup_dir), label="pre-stamp")
+        _echo_backup(backup)
+        _verify_and_echo(backup.path, check_migration=False)
+    except (BackupError, BackupValidationError, RestoreRefused) as exc:
+        raise click.ClickException(f"Pre-stamp backup failed; nothing changed: {exc}") from exc
+    store = DataStore(target, schema_policy=SchemaPolicy.INSPECT)
+    try:
+        after = store.stamp_schema(revision)
+    finally:
+        store.close()
+    click.echo(f"Stamped:       {after.describe()} (schema objects unchanged)")

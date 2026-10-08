@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import enum
 import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import structlog
-from sqlalchemy import ColumnElement, event, func, inspect, or_
-from sqlmodel import Session, col, create_engine, select
+from sqlalchemy import ColumnElement, Table, event, func, inspect, or_, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlmodel import Session, SQLModel, col, create_engine, select
 
-from backend.config import DB_PATH, STALE_DAYS_THRESHOLD
+from backend.config import DB_PATH, EVIDENCE_SNIPPET_MAX_CHARS, STALE_DAYS_THRESHOLD
 from backend.db import schema
 from backend.db.models import (
     Application,
@@ -20,6 +23,11 @@ from backend.db.models import (
     ApplicationEventType,
     ApplicationStatus,
     ApplicationThreadId,
+    Evidence,
+    EvidenceSource,
+    EvidenceStatus,
+    EvidenceType,
+    LinkMethod,
     PollerState,
     ProcessedMessage,
     Prospect,
@@ -29,6 +37,13 @@ from backend.db.models import (
     utc_now,
 )
 from backend.db.schema import SchemaPolicy, SchemaStatus
+from backend.engine.normalization import (
+    canonical_job_url,
+    evidence_fingerprint,
+    normalize_company,
+    normalize_role,
+    normalize_subject,
+)
 
 
 def is_application_stale(app: Application, threshold_days: int = STALE_DAYS_THRESHOLD) -> bool:
@@ -50,6 +65,39 @@ def is_application_stale(app: Application, threshold_days: int = STALE_DAYS_THRE
 
 
 log = structlog.get_logger(__name__)
+
+
+@dataclass
+class EvidenceFilter:
+    linked: bool | None = None  # True: has application; False: no application
+    source: str | None = None
+    evidence_type: str | None = None
+    processing_status: str | None = None
+    date_from: datetime | None = None  # on occurred_at
+    date_to: datetime | None = None
+    application_id: int | None = None
+    # Non-job mail is recorded as minimal `ignored` evidence; hidden unless asked for.
+    include_ignored: bool = False
+    page: int = 1
+    page_size: int = 50
+
+
+def _table(model: type[SQLModel]) -> Table:
+    """The Core table of a SQLModel class (SQLModel's stubs do not declare __table__)."""
+    return model.__table__  # type: ignore[attr-defined]
+
+
+class EvidenceNotFoundError(LookupError):
+    pass
+
+
+class ApplicationNotFoundError(LookupError):
+    pass
+
+
+def _check_choice(value: str | None, allowed: type[enum.StrEnum], field_name: str) -> None:
+    if value is not None and value not in {member.value for member in allowed}:
+        raise ValueError(f"Invalid {field_name}: {value!r}")
 
 
 @dataclass
@@ -97,10 +145,16 @@ class DataStore:
             self._ensure_poller_state()
             self._backfill_thread_id_index()
             self._backfill_application_events()
+            self._backfill_identity_fields()
 
     def upgrade_schema(self) -> SchemaStatus:
         """Apply pending Alembic revisions now (operator/maintenance use)."""
         self.schema_status = schema.upgrade(self._engine)
+        return self.schema_status
+
+    def stamp_schema(self, revision: str) -> SchemaStatus:
+        """Record an older revision without changing schema objects (operator rollback)."""
+        self.schema_status = schema.stamp(self._engine, revision)
         return self.schema_status
 
     def close(self) -> None:
@@ -173,9 +227,17 @@ class DataStore:
     # Applications                                                         #
     # ------------------------------------------------------------------ #
 
+    @staticmethod
+    def _apply_identity_fields(app: Application) -> None:
+        """Derive the Phase 2 identity columns from company/role/job_url."""
+        app.normalized_company = normalize_company(app.company) or None
+        app.normalized_role = normalize_role(app.role) or None
+        app.canonical_job_url = canonical_job_url(app.job_url)
+
     def upsert_application(self, app: Application) -> Application:
         with Session(self._engine, expire_on_commit=False) as session:
             if app.id is None:
+                self._apply_identity_fields(app)
                 session.add(app)
                 session.commit()
                 session.refresh(app)
@@ -183,6 +245,7 @@ class DataStore:
                 return app
             db_app = session.get(Application, app.id)
             if db_app is None:
+                self._apply_identity_fields(app)
                 session.add(app)
                 session.commit()
                 session.refresh(app)
@@ -191,8 +254,11 @@ class DataStore:
             # Update scalar fields only; relationships are left untouched.
             app.updated_at = utc_now()
             for field_name in Application.model_fields:
-                if field_name not in ("id", "created_at"):
+                # last_evidence_at is owned by the evidence operations; a caller holding an
+                # older copy of the row must not roll it back.
+                if field_name not in ("id", "created_at", "last_evidence_at"):
                     setattr(db_app, field_name, getattr(app, field_name))
+            self._apply_identity_fields(db_app)
             session.commit()
             session.refresh(db_app)
             self._sync_thread_ids(session, db_app.id, db_app.thread_ids)
@@ -515,6 +581,7 @@ class DataStore:
             ).all():
                 prospect.application_id = None
                 session.add(prospect)
+            self._detach_evidence(session, [id], reason="application_deleted")
             # Flush child deletes before deleting the parent — SQLAlchemy's unit-of-work
             # dependency sort doesn't reliably order these plain foreign_key=... columns
             # (no relationship()) ahead of the parent delete in the same flush, which trips
@@ -585,8 +652,16 @@ class DataStore:
                 )
             ).all():
                 session.delete(thread_link)
+            for evidence in session.exec(
+                select(Evidence).where(Evidence.application_id == duplicate_id)
+            ).all():
+                evidence.application_id = primary_id
+                evidence.updated_at = utc_now()
+                session.add(evidence)
             session.flush()
             session.delete(duplicate)
+            self._apply_identity_fields(primary)
+            primary.last_evidence_at = self._newest_evidence_at(session, primary_id)
             session.add(primary)
             session.commit()
             session.refresh(primary)
@@ -640,6 +715,317 @@ class DataStore:
             return set(inspect(engine).get_table_names())
         finally:
             engine.dispose()
+
+    # ------------------------------------------------------------------ #
+    # Evidence (Phase 2)                                                   #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _validate_evidence(evidence: Evidence) -> None:
+        _check_choice(evidence.evidence_type, EvidenceType, "evidence_type")
+        _check_choice(evidence.source, EvidenceSource, "source")
+        _check_choice(evidence.processing_status, EvidenceStatus, "processing_status")
+        _check_choice(evidence.link_method, LinkMethod, "link_method")
+        if evidence.link_confidence is not None and not 0 <= evidence.link_confidence <= 1:
+            raise ValueError("link_confidence must be between 0 and 1")
+
+    def insert_evidence(self, evidence: Evidence) -> tuple[Evidence, bool]:
+        """Insert evidence idempotently. Returns (stored row, created).
+
+        A unique content fingerprint and a unique (source, external_id) pair are enforced by
+        the database; the insert is ``INSERT ... ON CONFLICT DO NOTHING`` followed by a read,
+        so concurrent writers of the same evidence end up with one row and both receive it.
+        """
+        self._validate_evidence(evidence)
+        if evidence.snippet:
+            evidence.snippet = evidence.snippet[:EVIDENCE_SNIPPET_MAX_CHARS]
+        if evidence.normalized_subject is None:
+            evidence.normalized_subject = normalize_subject(evidence.subject)
+        if not evidence.content_fingerprint:
+            evidence.content_fingerprint = evidence_fingerprint(
+                evidence_type=evidence.evidence_type,
+                source=evidence.source,
+                external_id=evidence.external_id,
+                thread_id=evidence.thread_id,
+                sender=evidence.sender,
+                recipient=evidence.recipient,
+                subject=evidence.subject,
+                occurred_at=evidence.occurred_at,
+                snippet=evidence.snippet,
+            )
+        values = evidence.model_dump(exclude={"id"})
+        statement = sqlite_insert(_table(Evidence)).values(**values).on_conflict_do_nothing()
+        with Session(self._engine, expire_on_commit=False) as session:
+            created = session.execute(statement).rowcount == 1  # type: ignore[attr-defined]
+            session.commit()
+            stored = session.exec(
+                select(Evidence).where(Evidence.content_fingerprint == evidence.content_fingerprint)
+            ).first()
+            if stored is None and evidence.external_id:
+                # Same (source, external_id) already stored under another evidence_type.
+                stored = session.exec(
+                    select(Evidence).where(
+                        Evidence.source == evidence.source,
+                        Evidence.external_id == evidence.external_id,
+                    )
+                ).first()
+            if stored is None:
+                raise RuntimeError("Evidence insert neither created nor found a row")
+            return stored, created
+
+    def get_evidence(self, evidence_id: int) -> Evidence | None:
+        with Session(self._engine, expire_on_commit=False) as session:
+            return session.get(Evidence, evidence_id)
+
+    def get_evidence_by_external_id(self, source: str, external_id: str) -> Evidence | None:
+        with Session(self._engine, expire_on_commit=False) as session:
+            return session.exec(
+                select(Evidence).where(
+                    Evidence.source == source, Evidence.external_id == external_id
+                )
+            ).first()
+
+    def list_evidence(self, filters: EvidenceFilter) -> tuple[list[Evidence], int]:
+        """Evidence newest first, with the total matching count for pagination."""
+        conditions: list[ColumnElement[bool]] = []
+        if filters.linked is True:
+            conditions.append(col(Evidence.application_id).is_not(None))
+        elif filters.linked is False:
+            conditions.append(col(Evidence.application_id).is_(None))
+        if filters.source:
+            conditions.append(col(Evidence.source) == filters.source)
+        if filters.evidence_type:
+            conditions.append(col(Evidence.evidence_type) == filters.evidence_type)
+        if filters.processing_status:
+            conditions.append(col(Evidence.processing_status) == filters.processing_status)
+        elif not filters.include_ignored:
+            conditions.append(col(Evidence.processing_status) != EvidenceStatus.IGNORED.value)
+        if filters.date_from:
+            conditions.append(col(Evidence.occurred_at) >= filters.date_from)
+        if filters.date_to:
+            conditions.append(col(Evidence.occurred_at) <= filters.date_to)
+        if filters.application_id is not None:
+            conditions.append(col(Evidence.application_id) == filters.application_id)
+        with Session(self._engine, expire_on_commit=False) as session:
+            total = session.exec(
+                select(func.count()).select_from(Evidence).where(*conditions)
+            ).one()
+            items = session.exec(
+                select(Evidence)
+                .where(*conditions)
+                .order_by(col(Evidence.occurred_at).desc(), col(Evidence.id).desc())
+                .offset((max(filters.page, 1) - 1) * filters.page_size)
+                .limit(filters.page_size)
+            ).all()
+            return list(items), total
+
+    def get_evidence_for_application(self, application_id: int) -> list[Evidence]:
+        with Session(self._engine, expire_on_commit=False) as session:
+            return list(
+                session.exec(
+                    select(Evidence)
+                    .where(Evidence.application_id == application_id)
+                    .order_by(col(Evidence.occurred_at), col(Evidence.id))
+                ).all()
+            )
+
+    def count_evidence(self) -> dict[str, int]:
+        """total excludes `ignored` non-job mail; unlinked = not attached to an application
+        (and not ignored); needs_review = explicitly waiting for a decision."""
+        not_ignored = col(Evidence.processing_status) != EvidenceStatus.IGNORED.value
+        with Session(self._engine) as session:
+            total = session.exec(
+                select(func.count()).select_from(Evidence).where(not_ignored)
+            ).one()
+            unlinked = session.exec(
+                select(func.count())
+                .select_from(Evidence)
+                .where(not_ignored, col(Evidence.application_id).is_(None))
+            ).one()
+            needs_review = session.exec(
+                select(func.count())
+                .select_from(Evidence)
+                .where(Evidence.processing_status == EvidenceStatus.NEEDS_REVIEW.value)
+            ).one()
+        return {"total": total, "unlinked": unlinked, "needs_review": needs_review}
+
+    def link_evidence(
+        self,
+        evidence_id: int,
+        application_id: int,
+        method: str,
+        confidence: float,
+        status: str = EvidenceStatus.LINKED.value,
+    ) -> Evidence:
+        """Attach evidence to an application in one transaction, refreshing
+        last_evidence_at on both the previous and the new application."""
+        _check_choice(method, LinkMethod, "link_method")
+        _check_choice(status, EvidenceStatus, "processing_status")
+        if not 0 <= confidence <= 1:
+            raise ValueError("confidence must be between 0 and 1")
+        with Session(self._engine, expire_on_commit=False) as session:
+            evidence = session.get(Evidence, evidence_id)
+            if evidence is None:
+                raise EvidenceNotFoundError(f"Evidence {evidence_id} not found")
+            if session.get(Application, application_id) is None:
+                raise ApplicationNotFoundError(f"Application {application_id} not found")
+            previous = evidence.application_id
+            evidence.application_id = application_id
+            evidence.link_method = method
+            evidence.link_confidence = confidence
+            evidence.processing_status = status
+            evidence.review_reason = None
+            evidence.updated_at = utc_now()
+            session.add(evidence)
+            session.flush()
+            for app_id in {previous, application_id} - {None}:
+                self._refresh_last_evidence_at(session, app_id)  # type: ignore[arg-type]
+            session.commit()
+            session.refresh(evidence)
+            return evidence
+
+    def unlink_evidence(self, evidence_id: int, reason: str = "manually_unlinked") -> Evidence:
+        """Detach evidence (it returns to needs_review). Status changes it caused stay in
+        status history; correct those with a manual status update if needed."""
+        with Session(self._engine, expire_on_commit=False) as session:
+            evidence = session.get(Evidence, evidence_id)
+            if evidence is None:
+                raise EvidenceNotFoundError(f"Evidence {evidence_id} not found")
+            previous = evidence.application_id
+            evidence.application_id = None
+            evidence.link_method = None
+            evidence.link_confidence = None
+            evidence.processing_status = EvidenceStatus.NEEDS_REVIEW.value
+            evidence.review_reason = reason
+            evidence.updated_at = utc_now()
+            session.add(evidence)
+            session.flush()
+            if previous is not None:
+                self._refresh_last_evidence_at(session, previous)
+            session.commit()
+            session.refresh(evidence)
+            return evidence
+
+    def update_evidence_processing(
+        self,
+        evidence_id: int,
+        status: str,
+        *,
+        review_reason: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> Evidence:
+        """Record a processing result; metadata keys are merged into raw_metadata."""
+        _check_choice(status, EvidenceStatus, "processing_status")
+        with Session(self._engine, expire_on_commit=False) as session:
+            evidence = session.get(Evidence, evidence_id)
+            if evidence is None:
+                raise EvidenceNotFoundError(f"Evidence {evidence_id} not found")
+            evidence.processing_status = status
+            evidence.review_reason = review_reason
+            if metadata:
+                evidence.raw_metadata = {**(evidence.raw_metadata or {}), **metadata}
+            evidence.updated_at = utc_now()
+            session.add(evidence)
+            session.commit()
+            session.refresh(evidence)
+            return evidence
+
+    def update_evidence_details(
+        self,
+        evidence_id: int,
+        *,
+        sender: str | None,
+        subject: str | None,
+        snippet: str | None,
+        metadata: dict[str, Any] | None = None,
+    ) -> Evidence:
+        """Fill in descriptive fields once an item turns out to be job-related. Only for
+        evidence identified by an external ID, whose fingerprint does not depend on them."""
+        with Session(self._engine, expire_on_commit=False) as session:
+            evidence = session.get(Evidence, evidence_id)
+            if evidence is None:
+                raise EvidenceNotFoundError(f"Evidence {evidence_id} not found")
+            if not evidence.external_id:
+                raise ValueError("Details of fingerprint-identified evidence are immutable")
+            evidence.sender = sender
+            evidence.subject = subject
+            evidence.normalized_subject = normalize_subject(subject)
+            evidence.snippet = snippet[:EVIDENCE_SNIPPET_MAX_CHARS] if snippet else None
+            if metadata:
+                evidence.raw_metadata = {**(evidence.raw_metadata or {}), **metadata}
+            evidence.updated_at = utc_now()
+            session.add(evidence)
+            session.commit()
+            session.refresh(evidence)
+            return evidence
+
+    def recompute_last_evidence_at(self, application_id: int | None = None) -> int:
+        """Set last_evidence_at from linked evidence (NULL when none) for one application
+        or all of them. Safe to run any time; returns the number of rows written."""
+        app_table = _table(Application)
+        newest = (
+            select(func.max(Evidence.occurred_at))
+            .where(col(Evidence.application_id) == app_table.c.id)
+            .scalar_subquery()
+        )
+        statement = update(app_table).values(last_evidence_at=newest)
+        if application_id is not None:
+            statement = statement.where(app_table.c.id == application_id)
+        with Session(self._engine) as session:
+            written = session.execute(statement).rowcount  # type: ignore[attr-defined]
+            session.commit()
+        return int(written or 0)
+
+    @staticmethod
+    def _newest_evidence_at(session: Session, application_id: int) -> datetime | None:
+        return session.exec(
+            select(func.max(Evidence.occurred_at)).where(Evidence.application_id == application_id)
+        ).one()
+
+    def _refresh_last_evidence_at(self, session: Session, application_id: int) -> None:
+        app_table = _table(Application)
+        session.execute(
+            update(app_table)
+            .where(app_table.c.id == application_id)
+            .values(last_evidence_at=self._newest_evidence_at(session, application_id))
+        )
+
+    @staticmethod
+    def _detach_evidence(session: Session, application_ids: list[int], reason: str) -> None:
+        for evidence in session.exec(
+            select(Evidence).where(col(Evidence.application_id).in_(application_ids))
+        ).all():
+            evidence.application_id = None
+            evidence.link_method = None
+            evidence.link_confidence = None
+            evidence.processing_status = EvidenceStatus.NEEDS_REVIEW.value
+            evidence.review_reason = reason
+            evidence.updated_at = utc_now()
+            session.add(evidence)
+
+    def _backfill_identity_fields(self) -> None:
+        """Fill derived identity columns where NULL (rows from before Phase 2, or written
+        by an older release). Core columns only, so legacy enum data cannot break startup."""
+        app_table = _table(Application)
+        c = app_table.c
+        needs = or_(
+            (c.normalized_company.is_(None)) & (c.company.is_not(None)),
+            (c.normalized_role.is_(None)) & (c.role.is_not(None)),
+            (c.canonical_job_url.is_(None)) & (c.job_url.is_not(None)),
+        )
+        with Session(self._engine) as session:
+            rows = session.execute(select(c.id, c.company, c.role, c.job_url).where(needs)).all()
+            for app_id, company, role, job_url in rows:
+                session.execute(
+                    update(app_table)
+                    .where(c.id == app_id)
+                    .values(
+                        normalized_company=normalize_company(company) or None,
+                        normalized_role=normalize_role(role) or None,
+                        canonical_job_url=canonical_job_url(job_url),
+                    )
+                )
+            session.commit()
 
     # ------------------------------------------------------------------ #
     # Backup primitives — the only raw sqlite3 use in the codebase         #
@@ -699,6 +1085,7 @@ class DataStore:
             "applicationthreadid": ApplicationThreadId,
             "prospect": Prospect,
             "processedmessage": ProcessedMessage,
+            "evidence": Evidence,
         }
         engine = schema.readonly_engine(db_path)
         try:
@@ -744,6 +1131,17 @@ class DataStore:
                 session.delete(entry)
             for link in session.exec(select(ApplicationThreadId)).all():
                 session.delete(link)
+            # Evidence survives a re-backfill (it is the record of what was received); it is
+            # detached and returned to pending so re-polling re-links it.
+            for evidence in session.exec(
+                select(Evidence).where(col(Evidence.application_id).is_not(None))
+            ).all():
+                evidence.application_id = None
+                evidence.link_method = None
+                evidence.link_confidence = None
+                evidence.processing_status = EvidenceStatus.PENDING.value
+                evidence.updated_at = utc_now()
+                session.add(evidence)
             session.flush()  # child deletes before parent — see delete_application for why
             for app in session.exec(select(Application)).all():
                 session.delete(app)
