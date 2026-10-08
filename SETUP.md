@@ -43,6 +43,12 @@ launchctl stop com.jobtracker.api
 launchctl stop com.jobtracker.poller
 ```
 
+## Sign-in
+
+All data requires a signed-in session. For local use add `AUTH_MODE=local` to `.env`
+(explicit developer sign-in, this machine only), or configure Google sign-in as described in
+[docs/authentication.md](docs/authentication.md).
+
 ## Dashboard
 Open http://jobtracker.localhost:5173 in your browser (after starting frontend).
 

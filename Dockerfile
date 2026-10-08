@@ -15,9 +15,12 @@ RUN pip install --no-cache-dir \
     https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
 
 COPY backend/ backend/
+COPY scripts/ scripts/
 COPY alembic.ini .
 
 ENV JOB_TRACKER_DIR=/data
+# Fail closed: production requires complete AUTH_* configuration to start.
+ENV APP_ENV=production
 ENV API_HOST=0.0.0.0
 ENV API_PORT=8000
 

@@ -1,10 +1,35 @@
+# Build context for the backend image. Everything personal or secret stays out.
+.git/
+.github/
+.claude/
 .venv/
 frontend/
-.job-tracker/
-graphify-out/
-.git/
 tests/
-*.db
+docs/
+graphify-out/
 node_modules/
 __pycache__/
 .pytest_cache/
+.mypy_cache/
+.coverage
+*.log
+
+# Databases, backups and manifests (personal data)
+.job-tracker/
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.pre-restore-*
+backups/
+**/backups/
+
+# Environment files, Gmail/OAuth credentials and tokens, browser sessions
+.env
+.env.*
+client_secret*.json
+credentials*.json
+*token*.json
+playwright/.auth/
+.auth/
+storage_state*.json

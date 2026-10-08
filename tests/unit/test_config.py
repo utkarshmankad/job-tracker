@@ -75,10 +75,29 @@ def test_cache_enabled_false_when_env_set_false(monkeypatch) -> None:
     assert cfg.CACHE_ENABLED is False
 
 
-def test_admin_token_unset_by_default(monkeypatch) -> None:
-    monkeypatch.delenv("ADMIN_TOKEN", raising=False)
+def test_auth_defaults_are_google_mode_and_unconfigured(monkeypatch) -> None:
+    for name in (
+        "APP_ENV",
+        "AUTH_MODE",
+        "AUTH_ALLOWED_EMAIL",
+        "AUTH_GOOGLE_CLIENT_ID",
+        "AUTH_SESSION_SECRET",
+        "AUTH_SESSION_TTL_SECONDS",
+    ):
+        monkeypatch.delenv(name, raising=False)
     cfg = _reload_config(monkeypatch)
-    assert cfg.ADMIN_TOKEN is None
+    assert cfg.APP_ENV == "development"
+    assert cfg.AUTH_MODE == "google"
+    assert cfg.AUTH_ALLOWED_EMAIL is None
+    assert cfg.AUTH_GOOGLE_CLIENT_ID is None
+    assert cfg.AUTH_SESSION_SECRET is None
+    assert cfg.AUTH_SESSION_TTL_SECONDS == 43200
+    assert not hasattr(cfg, "ADMIN_TOKEN")
+
+
+def test_auth_allowed_email_is_normalised(monkeypatch) -> None:
+    cfg = _reload_config(monkeypatch, AUTH_ALLOWED_EMAIL="  Owner@Example.COM ")
+    assert cfg.AUTH_ALLOWED_EMAIL == "owner@example.com"
 
 
 def test_job_tracker_dir_respects_env_override(monkeypatch, tmp_path) -> None:

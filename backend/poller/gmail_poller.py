@@ -4,6 +4,7 @@ import base64
 import json
 import os
 import threading
+from dataclasses import dataclass
 from dataclasses import replace as dataclass_replace
 from datetime import UTC
 from email.utils import parsedate_to_datetime
@@ -11,6 +12,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 import keyring
+import keyring.errors
 import structlog
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -24,6 +26,7 @@ from backend.config import (
     GMAIL_KEYCHAIN_SERVICE,
     GMAIL_KEYCHAIN_USERNAME,
     GMAIL_SCOPES,
+    GMAIL_TOKEN_ENV_VAR,
 )
 from backend.db.data_store import DataStore
 from backend.db.models import Prospect, utc_now
@@ -35,6 +38,31 @@ if TYPE_CHECKING:
     from backend.db.models import Application, SuppressRule
 
 log = structlog.get_logger()
+
+
+# Fields an authorized-user token needs so it can refresh without client_secret.json.
+_TOKEN_REQUIRED_FIELDS = ("refresh_token", "client_id", "client_secret")
+
+
+@dataclass(frozen=True)
+class CredentialReport:
+    ok: bool
+    source: str  # "environment" | "keychain" | "none"
+    detail: str
+
+
+def _token_problem(token_json: str) -> str | None:
+    """Return why a stored token cannot be used, or None. Never echoes token values."""
+    try:
+        info = json.loads(token_json)
+    except json.JSONDecodeError:
+        return "is not valid JSON"
+    if not isinstance(info, dict):
+        return "is not a JSON object"
+    missing = [name for name in _TOKEN_REQUIRED_FIELDS if not info.get(name)]
+    if missing:
+        return f"is missing {', '.join(missing)}"
+    return None
 
 
 class PollerStatus(str, Enum):
@@ -134,7 +162,7 @@ class GmailPoller:
         log.info("gmail_reauthenticated_via_web_flow")
 
     def _load_token_from_keyring(self) -> Credentials | None:
-        token_json = os.environ.get("GMAIL_TOKEN_JSON") or keyring.get_password(
+        token_json = os.environ.get(GMAIL_TOKEN_ENV_VAR) or keyring.get_password(
             GMAIL_KEYCHAIN_SERVICE, GMAIL_KEYCHAIN_USERNAME
         )
         if not token_json:
@@ -146,12 +174,69 @@ class GmailPoller:
             return None
 
     def _save_token_to_keyring(self, creds: Credentials) -> None:
-        if os.environ.get("GMAIL_TOKEN_JSON"):
+        if os.environ.get(GMAIL_TOKEN_ENV_VAR):
             # Fly.io secrets are read-only at runtime; refreshed token stays
             # in-memory for this process and re-refreshes on next restart.
             log.info("gmail_token_refresh_not_persisted_env_backed")
             return
         keyring.set_password(GMAIL_KEYCHAIN_SERVICE, GMAIL_KEYCHAIN_USERNAME, creds.to_json())
+
+    @staticmethod
+    def describe_credentials() -> CredentialReport:
+        """Report where Gmail credentials come from and whether they are usable, without
+        network calls and without revealing any token values.
+
+        An environment token (GMAIL_TOKEN_JSON, used on Fly) carries its own client ID and
+        secret, so polling does not need client_secret.json; that file is only required for
+        the web re-auth flow and its absence is reported as a note, not a failure.
+        """
+        from backend import config as app_config
+
+        if not app_config.POLLER_ENABLED:
+            # Do not read the environment token or the keychain when polling is off.
+            return CredentialReport(
+                True, "disabled", "Polling disabled (POLLER_ENABLED=false); credentials not loaded"
+            )
+        reauth_note = (
+            ""
+            if CREDENTIALS_PATH.exists()
+            else "; client_secret.json absent (web re-auth unavailable)"
+        )
+        env_token = os.environ.get(GMAIL_TOKEN_ENV_VAR)
+        if env_token:
+            problem = _token_problem(env_token)
+            if problem:
+                return CredentialReport(False, "environment", f"{GMAIL_TOKEN_ENV_VAR} {problem}")
+            return CredentialReport(
+                True,
+                "environment",
+                f"Using {GMAIL_TOKEN_ENV_VAR} (refreshable token){reauth_note}",
+            )
+
+        try:
+            stored = keyring.get_password(GMAIL_KEYCHAIN_SERVICE, GMAIL_KEYCHAIN_USERNAME)
+        except keyring.errors.KeyringError:
+            stored = None
+        if stored:
+            problem = _token_problem(stored)
+            if problem:
+                return CredentialReport(False, "keychain", f"Keychain token {problem}")
+            return CredentialReport(
+                True, "keychain", f"Using keychain token (refreshable){reauth_note}"
+            )
+
+        if CREDENTIALS_PATH.exists():
+            return CredentialReport(
+                False,
+                "none",
+                "No Gmail token yet — run: python backend/setup_wizard.py reauth",
+            )
+        return CredentialReport(
+            False,
+            "none",
+            f"No Gmail credentials: set {GMAIL_TOKEN_ENV_VAR} or add client_secret.json "
+            "and run the setup wizard",
+        )
 
     @property
     def is_polling(self) -> bool:

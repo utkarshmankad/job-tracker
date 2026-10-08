@@ -10,6 +10,7 @@ import pytest
 from sqlmodel import Session
 from starlette.testclient import TestClient
 
+from backend.api.routes import ReauthState
 from backend.config import STALE_DAYS_THRESHOLD
 from backend.db.data_store import DataStore
 from backend.db.models import Application, Prospect, utc_now
@@ -19,13 +20,16 @@ from backend.main import app
 
 
 @pytest.fixture
-def seeded_client(tmp_path):
+def seeded_client(tmp_path, test_auth_user, fake_poller_scheduler):
     db_path = tmp_path / "test.db"
     test_db = DataStore(db_path)
     with TestClient(app, raise_server_exceptions=True) as client:
         # Override AFTER lifespan runs so the test DB isn't replaced by startup event.
+        # The poller is disabled in tests (POLLER_ENABLED=false); routes that need a
+        # scheduler get a fake whose GmailPoller is a MagicMock.
         app.state.db = test_db
         app.state.updater = StatusUpdater(test_db, DuplicateDetector(test_db))
+        app.state.poller_scheduler = fake_poller_scheduler
         yield client, test_db
 
 
@@ -565,18 +569,26 @@ def test_suppress_rule_delete_nonexistent_returns_404(seeded_client):
 # ------------------------------------------------------------------ #
 
 
-def test_trigger_poll_returns_triggered(seeded_client):
-    """POST /poller/trigger must return 200 with triggered=True when scheduler runs."""
+def test_trigger_poll_returns_triggered(seeded_client, fake_poller_scheduler):
+    """POST /poller/trigger must return 200 with triggered=True when a scheduler exists."""
     client, _ = seeded_client
     resp = client.post(f"{_BASE}/poller/trigger")
-    # Scheduler is started by the lifespan, so it should be present.
     assert resp.status_code == 200
     body = resp.json()
     assert body["triggered"] is True
     assert "skipped" in body
+    assert fake_poller_scheduler.triggered == 1
 
 
-def test_trigger_poll_no_scheduler_returns_503():
+def test_trigger_poll_with_poller_disabled_returns_503(test_auth_user):
+    """With POLLER_ENABLED=false (the test default) the lifespan starts no scheduler."""
+    with TestClient(app) as client:
+        assert app.state.poller_scheduler is None
+        resp = client.post(f"{_BASE}/poller/trigger")
+    assert resp.status_code == 503
+
+
+def test_trigger_poll_no_scheduler_returns_503(test_auth_user):
     """POST /poller/trigger must return 503 when no scheduler is in app state."""
     from starlette.testclient import TestClient
 
@@ -692,7 +704,12 @@ def test_delete_adds_suppress_rule_for_sender_domain(seeded_client):
         ]
     }
 
-    real_poller = app.state.poller_scheduler.poller
+    # A real GmailPoller (so the real sender-domain extraction runs) whose Gmail service is
+    # a mock — no credentials, no network.
+    from backend.poller.gmail_poller import GmailPoller
+
+    real_poller = GmailPoller(test_db, MagicMock(name="EmailParser"), MagicMock(name="Updater"))
+    app.state.poller_scheduler.poller = real_poller
     original_service = real_poller.service
     real_poller.service = mock_service
     try:
@@ -700,6 +717,7 @@ def test_delete_adds_suppress_rule_for_sender_domain(seeded_client):
         assert resp.status_code == 200
         assert resp.json() == {"deleted": True}
         assert client.get(f"{_BASE}/applications/{app_id}").status_code == 404
+        mock_service.users.return_value.threads.return_value.get.assert_called_once()
 
         rules = client.get(f"{_BASE}/suppress-rules").json()
         patterns = [r["sender_pattern"] for r in rules]
@@ -747,7 +765,15 @@ def test_diagnostics_endpoint_available(seeded_client):
         assert "detail" in result
 
 
-def test_reauth_start_returns_auth_url(seeded_client):
+def _reauth_state(value: str, session_id: str, expires_in: int = 300) -> ReauthState:
+    return ReauthState(
+        value=value,
+        session_id=session_id,
+        expires_at=app.state.auth.now() + expires_in,
+    )
+
+
+def test_reauth_start_returns_auth_url_bound_to_session(seeded_client, test_auth_user):
     client, _ = seeded_client
     real_poller = app.state.poller_scheduler.poller
     with patch.object(
@@ -758,21 +784,51 @@ def test_reauth_start_returns_auth_url(seeded_client):
         resp = client.get(f"{_BASE}/poller/reauth/start")
     assert resp.status_code == 200
     assert resp.json() == {"auth_url": "https://accounts.google.com/auth?x=1"}
-    assert app.state.reauth_state == "state-xyz"
+    assert app.state.reauth_state.value == "state-xyz"
+    assert app.state.reauth_state.session_id == test_auth_user.session_id
 
 
-def test_reauth_callback_rejects_mismatched_state(seeded_client):
+def test_reauth_start_ignores_legacy_query_token(seeded_client):
+    """The old ?token= admin secret is gone; session auth is the only gate."""
     client, _ = seeded_client
-    app.state.reauth_state = "expected-state"
+    real_poller = app.state.poller_scheduler.poller
+    with patch.object(
+        real_poller, "build_reauth_url", return_value=("https://accounts.google.com/a", "s")
+    ):
+        resp = client.get(f"{_BASE}/poller/reauth/start", params={"token": "anything"})
+    assert resp.status_code == 200
+
+
+def test_reauth_callback_rejects_mismatched_state(seeded_client, test_auth_user):
+    client, _ = seeded_client
+    app.state.reauth_state = _reauth_state("expected-state", test_auth_user.session_id)
     resp = client.get(
         f"{_BASE}/poller/reauth/callback", params={"code": "abc", "state": "wrong-state"}
     )
     assert resp.status_code == 400
 
 
-def test_reauth_callback_succeeds_and_clears_state(seeded_client):
+def test_reauth_callback_rejects_state_from_another_session(seeded_client):
+    client, _ = seeded_client
+    app.state.reauth_state = _reauth_state("match-state", "some-other-session")
+    resp = client.get(
+        f"{_BASE}/poller/reauth/callback", params={"code": "abc", "state": "match-state"}
+    )
+    assert resp.status_code == 400
+
+
+def test_reauth_callback_rejects_expired_state(seeded_client, test_auth_user):
+    client, _ = seeded_client
+    app.state.reauth_state = _reauth_state("match-state", test_auth_user.session_id, -1)
+    resp = client.get(
+        f"{_BASE}/poller/reauth/callback", params={"code": "abc", "state": "match-state"}
+    )
+    assert resp.status_code == 400
+
+
+def test_reauth_callback_succeeds_and_clears_state(seeded_client, test_auth_user):
     client, db = seeded_client
-    app.state.reauth_state = "match-state"
+    app.state.reauth_state = _reauth_state("match-state", test_auth_user.session_id)
     real_poller = app.state.poller_scheduler.poller
     with patch.object(real_poller, "complete_reauth") as mock_complete:
         resp = client.get(
@@ -783,24 +839,3 @@ def test_reauth_callback_succeeds_and_clears_state(seeded_client):
     mock_complete.assert_called_once()
     assert app.state.reauth_state is None
     assert db.get_poller_state().status == "RUNNING"
-
-
-def test_reauth_start_requires_admin_token_when_configured(seeded_client):
-    client, _ = seeded_client
-    real_poller = app.state.poller_scheduler.poller
-    with (
-        patch.object(
-            real_poller,
-            "build_reauth_url",
-            return_value=("https://accounts.google.com/auth?x=1", "state-xyz"),
-        ),
-        patch("backend.api.routes.ADMIN_TOKEN", "secret-token"),
-    ):
-        resp_no_token = client.get(f"{_BASE}/poller/reauth/start")
-        resp_wrong_token = client.get(f"{_BASE}/poller/reauth/start", params={"token": "wrong"})
-        resp_right_token = client.get(
-            f"{_BASE}/poller/reauth/start", params={"token": "secret-token"}
-        )
-    assert resp_no_token.status_code == 403
-    assert resp_wrong_token.status_code == 403
-    assert resp_right_token.status_code == 200

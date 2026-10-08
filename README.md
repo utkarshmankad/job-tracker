@@ -176,6 +176,33 @@ Open [http://jobtracker.localhost:5173](http://jobtracker.localhost:5173) — yo
 
 ---
 
+## Authentication
+
+The dashboard and every data endpoint require sign-in. In production the owner signs in with
+Google and only `AUTH_ALLOWED_EMAIL` is accepted; locally, set `AUTH_MODE=local` in `.env` for
+an explicit developer sign-in. Setup, environment variables, Vercel/Fly configuration and
+rotation: [docs/authentication.md](docs/authentication.md).
+
+## Running without the Gmail poller
+
+Set `POLLER_ENABLED=false` to start the API without the Gmail poller: no Gmail credentials
+are loaded, the macOS keychain is never read, no Google API client is built, and neither the
+poller thread nor sleep/wake monitoring starts. `/poller/trigger` then returns 503 and the
+`gmail_credentials` diagnostic reports polling as disabled. The default (`true`) leaves local
+development and production unchanged.
+
+The test suite always runs this way: `tests/isolation.py` also uses a temporary
+`JOB_TRACKER_DIR`, disables Redis and the LLM, ignores `.env`, and fails any test that
+touches the keychain or a non-loopback network address. Tests never see your real database
+or Gmail account.
+
+## Database migrations and backups
+
+The schema is versioned with Alembic. Locally an older database is backed up and upgraded
+automatically on startup; in production the API waits in maintenance mode until an operator
+runs `scripts/migrate_database.py upgrade`. Backups, restores and the Fly.io runbooks:
+[docs/database-operations.md](docs/database-operations.md).
+
 ## Useful commands
 
 ```bash

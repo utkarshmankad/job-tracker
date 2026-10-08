@@ -1,0 +1,41 @@
+# Scheduled, verified SQLite backups on the Fly volume (docs/database-operations.md).
+#
+# Opt-in: runs only when the repository variable FLY_BACKUPS_ENABLED is "true"
+# (Settings → Secrets and variables → Actions → Variables). Uses the existing
+# FLY_API_TOKEN secret. Backups stay on the Fly volume; nothing is downloaded into
+# GitHub, so no personal data lands in workflow logs or artifacts.
+name: Fly Database Backup
+
+on:
+  schedule:
+    - cron: "17 3 * * *" # daily, 03:17 UTC
+  workflow_dispatch:
+    inputs:
+      label:
+        description: "Backup label"
+        required: false
+        default: "manual"
+
+concurrency: fly-database-backup
+
+jobs:
+  backup:
+    if: ${{ vars.FLY_BACKUPS_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      FLY_APP: job-tracker-api-verdant-haze-8797
+      LABEL: ${{ github.event_name == 'schedule' && 'scheduled' || inputs.label }}
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # master, pinned 2026-07-09
+      - name: Validate label
+        run: |
+          [[ "$LABEL" =~ ^[a-z0-9-]{1,40}$ ]] || { echo "label must match [a-z0-9-]{1,40}"; exit 1; }
+      - name: Create and verify backup (online, safe while the app runs)
+        run: |
+          flyctl ssh console --app "$FLY_APP" -C \
+            "python /app/scripts/backup_database.py --db /data/applications.db --backup-dir /data/backups --label ${LABEL} --keep 14"
+      - name: Re-verify newest backup
+        run: |
+          flyctl ssh console --app "$FLY_APP" -C \
+            "python /app/scripts/verify_backup.py --latest --backup-dir /data/backups"

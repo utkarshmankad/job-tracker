@@ -84,12 +84,14 @@ def test_check_db_connectivity_healthy(runner: DiagnosticRunner):
     assert "Connected" in result.detail
 
 
-def test_check_db_connectivity_missing_db(tmp_path: Path):
-    # A valid SQLite path that doesn't exist yet — DataStore will CREATE it,
-    # so connectivity should succeed.
-    runner = DiagnosticRunner(db_path=tmp_path / "new.db")
+def test_check_db_connectivity_missing_db_is_reported_not_created(tmp_path: Path):
+    # Diagnostics must never create (or migrate) a database — a missing file is a failure.
+    missing = tmp_path / "new.db"
+    runner = DiagnosticRunner(db_path=missing)
     result = runner._check_db_connectivity()
-    assert result.ok
+    assert not result.ok
+    assert "not found" in result.detail
+    assert not missing.exists()
 
 
 # ------------------------------------------------------------------ #
@@ -246,9 +248,19 @@ def test_run_all_returns_results_for_healthy_db(runner: DiagnosticRunner):
     assert len(results) >= 4
     assert all(isinstance(r, DiagnosticResult) for r in results)
     failed = [r for r in results if not r.ok]
-    # Only config path checks may fail in CI (no credentials.json).
-    non_config_failures = [r for r in failed if r.name != "config_paths"]
-    assert not non_config_failures, [str(r) for r in non_config_failures]
+    # Only Gmail credentials may fail in CI (no token, no client_secret.json).
+    unexpected = [r for r in failed if r.name != "gmail_credentials"]
+    assert not unexpected, [str(r) for r in unexpected]
+    assert {r.name for r in results} >= {
+        "db_file",
+        "db_connectivity",
+        "schema_revision",
+        "schema_tables",
+        "enum_values",
+        "poller_state",
+        "config_paths",
+        "gmail_credentials",
+    }
 
 
 def test_run_all_catches_exception_from_bad_check(tmp_path: Path):
@@ -257,3 +269,195 @@ def test_run_all_catches_exception_from_bad_check(tmp_path: Path):
     results = runner.run_all()
     # Some checks will fail gracefully but none should propagate exceptions.
     assert all(isinstance(r, DiagnosticResult) for r in results)
+
+
+# ------------------------------------------------------------------ #
+# Complete schema + revision                                           #
+# ------------------------------------------------------------------ #
+
+
+def test_required_tables_include_every_model_table():
+    from backend.diagnostics import required_tables
+
+    assert required_tables() == {
+        "application",
+        "statushistory",
+        "applicationevent",
+        "applicationthreadid",
+        "suppressrule",
+        "pollerstate",
+        "processedmessage",
+        "prospect",
+    }
+
+
+@pytest.mark.parametrize("table", ["applicationevent", "applicationthreadid", "prospect"])
+def test_check_schema_tables_reports_each_missing_table(db: DataStore, db_path: Path, table):
+    db.close()
+    conn = sqlite3.connect(db_path)  # test-only fixture surgery on a throwaway DB
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute(f"DROP TABLE {table}")
+    conn.commit()
+    conn.close()
+    result = DiagnosticRunner(db_path=db_path)._check_schema_tables()
+    assert not result.ok
+    assert table in result.detail
+
+
+def test_check_schema_tables_requires_alembic_version(db: DataStore, db_path: Path):
+    db.close()
+    conn = sqlite3.connect(db_path)
+    conn.execute("DROP TABLE alembic_version")
+    conn.commit()
+    conn.close()
+    result = DiagnosticRunner(db_path=db_path)._check_schema_tables()
+    assert not result.ok
+    assert "alembic_version" in result.detail
+
+
+def test_check_schema_revision_current(runner: DiagnosticRunner):
+    from backend.db.schema import head_revision
+
+    result = runner._check_schema_revision()
+    assert result.ok
+    assert head_revision() in result.detail
+
+
+def test_check_schema_revision_unversioned_database(tmp_path: Path):
+    legacy = tmp_path / "legacy.db"
+    conn = sqlite3.connect(legacy)
+    conn.execute("CREATE TABLE application (id INTEGER PRIMARY KEY)")
+    conn.commit()
+    conn.close()
+    result = DiagnosticRunner(db_path=legacy)._check_schema_revision()
+    assert not result.ok
+    assert "unversioned" in result.detail
+    assert "migrate_database.py" in result.detail
+
+
+def test_diagnostics_do_not_migrate_an_outdated_database(tmp_path: Path):
+    legacy = tmp_path / "legacy.db"
+    conn = sqlite3.connect(legacy)
+    conn.execute("CREATE TABLE application (id INTEGER PRIMARY KEY)")
+    conn.commit()
+    conn.close()
+    DiagnosticRunner(db_path=legacy).run_all()
+    tables = DataStore.inspect_schema_tables(legacy)
+    assert "alembic_version" not in tables
+    assert tables == {"application"}
+
+
+# ------------------------------------------------------------------ #
+# Gmail credentials                                                    #
+# ------------------------------------------------------------------ #
+
+_GOOD_TOKEN = '{"refresh_token": "r", "client_id": "c", "client_secret": "s", "token": "t"}'
+
+
+@pytest.fixture
+def poller_on(monkeypatch):
+    """Credential checks only run when polling is enabled (tests default to disabled)."""
+    monkeypatch.setattr("backend.config.POLLER_ENABLED", True)
+
+
+@pytest.fixture
+def no_keychain(monkeypatch, poller_on):
+    monkeypatch.setattr("keyring.get_password", lambda *a, **k: None)
+
+
+def test_gmail_credentials_not_loaded_when_polling_disabled(runner: DiagnosticRunner, monkeypatch):
+    from unittest.mock import MagicMock
+
+    get_password = MagicMock()
+    monkeypatch.setattr("keyring.get_password", get_password)
+    monkeypatch.setenv("GMAIL_TOKEN_JSON", _GOOD_TOKEN)
+    result = runner._check_gmail_credentials()
+    assert result.ok
+    assert "POLLER_ENABLED=false" in result.detail
+    get_password.assert_not_called()
+
+
+def test_gmail_env_token_passes_without_client_secret_file(
+    runner: DiagnosticRunner, monkeypatch, tmp_path: Path, no_keychain
+):
+    monkeypatch.setenv("GMAIL_TOKEN_JSON", _GOOD_TOKEN)
+    monkeypatch.setattr("backend.poller.gmail_poller.CREDENTIALS_PATH", tmp_path / "absent.json")
+    result = runner._check_gmail_credentials()
+    assert result.ok, result.detail
+    assert "GMAIL_TOKEN_JSON" in result.detail
+    assert "web re-auth unavailable" in result.detail
+    for secret in ('"r"', '"s"', '"t"'):
+        assert secret not in result.detail
+
+
+def test_gmail_env_token_missing_refresh_fields_fails(
+    runner: DiagnosticRunner, monkeypatch, no_keychain
+):
+    monkeypatch.setenv("GMAIL_TOKEN_JSON", '{"token": "only-access-token"}')
+    result = runner._check_gmail_credentials()
+    assert not result.ok
+    assert "refresh_token" in result.detail
+    assert "only-access-token" not in result.detail
+
+
+def test_gmail_env_token_invalid_json_fails(runner: DiagnosticRunner, monkeypatch, no_keychain):
+    monkeypatch.setenv("GMAIL_TOKEN_JSON", "not-json")
+    result = runner._check_gmail_credentials()
+    assert not result.ok
+    assert "not valid JSON" in result.detail
+
+
+@pytest.mark.usefixtures("poller_on")
+def test_gmail_keychain_token_passes(runner: DiagnosticRunner, monkeypatch, tmp_path: Path):
+    monkeypatch.delenv("GMAIL_TOKEN_JSON", raising=False)
+    monkeypatch.setattr("keyring.get_password", lambda *a, **k: _GOOD_TOKEN)
+    monkeypatch.setattr("backend.poller.gmail_poller.CREDENTIALS_PATH", tmp_path / "absent.json")
+    result = runner._check_gmail_credentials()
+    assert result.ok
+    assert "keychain" in result.detail
+
+
+@pytest.mark.usefixtures("poller_on")
+def test_gmail_keychain_unavailable_is_handled(
+    runner: DiagnosticRunner, monkeypatch, tmp_path: Path
+):
+    import keyring.errors
+
+    def boom(*_a, **_k):
+        raise keyring.errors.NoKeyringError("no backend")
+
+    monkeypatch.delenv("GMAIL_TOKEN_JSON", raising=False)
+    monkeypatch.setattr("keyring.get_password", boom)
+    monkeypatch.setattr("backend.poller.gmail_poller.CREDENTIALS_PATH", tmp_path / "absent.json")
+    result = runner._check_gmail_credentials()
+    assert not result.ok
+    assert "No Gmail credentials" in result.detail
+
+
+def test_gmail_client_secret_without_token_asks_for_setup(
+    runner: DiagnosticRunner, monkeypatch, tmp_path: Path, no_keychain
+):
+    secret_file = tmp_path / "client_secret.json"
+    secret_file.write_text("{}")
+    monkeypatch.delenv("GMAIL_TOKEN_JSON", raising=False)
+    monkeypatch.setattr("backend.poller.gmail_poller.CREDENTIALS_PATH", secret_file)
+    result = runner._check_gmail_credentials()
+    assert not result.ok
+    assert "setup_wizard.py" in result.detail
+
+
+def test_config_paths_no_longer_requires_client_secret(
+    runner: DiagnosticRunner, monkeypatch, tmp_path
+):
+    monkeypatch.setattr("backend.config.CREDENTIALS_PATH", tmp_path / "absent.json")
+    assert runner._check_config_paths().ok
+
+
+def test_failing_check_name_is_not_mangled(runner: DiagnosticRunner, monkeypatch):
+    def explode():
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(runner, "_check_config_paths", explode)
+    explode.__name__ = "_check_config_paths"
+    results = runner.run_all()
+    assert any(r.name == "config_paths" and not r.ok for r in results)

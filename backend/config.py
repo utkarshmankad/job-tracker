@@ -15,12 +15,30 @@ CREDENTIALS_PATH = JOB_TRACKER_DIR / "client_secret.json"
 LOG_DIR = JOB_TRACKER_DIR / "logs"
 PORTAL_RULES_PATH = Path(__file__).parent / "parser" / "portal_rules.yaml"
 
+# Database recovery and migrations — see docs/database-operations.md.
+# Backups live beside the database (on the Fly volume in production), one directory each.
+BACKUP_DIR_NAME = "backups"
+BACKUP_DIR = JOB_TRACKER_DIR / BACKUP_DIR_NAME
+# Default number of verified backups kept when a backup run is asked to prune (--keep).
+BACKUP_RETENTION_COUNT = 14
+# While this file exists the API starts in maintenance mode: no DataStore, no poller, every
+# data endpoint returns 503. Used to quiesce writers before a migration or restore.
+MAINTENANCE_FLAG_PATH = JOB_TRACKER_DIR / "MAINTENANCE"
+
 # API
 GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 GMAIL_KEYCHAIN_SERVICE = "job-tracker-gmail"
 GMAIL_KEYCHAIN_USERNAME = "oauth-token"
+# Environment variable carrying the Gmail authorized-user token JSON (used on Fly instead of
+# the keychain). When set, client_secret.json is only needed for the web re-auth flow.
+GMAIL_TOKEN_ENV_VAR = "GMAIL_TOKEN_JSON"
 
 # Poller
+# POLLER_ENABLED=false starts the API without the Gmail poller: no Gmail credentials are
+# loaded, the keychain is never read, no Google API client is built, and neither the poller
+# thread nor sleep/wake monitoring starts. The test suite always runs this way
+# (tests/conftest.py). Default true keeps local development and production unchanged.
+POLLER_ENABLED: bool = os.environ.get("POLLER_ENABLED", "true").lower() == "true"
 POLL_INTERVAL_SECONDS = 300  # 5 minutes
 BACKFILL_DAYS = 180  # 6 months on first run
 
@@ -33,17 +51,50 @@ FRONTEND_ORIGIN = os.environ.get(
     "FRONTEND_ORIGIN"
 )  # e.g. https://job-tracker-three-green.vercel.app
 
-# Public URL the deployed backend is reachable at — used to build the OAuth redirect_uri
-# for the web-based re-auth flow (/poller/reauth/*). Must exactly match a redirect URI
-# registered on the OAuth client in Google Cloud Console. Falls back to localhost for
-# local development, where the interactive setup_wizard.py flow is used instead.
+# Public URL the API is reached at by the browser — used to build the OAuth redirect_uri
+# for the web-based Gmail re-auth flow (/poller/reauth/*). Must exactly match a redirect URI
+# registered on the OAuth client in Google Cloud Console. In production this is the Vercel
+# origin (which proxies /api/* to Fly) so the session cookie accompanies the callback.
+# Falls back to localhost for local development.
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", f"http://{API_HOST}:{API_PORT}")
 
-# Shared secret gating /poller/reauth/start — this endpoint mints a Google OAuth `state`
-# that /poller/reauth/callback trusts, so anyone who can call it unauthenticated could bind
-# their own Gmail account into this app's keyring. Required on the deployed (non-localhost)
-# backend; unset is only safe for local single-user development.
-ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN")
+# Deployment environment. "production" makes authentication fail closed: the API refuses to
+# start unless every required AUTH_* value is configured. The Docker image sets it.
+APP_ENV: str = os.environ.get("APP_ENV", "development").strip().lower()
+
+# Authentication — a single human owner. See docs/authentication.md.
+#   AUTH_MODE=google (default): the browser obtains a Google ID token via Google Identity
+#     Services; the backend verifies it and only accepts AUTH_ALLOWED_EMAIL.
+#   AUTH_MODE=local: explicit loopback-only developer sign-in; refused when APP_ENV=production.
+# There is no "auth disabled" mode.
+AUTH_MODE: str = os.environ.get("AUTH_MODE", "google").strip().lower()
+AUTH_ALLOWED_EMAIL: str | None = os.environ.get("AUTH_ALLOWED_EMAIL", "").strip().lower() or None
+# Web-application OAuth client ID used for Google Sign-In (public, not a secret).
+AUTH_GOOGLE_CLIENT_ID: str | None = os.environ.get("AUTH_GOOGLE_CLIENT_ID", "").strip() or None
+# HMAC key for session cookies, CSRF tokens and login nonces. Rotating it signs everyone out.
+AUTH_SESSION_SECRET: str | None = os.environ.get("AUTH_SESSION_SECRET") or None
+AUTH_SESSION_SECRET_MIN_LENGTH = 32
+AUTH_SESSION_TTL_SECONDS: int = int(os.environ.get("AUTH_SESSION_TTL_SECONDS", "43200"))  # 12 h
+AUTH_SESSION_TTL_MIN_SECONDS = 300
+AUTH_SESSION_TTL_MAX_SECONDS = 7 * 24 * 3600
+AUTH_LOGIN_NONCE_TTL_SECONDS = 600
+GOOGLE_ID_TOKEN_CLOCK_SKEW_SECONDS = 10
+# Gmail re-auth `state` minted by /poller/reauth/start is only honoured this long.
+REAUTH_STATE_TTL_SECONDS = 600
+
+# Schema migrations at startup. Outside production an outdated database is backed up and
+# upgraded automatically unless DB_AUTO_MIGRATE=false. In production this flag is ignored:
+# an outdated schema puts the API in maintenance mode until an operator runs
+# scripts/migrate_database.py (see docs/database-operations.md).
+DB_AUTO_MIGRATE: bool = os.environ.get("DB_AUTO_MIGRATE", "true").lower() == "true"
+
+# Rate limits (in-process, per client address): sign-in attempts, and sensitive operations
+# (deletes, merges, bulk edits, imports, exports, poller and Gmail re-auth controls,
+# diagnostics).
+AUTH_RATE_LIMIT_ATTEMPTS = 10
+AUTH_RATE_LIMIT_WINDOW_SECONDS = 300
+SENSITIVE_RATE_LIMIT_REQUESTS = 30
+SENSITIVE_RATE_LIMIT_WINDOW_SECONDS = 60
 
 # LLM parser — Ollama (local) by default, Groq (free-tier hosted) in prod.
 # Set LLM_PROVIDER=groq + GROQ_API_KEY to use Groq instead of local Ollama.

@@ -31,3 +31,34 @@ def test_app_has_expected_metadata() -> None:
 def test_router_mounted_under_api_v1() -> None:
     paths = app.openapi()["paths"].keys()
     assert any(p.startswith("/api/v1") for p in paths)
+
+
+def test_access_log_filter_redacts_query_strings() -> None:
+    import logging
+
+    from backend.main import _RedactQueryStringFilter
+
+    record = logging.LogRecord(
+        "uvicorn.access",
+        logging.INFO,
+        __file__,
+        1,
+        '%s - "%s %s HTTP/%s" %d',
+        ("1.2.3.4:1", "GET", "/api/v1/poller/reauth/callback?code=secret&state=s", "1.1", 200),
+        None,
+    )
+    assert _RedactQueryStringFilter().filter(record) is True
+    message = record.getMessage()
+    assert "secret" not in message
+    assert "/api/v1/poller/reauth/callback?[redacted]" in message
+
+
+def test_access_log_filter_leaves_plain_paths_alone() -> None:
+    import logging
+
+    from backend.main import _RedactQueryStringFilter
+
+    args = ("1.2.3.4:1", "GET", "/api/v1/health", "1.1", 200)
+    record = logging.LogRecord("uvicorn.access", logging.INFO, __file__, 1, "%s", args, None)
+    _RedactQueryStringFilter().filter(record)
+    assert record.args == args
