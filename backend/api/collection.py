@@ -84,9 +84,11 @@ def require_collector(request: Request) -> Collector:
         raise _unauthorized()
     token_id, secret = parsed
     service = get_auth_service(request)
+    # Unauthenticated attempts are limited per client address, so guessing secrets for a
+    # (semi-public) token ID can never use up the real collector's own budget.
     service.enforce_rate_limit(
-        "collector",
-        token_id,
+        "collector-client",
+        client_address(request),
         app_config.COLLECTOR_RATE_LIMIT_REQUESTS,
         app_config.COLLECTOR_RATE_LIMIT_WINDOW_SECONDS,
     )
@@ -100,6 +102,12 @@ def require_collector(request: Request) -> Collector:
         log.warning("collector_auth_failed", token_id=token_id)
         raise _unauthorized()
     assert collector.id is not None
+    service.enforce_rate_limit(
+        "collector",
+        collector.token_id,
+        app_config.COLLECTOR_RATE_LIMIT_REQUESTS,
+        app_config.COLLECTOR_RATE_LIMIT_WINDOW_SECONDS,
+    )
     db.touch_collector(collector.id)
     return collector
 

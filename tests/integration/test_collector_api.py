@@ -452,3 +452,21 @@ def test_non_json_and_control_character_payloads(env) -> None:
     payload = env.db.list_run_observations(1)[0].payload
     assert "\x00" not in payload["company"] and "\x1b" not in payload["company"]
     assert "\u202e" not in payload["role"] and payload["role"] == "Engineer"
+
+
+def test_bogus_secrets_cannot_exhaust_a_real_collectors_budget(env, monkeypatch) -> None:
+    """Failed attempts are limited per client; the real collector keeps its own budget."""
+    from backend import config as app_config
+    from backend.api import collection as collection_api
+
+    collector = _collector(env)
+    monkeypatch.setattr(app_config, "COLLECTOR_RATE_LIMIT_REQUESTS", 3)
+    token_id = collector.credential.split(".")[0]
+    forged = _bearer(f"{token_id}.{'B' * 43}")
+    for _ in range(3):
+        env.collector.get(f"{_BASE}/collector/me", headers=forged)
+    # The attacker's address is now limited...
+    assert env.collector.get(f"{_BASE}/collector/me", headers=forged).status_code == 429
+    # ...but the genuine collector, from another address, is not.
+    monkeypatch.setattr(collection_api, "client_address", lambda _request: "10.9.9.9")
+    assert env.collector.get(f"{_BASE}/collector/me", headers=collector.headers).status_code == 200
