@@ -165,7 +165,9 @@ def test_fixtures_are_sanitized() -> None:
         text = path.read_text()
         assert text.startswith("<!-- SYNTHETIC FIXTURE"), path
         assert "@" not in text, path
-        assert not re.search(r"utkarsh|mankad|password|cookie|sessionid|li_at", text, re.I), path
+        assert not re.search(
+            r"password|cookie|sessionid|li_at|csrftoken|bearer|jtc_[0-9a-f]", text, re.I
+        ), path
         for host in re.findall(r"https://([^/\"?]+)", text):
             assert host.endswith(
                 (

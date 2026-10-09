@@ -419,3 +419,36 @@ def test_logs_never_contain_secrets(env) -> None:
     secret = credential.split(".")[1]
     assert secret not in text and setup["setup_code"] not in text
     assert "collector_enrolled" in text and "collector_auth_failed" in text
+
+
+def test_collector_requests_are_rate_limited(env, monkeypatch) -> None:
+    from backend import config as app_config
+
+    collector = _collector(env)
+    monkeypatch.setattr(app_config, "COLLECTOR_RATE_LIMIT_REQUESTS", 3)
+    statuses = [
+        env.collector.get(f"{_BASE}/collector/me", headers=collector.headers).status_code
+        for _ in range(5)
+    ]
+    assert statuses[:3] == [200, 200, 200] and statuses[3:] == [429, 429]
+
+
+def test_non_json_and_control_character_payloads(env) -> None:
+    collector = _collector(env)
+    run_key = _start(env, collector).json()["run_key"]
+    garbage = env.collector.post(
+        f"{_BASE}/collector/runs/{run_key}/observations",
+        content=b"\x00\xff not json at all <script>alert(1)</script>",
+        headers={**collector.headers, "Content-Type": "application/json"},
+    )
+    assert garbage.status_code == 422 and "<script>" not in garbage.text
+    sneaky = _submit(
+        env,
+        collector,
+        run_key,
+        _batch([_obs(company="Quuxwidget\x00 Labs\x1b[31m", role="Eng‮ineer")]),
+    )
+    assert sneaky.status_code == 200
+    payload = env.db.list_run_observations(1)[0].payload
+    assert "\x00" not in payload["company"] and "\x1b" not in payload["company"]
+    assert "\u202e" not in payload["role"] and payload["role"] == "Engineer"

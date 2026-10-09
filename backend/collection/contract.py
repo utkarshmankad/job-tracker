@@ -24,6 +24,7 @@ import enum
 import hashlib
 import json
 import re
+import unicodedata
 from datetime import UTC, date, datetime, timedelta
 from typing import Annotated, Any, Literal
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -111,8 +112,15 @@ def evidence_source(source_key: str) -> str:
 
 
 def redact_text(value: str) -> str:
-    """Remove control characters, email addresses and phone numbers; collapse whitespace."""
-    text = _CONTROL.sub(" ", value)
+    """Remove control and invisible format characters (incl. bidi overrides and zero-width
+    characters, which can make displayed text misleading), email addresses and phone
+    numbers; collapse whitespace."""
+    text = "".join(
+        " " if unicodedata.category(ch) == "Cc" else ch
+        for ch in value
+        if unicodedata.category(ch) != "Cf"
+    )
+    text = _CONTROL.sub(" ", text)
     text = _EMAIL.sub("[redacted]", text)
     text = _PHONE.sub("[redacted]", text)
     return " ".join(text.split())
