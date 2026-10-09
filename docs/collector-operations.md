@@ -1,7 +1,24 @@
 # Collector operations (local)
 
-How to set up, run, verify and schedule the read-only collector on your own Mac. The
-design is in [`phase-3-source-collection.md`](phase-3-source-collection.md).
+How to set up, run, verify and (optionally) schedule the read-only collector on your own
+Mac. The design is in [`phase-3-source-collection.md`](phase-3-source-collection.md).
+
+## Source readiness
+
+<!-- readiness-table: kept in sync with collector/adapters/sites.py and
+     backend/collection/readiness.py by tests/unit/test_source_readiness_consistency.py -->
+
+| Source | Readiness | Why |
+|---|---|---|
+| `indeed` | **live verified 2026-10-09** — the only source ready for controlled collection | stable `data-testid`/ARIA hooks; every row read and matched the site's own count in two identical runs |
+| `linkedin` | **unsupported** | the new Job Tracker layout lacks safe stable row boundaries |
+| `naukri` | **unsupported** | until item identity, applied dates and complete inner-scroll collection can be established |
+| `instahyre` | **unsupported** | no application-history page exists |
+| `careernet` | **unsupported** | the candidate history page has not been located |
+
+Unsupported sources cannot be added to a collector, and the CLI refuses to run them.
+Bringing a source back is the supervised process in §5. Scheduling (§6) is optional and
+disabled: nothing in this repository installs or enables it.
 
 ## 1. Install (once)
 
@@ -11,8 +28,9 @@ python3.11 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt -r requirements-collector.txt
 ```
 
-The collector drives your installed Google Chrome (`channel = "chrome"`). To use
-Playwright's bundled Chromium instead, set `channel = ""` and run
+The collector drives your installed Google Chrome (`channel = "chrome"`). For another
+Chromium-based browser (for example Brave), set `channel = ""` and `executable_path` to
+its binary. To use Playwright's bundled Chromium instead, set `channel = ""` and run
 `python -m playwright install chromium`.
 
 ## 2. Configure
@@ -40,11 +58,8 @@ enabled = false           # encrypted page snapshots for repairing an adapter; o
 ttl_hours = 24            # <= 72
 
 [[sources]]
-source_key = "linkedin"
+source_key = "indeed"     # the only live-verified source (see "Source readiness")
 account_label = "default"
-
-[[sources]]
-source_key = "naukri"
 ```
 
 Check it: `python scripts/collect.py validate-config`.
@@ -55,8 +70,9 @@ Check it: `python scripts/collect.py validate-config`.
    visible browser opens on the dedicated profile; sign in normally, completing any MFA
    or CAPTCHA, then press Enter. The collector never sees or stores those credentials.
 2. **Create a collector.** In Job Tracker go to **Sources → Set up a collector**, choose
-   its sources and click **Create setup command**. Copy the command. It is valid once,
-   for 10 minutes.
+   its sources (Indeed is preselected; unsupported sources are shown disabled with their
+   reason) and click **Create setup command**. Copy the command. It is valid once, for
+   10 minutes.
 3. **Enroll.** Run the command on this Mac:
    ```bash
    python scripts/collect.py enroll --api-url https://… --code …
@@ -83,27 +99,50 @@ Check it: `python scripts/collect.py validate-config`.
 
 ## 5. Verifying an adapter (required before automatic creation)
 
-No adapter is live-verified yet. Until one is, its observations are `unverified`: they
-link only on strong identifiers, and every new item goes to review. To verify one, with
-you watching:
+Indeed is live-verified (2026-10-09). Any other adapter — a reworked unsupported source
+or an employer definition — stays out of automatic creation until a person verifies it.
+Unverified observations are `unverified`: they link only on strong identifiers, and every
+new item goes to review. This process is the same for every source; `<key>` below is the
+source being verified. With you watching:
 
-1. **Check the session.** `check-session --source linkedin` must report `authenticated`.
-2. **Collect without sending.** Run `run --source linkedin --dry-run`, then open the
-   saved JSON. Compare each item with the site: company, role, date, status label and
-   item ID. Check the count against what the site shows, including all pages.
+0. **Make it runnable.** An unsupported adapter must first be reworked so it can be run
+   at all (`SUPPORTED = True` with selectors read from the live page), and the source
+   must be marked supported in `backend/collection/readiness.py` before a collector may
+   be scoped to it.
+1. **Check the session.** `check-session --source <key>` must report `authenticated`.
+2. **Collect without sending.** Run `run --source <key> --dry-run`, then open the saved
+   JSON. Compare each item with the site: company, role, date, status label and item ID.
+   Check the count against what the site shows, including all pages. Run it twice: the
+   identities and hashes must be identical.
 3. **If it drifted.** If the run ended `selector_drift` or `unexpected_page`, enable
    diagnostics, run again, and fix the selectors in `collector/adapters/sites.py` using
    the decrypted snapshot. Snapshots are decryptable only with the keychain key. Then
    run `clear-diagnostics`.
 4. **Refresh the fixtures.** Update `tests/fixtures/collector/<source>/` with a
    **sanitized, synthetic** page of the same structure. Never commit a real page.
-5. **Record it.** Set `LIVE_VERIFIED = "YYYY-MM-DD"` on the adapter, run the tests, and
-   commit.
-6. **Send for real.** Run without `--dry-run`, then check **Sources** in Job Tracker.
+5. **Record it.** Set `LIVE_VERIFIED = "YYYY-MM-DD"` on the adapter, the same date in
+   `backend/collection/readiness.py`, and update the readiness tables here and in
+   `phase-3-source-collection.md` §7. Run the tests (a consistency test fails if these
+   disagree) and commit.
+6. **Canary.** Submit one bounded batch from a reviewed dry run (`submit <file>`), repeat
+   it once to prove idempotency, and check **Sources** in Job Tracker. Only then run
+   without `--dry-run`.
 
-## 6. Scheduling on macOS (optional; not enabled automatically)
+## 6. Scheduling on macOS (optional; disabled)
 
-`launchd/com.jobtracker.collector.plist.template` runs `run-all` once a day at 10:30.
+Scheduling is optional and disabled. Nothing in this repository installs or loads it.
+`launchd/com.jobtracker.collector.plist.template` runs `run-all` once a day at 10:30 for
+the **enabled** sources in your config — keep only live-verified sources enabled.
+
+Before you enable a daily Indeed schedule, all of these must hold:
+- a manual `run --source indeed --dry-run` and a manual `run --source indeed` succeed in
+  the dedicated profile **after a full browser restart** (the sign-in must survive; see
+  `phase-3-source-collection.md` §7, "Session persistence");
+- the run ends `succeeded` with the item count matching the site's own "Applied" count;
+- **Sources** shows no review backlog you have not looked at, and no wrong link;
+- a repeated run reports every item `Already known`;
+- `diagnostics --local-only` shows no `signed_out`, `challenge` or `rate_limited` codes
+  over the manual runs.
 
 ```bash
 mkdir -p ~/Library/Logs/JobTrackerCollector

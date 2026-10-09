@@ -27,6 +27,7 @@ Local Mac app. Python 3.11. FastAPI backend on jobtracker.localhost:8000. React 
 - Collector credentials authenticate only `collector_router` endpoints; every other endpoint stays session-cookie + CSRF. New routes must be classified in tests/integration/test_auth.py.
 - Collected observations never auto-merge applications and never create applications unless extraction is `verified` (adapter `LIVE_VERIFIED` set by a person). See docs/phase-3-source-collection.md.
 - Collector fixtures are synthetic only — never commit a real page, cookie, profile or account identifier.
+- Source readiness lives in three places that must agree: `backend/collection/readiness.py` (server, authoritative for collector scopes), the adapter flags in `collector/adapters/sites.py`, and the readiness tables in docs/collector-operations.md and docs/phase-3-source-collection.md §7. tests/unit/test_source_readiness_consistency.py enforces it. Only Indeed is live-verified; scheduling stays optional and disabled.
 
 ## File layout
 - backend/config.py — all paths and constants

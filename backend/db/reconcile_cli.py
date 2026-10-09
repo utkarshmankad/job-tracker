@@ -694,8 +694,9 @@ def render_markdown(summary: dict[str, Any]) -> str:
         "",
         "## Analytics (migrated copy)",
         "",
-        f"- active applications: {a['total_active_applications']}; interviews "
-        f"{a['interview_count']}; offers {a['offer_count']}; stale {a['stale_count']}",
+        f"- active (unmerged) applications: {a['total_active_applications']}; currently at "
+        f"interview or later {a['current_interview_or_later']}; currently at offer or joined "
+        f"{a['current_offer_or_joined']}; stale {a['stale_count']}",
         "",
         "## Release gates",
         "",

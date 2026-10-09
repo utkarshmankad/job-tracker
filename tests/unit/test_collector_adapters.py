@@ -2,8 +2,11 @@
 
 These prove each adapter's behaviour against sanitized synthetic pages: full collection
 through its pagination style, stop states, selector drift, status mapping, ID extraction,
-URL redaction and contract validity. They do NOT prove the selectors match the live sites
-(every adapter is LIVE_VERIFIED=None, asserted below).
+URL redaction and contract validity. Fixtures cannot prove the selectors match a live
+site: that is the supervised live verification recorded in ``LIVE_VERIFIED``. Indeed is
+live-verified (2026-10-09); LinkedIn, Naukri, Instahyre and CareerNet are unsupported and
+refused by ``adapter_for`` (both asserted below). Their fixtures remain as the baseline
+for a future rework.
 """
 
 from __future__ import annotations

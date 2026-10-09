@@ -603,3 +603,29 @@ def test_dedup_rules() -> None:
         {"id": 15, "event_type": "Rejected", "occurred_at": "2026-04-03"},
     ]
     assert merge_snapshot.superseded_event_ids(events, {1}) == [10, 12, 15]
+
+
+def test_reopening_after_a_merge_does_not_reindex_merged_records(tmp_path: Path) -> None:
+    """A merge moves thread links to the survivor; the startup thread-index backfill must
+    not re-create links for the merged records from their retained thread_ids JSON (it
+    did, which left stale links behind and made an undo restore duplicates)."""
+    from sqlmodel import Session, select
+
+    from backend.db.models import ApplicationThreadId
+
+    path = tmp_path / "merge.db"
+    db = DataStore(path)
+    a, b, c = make_app(db, "a"), make_app(db, "b"), make_app(db, "c")
+    before = dump(db)
+    op, _ = merge(db, [a.id, b.id, c.id], survivor=a.id)
+
+    reopened = DataStore(path)  # the constructor runs the backfill
+    with Session(reopened._engine) as session:
+        links = session.exec(select(ApplicationThreadId)).all()
+    assert {link.application_id for link in links} == {a.id}
+    assert sorted(link.thread_id for link in links) == ["thread-a", "thread-b", "thread-c"]
+    assert reopened.find_application_by_thread_id("thread-b").id == a.id
+
+    reopened.undo_merge(op.id)
+    assert dump(reopened) == before
+    assert DataStore(path).find_application_by_thread_id("thread-b").id == b.id

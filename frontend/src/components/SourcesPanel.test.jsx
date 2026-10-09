@@ -11,6 +11,7 @@ vi.mock("../api/client", () => ({
     getCollectionMetrics: vi.fn(),
     listCollectors: vi.fn(),
     listCollectionReview: vi.fn(),
+    getCollectionSourceCatalog: vi.fn(),
     getCollectionRun: vi.fn(),
     createCollector: vi.fn(),
     rotateCollector: vi.fn(),
@@ -20,6 +21,24 @@ vi.mock("../api/client", () => ({
     dismissEvidence: vi.fn(),
   },
 }));
+
+const catalog = [
+  { key: "indeed", label: "Indeed", supported: true, live_verified: "2026-10-09", reason: null },
+  { key: "linkedin", label: "LinkedIn", supported: false, live_verified: null,
+    reason: "The new Job Tracker layout lacks safe stable row boundaries." },
+  { key: "naukri", label: "Naukri", supported: false, live_verified: null,
+    reason: "Unsupported until item identity, applied dates and complete inner-scroll collection can be established." },
+  { key: "instahyre", label: "Instahyre", supported: false, live_verified: null,
+    reason: "Instahyre has no application-history page." },
+  { key: "careernet", label: "CareerNet", supported: false, live_verified: null,
+    reason: "CareerNet's candidate history page has not been located." },
+];
+
+const collectorRow = (extra = {}) => ({
+  id: 1, name: "My laptop", token_hint: "jtc_ab12…", scopes: ["indeed"], unsupported_scopes: [], state: "active",
+  created_at: "2026-10-01T00:00:00Z", enrolled_at: "2026-10-01T00:00:00Z", last_used_at: "2026-10-09T08:00:00Z",
+  rotated_at: null, revoked_at: null, ...extra,
+});
 
 const source = (id, key, status, extra = {}) => ({
   id,
@@ -84,19 +103,16 @@ function mockData({ sources, runs, collectors, review } = {}) {
   );
   api.listCollectionRuns.mockResolvedValue(runs ?? [run(7, "succeeded"), run(8, "failed", { error_message: "The page layout changed; this adapter needs maintenance." })]);
   api.getCollectionMetrics.mockResolvedValue({
-    observation_totals: { observations: 12, created: 2, linked: 5, review: 1, unchanged: 4, errors: 0 },
+    unique: { source_items: 4, observations: 5 },
+    observations_by_decision: { created: 3, linked: 1, review: 1 },
+    processed_across_runs: { items_processed: 9, created: 3, linked: 1, review: 1, unchanged: 4, errors: 0 },
     runs_by_status: {},
     items_by_decision: {},
     items_by_source: {},
   });
-  api.listCollectors.mockResolvedValue(
-    collectors ?? [
-      { id: 1, name: "My laptop", token_hint: "jtc_ab12…", scopes: ["linkedin", "naukri"], state: "active",
-        created_at: "2026-10-01T00:00:00Z", enrolled_at: "2026-10-01T00:00:00Z", last_used_at: "2026-10-09T08:00:00Z",
-        rotated_at: null, revoked_at: null },
-    ],
-  );
+  api.listCollectors.mockResolvedValue(collectors ?? [collectorRow()]);
   api.listCollectionReview.mockResolvedValue(review ?? [reviewItem]);
+  api.getCollectionSourceCatalog.mockResolvedValue(catalog);
 }
 
 async function renderPanel() {
@@ -121,12 +137,23 @@ describe("SourcesPanel", () => {
     expect(alert).toHaveTextContent("Naukri (default): The browser is not signed in to this site.");
   });
 
-  it("shows totals that distinguish imported, linked, review and failed", async () => {
+  it("separates unique stored records from totals added up across runs", async () => {
     await renderPanel();
     const totals = screen.getByRole("region", { name: "Totals" });
-    for (const label of ["Observed", "Imported (new)", "Linked", "Needs review", "Already known", "Failed items"]) {
-      expect(within(totals).getByText(label)).toBeInTheDocument();
-    }
+    const value = (group, label) => within(group).getByText(label).closest("div").querySelector("dd").textContent;
+    const unique = totals.querySelector('dl[aria-labelledby="totals-unique"]');
+    const runs = totals.querySelector('dl[aria-labelledby="totals-processed"]');
+    expect(value(unique, "Unique source items")).toBe("4");
+    expect(value(unique, "Unique observations")).toBe("5");
+    expect(value(unique, "Imported (new)")).toBe("3");
+    expect(value(unique, "Linked")).toBe("1");
+    expect(value(unique, "Needs review")).toBe("1");
+    expect(value(runs, "Items processed across runs")).toBe("9");
+    expect(value(runs, "Already known")).toBe("4");
+    expect(value(runs, "Failed items")).toBe("0");
+    // A run-level sum is never labelled as a unique count.
+    expect(within(totals).queryByText("Observed")).not.toBeInTheDocument();
+    expect(within(unique).queryByText("Items processed across runs")).not.toBeInTheDocument();
   });
 
   it("inspects a run in place", async () => {
@@ -163,8 +190,6 @@ describe("SourcesPanel", () => {
     const form = screen.getByRole("form", { name: "Set up a collector" });
     await user.clear(within(form).getByLabelText("Collector name"));
     await user.type(within(form).getByLabelText("Collector name"), "Desk");
-    await user.click(within(form).getByLabelText("LinkedIn"));
-    await user.click(within(form).getByLabelText("Indeed"));
     await user.click(within(form).getByRole("button", { name: "Create setup command" }));
     expect(api.createCollector).toHaveBeenCalledWith("Desk", ["indeed"]);
     const panel = await screen.findByRole("status");
@@ -178,10 +203,51 @@ describe("SourcesPanel", () => {
     await renderPanel();
     await user.click(screen.getByRole("button", { name: "Set up a collector" }));
     const form = screen.getByRole("form", { name: "Set up a collector" });
-    await user.click(within(form).getByLabelText("LinkedIn"));
+    await user.click(within(form).getByRole("checkbox", { name: /^Indeed/ }));
     await user.click(within(form).getByRole("button", { name: "Create setup command" }));
     expect(within(form).getByRole("alert")).toHaveTextContent("Choose at least one source.");
     expect(api.createCollector).not.toHaveBeenCalled();
+  });
+
+  it("defaults a new collector to Indeed only and disables unsupported sources with a reason", async () => {
+    const user = userEvent.setup();
+    await renderPanel();
+    await user.click(screen.getByRole("button", { name: "Set up a collector" }));
+    const form = screen.getByRole("form", { name: "Set up a collector" });
+    const indeed = within(form).getByRole("checkbox", { name: /^Indeed/ });
+    expect(indeed).toBeChecked();
+    expect(indeed).toBeEnabled();
+    expect(within(form).getByText("Live verified")).toBeInTheDocument();
+    for (const entry of catalog.filter((c) => !c.supported)) {
+      const box = within(form).getByRole("checkbox", { name: new RegExp(`^${entry.label}`) });
+      expect(box).toBeDisabled();
+      expect(box).not.toBeChecked();
+      expect(box).toHaveAccessibleDescription(entry.reason);
+    }
+    expect(within(form).getAllByText("Unsupported")).toHaveLength(4);
+    // A disabled source cannot be added, even by clicking it.
+    await user.click(within(form).getByRole("checkbox", { name: /^LinkedIn/ }));
+    await user.click(within(form).getByRole("button", { name: "Create setup command" }));
+    expect(api.createCollector).toHaveBeenCalledWith("My laptop", ["indeed"]);
+  });
+
+  it("keeps showing a collector with a now-unsupported scope, without offering rotation", async () => {
+    mockData({
+      collectors: [collectorRow({ scopes: ["indeed", "linkedin"], unsupported_scopes: ["linkedin"] })],
+    });
+    await renderPanel();
+    const collectors = screen.getByRole("region", { name: "Collectors" });
+    expect(within(collectors).getByText(/sources: Indeed, LinkedIn \(unsupported\)/)).toBeInTheDocument();
+    expect(within(collectors).getByText(/no longer supported/)).toBeInTheDocument();
+    expect(within(collectors).queryByRole("button", { name: /Rotate/ })).not.toBeInTheDocument();
+    expect(within(collectors).getByRole("button", { name: "Revoke" })).toBeInTheDocument();
+  });
+
+  it("offers rotation for a collector with only supported sources", async () => {
+    await renderPanel();
+    const collectors = screen.getByRole("region", { name: "Collectors" });
+    expect(within(collectors).getByText(/sources: Indeed ·/)).toBeInTheDocument();
+    expect(within(collectors).getByRole("button", { name: /Rotate/ })).toBeInTheDocument();
   });
 
   it("asks before rotating or revoking", async () => {

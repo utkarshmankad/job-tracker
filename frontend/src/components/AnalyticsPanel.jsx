@@ -48,10 +48,15 @@ function PeriodPicker({ value, onChange }) {
   );
 }
 
+// Display names only. "Active" in the flow data means an open pipeline (not closed,
+// offered or stale), which is not the same as an active (unmerged) application record.
+const OUTCOME_LABEL = { Active: "Open pipeline" };
+
 function StageFunnel({ nodes }) {
   const byId = Object.fromEntries(nodes.map((node) => [node.id, node.count]));
   const stages = [
-    { label: "Applied", value: byId.Applied ?? 0, color: "bg-indigo-500" },
+    // Every application reached "applied", whatever its current status.
+    { label: "Applied (all)", value: byId.Applied ?? 0, color: "bg-indigo-500" },
     { label: "Shortlisted", value: byId.Shortlisted ?? 0, color: "bg-amber-500" },
     { label: "Interview", value: byId.Interview ?? 0, color: "bg-violet-500" },
     { label: "Offer / Joined", value: byId["Offer / Joined"] ?? 0, color: "bg-green-500" },
@@ -107,7 +112,7 @@ function OutcomesDonut({ outcomes }) {
         {outcomes.map((o) => (
           <div key={o.name} className="flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-400">
             <span className="inline-block w-2.5 h-2.5 rounded-full" style={{ background: o.color }} />
-            {o.name} ({o.value})
+            {OUTCOME_LABEL[o.name] ?? o.name} ({o.value})
           </div>
         ))}
       </div>
@@ -385,8 +390,8 @@ export default function AnalyticsPanel() {
       {/* Lifetime KPI row */}
       <h2 className="text-base font-semibold text-gray-800 dark:text-gray-200">All-time context</h2>
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
-        <KpiCard label="Total Applications" value={kpis.total} />
-        <KpiCard label="Active" value={kpis.active} sub="in progress" />
+        <KpiCard label="Total Applications" value={kpis.total} sub="merged duplicates excluded" />
+        <KpiCard label="Open pipeline" value={kpis.active} sub="not closed, offered or stale" />
         <KpiCard label="Stale" value={kpis.stale ?? 0} sub="no update in 14d" accent="text-yellow-500 dark:text-yellow-400" />
         <KpiCard label="Withdrawn" value={kpis.withdrawn ?? 0} sub="self-withdrew" accent="text-orange-500 dark:text-orange-400" />
         <KpiCard label="Interview Rate" value={formatPercent(kpis.interview_rate)} sub="of all applications" />

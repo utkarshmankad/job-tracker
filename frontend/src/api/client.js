@@ -115,6 +115,7 @@ export const api = {
     request("/collectors", { method: "POST", body: JSON.stringify({ name, scopes }) }),
   rotateCollector: (id) => request(`/collectors/${id}/rotate`, { method: "POST" }),
   revokeCollector: (id) => request(`/collectors/${id}/revoke`, { method: "POST" }),
+  getCollectionSourceCatalog: () => request("/collection/source-catalog"),
   listCollectionSources: () => request("/collection/sources"),
   listCollectionRuns: (params = {}) => request(`/collection/runs?${new URLSearchParams(params)}`),
   getCollectionRun: (id) => request(`/collection/runs/${id}`),

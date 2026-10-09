@@ -275,10 +275,14 @@ def test_metrics_are_aggregate_only(store: DataStore) -> None:
     store.increment_run_counters(run.id, observations_received=3, created_count=1)
     metrics = store.collection_metrics()
     assert metrics["runs_by_status"] == {"running": 1}
-    assert metrics["observation_totals"]["observations"] == 3
+    # Run counters are processing totals, never presented as unique stored rows.
+    assert metrics["processed_across_runs"]["items_processed"] == 3
+    assert metrics["unique"] == {"source_items": 0, "observations": 0}
     assert set(metrics) == {
         "runs_by_status",
-        "observation_totals",
+        "unique",
+        "observations_by_decision",
+        "processed_across_runs",
         "items_by_decision",
         "items_by_source",
     }

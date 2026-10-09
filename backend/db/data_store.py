@@ -283,15 +283,29 @@ class DataStore(CollectionStoreMixin):
         with corrupted current_status data (enum NAMES instead of values, the exact case
         backend.diagnostics's enum check exists to catch) can't make DataStore's own
         constructor crash via the ORM's enum coercion on load.
+
+        Only active applications are indexed. A merge moves its sources' thread links to
+        the survivor (find_application_by_thread_id follows merged records to it) while
+        their thread_ids JSON is kept for undo, so re-indexing merged records would put
+        stale links back. Applications without threads are not expected to have rows.
         """
+        has_threads = col(Application.thread_ids).is_not(None) & (
+            col(Application.thread_ids) != "[]"
+        )
         with Session(self._engine) as session:
-            app_count = session.exec(select(func.count()).select_from(Application)).one()
+            app_count = session.exec(
+                select(func.count()).select_from(Application).where(_active_app(), has_threads)
+            ).one()
             indexed_app_count = session.exec(
                 select(func.count(col(ApplicationThreadId.application_id).distinct()))
+                .join(Application, col(Application.id) == ApplicationThreadId.application_id)
+                .where(_active_app())
             ).one()
             if indexed_app_count >= app_count:
                 return
-            rows = session.exec(select(Application.id, Application.thread_ids)).all()
+            rows = session.exec(
+                select(Application.id, Application.thread_ids).where(_active_app(), has_threads)
+            ).all()
             for app_id, thread_ids_json in rows:
                 self._sync_thread_ids(session, app_id, thread_ids_json)
 

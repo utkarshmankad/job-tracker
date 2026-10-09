@@ -6,14 +6,15 @@ import {
 import { api } from "../api/client";
 import { formatDate } from "../utils/formatters";
 
-const SOURCES = [
-  { key: "linkedin", label: "LinkedIn" },
-  { key: "naukri", label: "Naukri" },
-  { key: "indeed", label: "Indeed" },
-  { key: "instahyre", label: "Instahyre" },
-  { key: "careernet", label: "CareerNet" },
-];
-const SOURCE_LABEL = Object.fromEntries(SOURCES.map((s) => [s.key, s.label]));
+// Display names for sources the server may mention before its catalog has loaded. Which
+// sources can be collected comes only from the server (/collection/source-catalog).
+const SOURCE_LABEL = {
+  linkedin: "LinkedIn",
+  naukri: "Naukri",
+  indeed: "Indeed",
+  instahyre: "Instahyre",
+  careernet: "CareerNet",
+};
 
 // Every state has an icon AND words — never colour alone.
 const RUN_STATE = {
@@ -175,6 +176,7 @@ function ReviewItem({ item, onDone }) {
 }
 
 function CollectorRow({ collector, onChanged, onSetup }) {
+  const unsupported = collector.unsupported_scopes ?? [];
   const [confirm, setConfirm] = useState(null); // "rotate" | "revoke" | null
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
@@ -193,6 +195,7 @@ function CollectorRow({ collector, onChanged, onSetup }) {
     }
   };
   const revoked = collector.state === "revoked";
+  const canRotate = unsupported.length === 0;
   return (
     <li className="flex flex-wrap items-start justify-between gap-2 py-3">
       <div className="min-w-0 text-sm">
@@ -201,9 +204,17 @@ function CollectorRow({ collector, onChanged, onSetup }) {
         </p>
         <p className="text-xs text-gray-500">
           {COLLECTOR_STATE[collector.state] ?? collector.state} · sources:{" "}
-          {collector.scopes.map((s) => SOURCE_LABEL[s] ?? s).join(", ")}
+          {collector.scopes
+            .map((s) => `${SOURCE_LABEL[s] ?? s}${unsupported.includes(s) ? " (unsupported)" : ""}`)
+            .join(", ")}
           {collector.last_used_at && ` · last used ${formatDate(collector.last_used_at)}`}
         </p>
+        {!revoked && unsupported.length > 0 && (
+          <p className="text-xs text-amber-700 dark:text-amber-300">
+            Includes sources that are no longer supported. It cannot be rotated or collect them; revoke it and
+            set up a new collector.
+          </p>
+        )}
       </div>
       {!revoked && (
         <div className="flex flex-wrap items-center gap-2">
@@ -223,9 +234,11 @@ function CollectorRow({ collector, onChanged, onSetup }) {
             </>
           ) : (
             <>
-              <button type="button" className={button} onClick={() => setConfirm("rotate")}>
-                <KeyRound size={14} aria-hidden="true" /> Rotate
-              </button>
+              {canRotate && (
+                <button type="button" className={button} onClick={() => setConfirm("rotate")}>
+                  <KeyRound size={14} aria-hidden="true" /> Rotate
+                </button>
+              )}
               <button type="button" className={button} onClick={() => setConfirm("revoke")}>
                 Revoke
               </button>
@@ -271,13 +284,46 @@ function SetupPanel({ setup, onClose }) {
   );
 }
 
-function NewCollectorForm({ onCreated }) {
+function SourceChoice({ source, checked, onToggle }) {
+  const reasonId = `source-reason-${source.key}`;
+  return (
+    <div className="min-w-0">
+      <label
+        className={`inline-flex items-center gap-1.5 text-sm ${source.supported ? "" : "text-gray-400 dark:text-gray-500"}`}
+      >
+        <input
+          type="checkbox"
+          checked={checked}
+          disabled={!source.supported}
+          aria-describedby={source.supported ? undefined : reasonId}
+          onChange={() => onToggle(source.key)}
+        />
+        {source.label}
+        <span
+          className={`rounded px-1.5 py-0.5 text-xs font-medium ${TONES[source.supported ? "green" : "gray"]}`}
+        >
+          {source.supported ? "Live verified" : "Unsupported"}
+        </span>
+      </label>
+      {!source.supported && source.reason && (
+        <p id={reasonId} className="ml-5 text-xs text-gray-500 dark:text-gray-400">
+          {source.reason}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function NewCollectorForm({ catalog, onCreated }) {
+  const supported = catalog.filter((s) => s.supported).map((s) => s.key);
   const [name, setName] = useState("My laptop");
-  const [scopes, setScopes] = useState(["linkedin"]);
+  const [scopes, setScopes] = useState(supported.includes("indeed") ? ["indeed"] : []);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
-  const toggle = (key) =>
+  const toggle = (key) => {
+    if (!supported.includes(key)) return;
     setScopes((current) => (current.includes(key) ? current.filter((s) => s !== key) : [...current, key]));
+  };
   const submit = async (event) => {
     event.preventDefault();
     if (scopes.length === 0) {
@@ -310,12 +356,9 @@ function NewCollectorForm({ onCreated }) {
       </div>
       <fieldset>
         <legend className="text-xs text-gray-600 dark:text-gray-400">Sources it may collect</legend>
-        <div className="mt-1 flex flex-wrap gap-3">
-          {SOURCES.map((s) => (
-            <label key={s.key} className="inline-flex items-center gap-1.5 text-sm">
-              <input type="checkbox" checked={scopes.includes(s.key)} onChange={() => toggle(s.key)} />
-              {s.label}
-            </label>
+        <div className="mt-1 flex flex-col gap-2">
+          {catalog.map((s) => (
+            <SourceChoice key={s.key} source={s} checked={scopes.includes(s.key)} onToggle={toggle} />
           ))}
         </div>
       </fieldset>
@@ -348,9 +391,10 @@ export default function SourcesPanel() {
       api.getCollectionMetrics(),
       api.listCollectors(),
       api.listCollectionReview(),
+      api.getCollectionSourceCatalog(),
     ])
-      .then(([sources, runs, metrics, collectors, review]) =>
-        setData({ sources, runs, metrics, collectors, review }),
+      .then(([sources, runs, metrics, collectors, review, catalog]) =>
+        setData({ sources, runs, metrics, collectors, review, catalog }),
       )
       .catch(() => setError("Collection status could not be loaded."))
       .finally(() => setLoading(false));
@@ -362,7 +406,9 @@ export default function SourcesPanel() {
     load();
   }, [load]);
 
-  const totals = data?.metrics?.observation_totals ?? {};
+  const unique = data?.metrics?.unique ?? {};
+  const decided = data?.metrics?.observations_by_decision ?? {};
+  const processed = data?.metrics?.processed_across_runs ?? {};
   const attention = data?.sources.filter((s) => s.needs_attention) ?? [];
 
   return (
@@ -401,14 +447,27 @@ export default function SourcesPanel() {
           )}
 
           <section aria-labelledby="collection-totals" className={card}>
-            <h3 id="collection-totals" className="mb-3 font-semibold text-gray-900 dark:text-gray-100">Totals</h3>
-            <dl className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
-              <Metric label="Observed" value={totals.observations} />
-              <Metric label="Imported (new)" value={totals.created} />
-              <Metric label="Linked" value={totals.linked} />
+            <h3 id="collection-totals" className="font-semibold text-gray-900 dark:text-gray-100">Totals</h3>
+            <h4 id="totals-unique" className="mt-3 text-sm font-medium text-gray-700 dark:text-gray-300">Unique records</h4>
+            <p className="mb-2 text-xs text-gray-500">
+              Each stored record counted once. Imported, linked and needs review count stored observations by
+              what the tracker decided.
+            </p>
+            <dl aria-labelledby="totals-unique" className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
+              <Metric label="Unique source items" value={unique.source_items} />
+              <Metric label="Unique observations" value={unique.observations} />
+              <Metric label="Imported (new)" value={decided.created} />
+              <Metric label="Linked" value={decided.linked} />
               <Metric label="Needs review" value={data.review.length} />
-              <Metric label="Already known" value={totals.unchanged} />
-              <Metric label="Failed items" value={totals.errors} />
+            </dl>
+            <h4 id="totals-processed" className="mt-4 text-sm font-medium text-gray-700 dark:text-gray-300">Across all runs</h4>
+            <p className="mb-2 text-xs text-gray-500">
+              Added up over every run, so re-running a source raises these even when nothing new is stored.
+            </p>
+            <dl aria-labelledby="totals-processed" className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+              <Metric label="Items processed across runs" value={processed.items_processed} />
+              <Metric label="Already known" value={processed.unchanged} />
+              <Metric label="Failed items" value={processed.errors} />
             </dl>
           </section>
 
@@ -512,6 +571,7 @@ export default function SourcesPanel() {
             {!setup &&
               (showForm ? (
                 <NewCollectorForm
+                  catalog={data.catalog}
                   onCreated={(created) => {
                     setSetup(created);
                     setShowForm(false);
