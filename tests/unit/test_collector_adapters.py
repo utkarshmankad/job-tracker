@@ -167,13 +167,11 @@ def test_live_validation_status_is_honest() -> None:
     """Real-session validation (2026-10-09): Indeed rewritten from the live page; Naukri
     unverified (signed out); LinkedIn, Instahyre and CareerNet cannot be collected safely
     and must refuse rather than scrape."""
-    for cls in (LinkedInAdapter, InstahyreAdapter, CareerNetAdapter):
+    for cls in (LinkedInAdapter, NaukriAdapter, InstahyreAdapter, CareerNetAdapter):
         assert cls.SUPPORTED is False and cls.UNSUPPORTED_REASON
         assert cls.LIVE_VERIFIED is None
         with pytest.raises(UnsupportedSource, match=cls.SOURCE_KEY):
             adapter_for(cls.SOURCE_KEY)
-    assert NaukriAdapter.SUPPORTED and NaukriAdapter.LIVE_VERIFIED is None
-    assert NaukriAdapter().extraction_label("primary") == "unverified"
     assert IndeedAdapter.SUPPORTED and IndeedAdapter.LIVE_VERIFIED == "2026-10-09"
     assert IndeedAdapter().extraction_label("primary") == "verified"
     assert set(ADAPTERS) == {"linkedin", "naukri", "indeed", "instahyre", "careernet"}
@@ -200,10 +198,14 @@ def test_indeed_zero_count_is_the_verified_empty_state() -> None:
     assert outcome.status == "succeeded" and outcome.observations == []
 
 
-def test_naukri_registration_page_means_signed_out() -> None:
+def test_naukri_unknown_route_page_is_not_mistaken_for_sign_out() -> None:
+    """Regression (real session): Naukri answers an unknown route with a registration page
+    that has a login link even when signed in; that must be unexpected_page, never a
+    misleading "signed out"."""
     adapter = NaukriAdapter()
     driver = FixtureDriver({adapter.HISTORY_URL: _html("naukri", "register_page")})
-    assert _run(adapter, driver).status == "signed_out"
+    outcome = _run(adapter, driver)
+    assert (outcome.status, outcome.error_code) == ("failed", "unexpected_page")
 
 
 def test_fixtures_are_sanitized() -> None:

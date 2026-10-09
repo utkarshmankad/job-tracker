@@ -9,8 +9,12 @@ REAL-SESSION VALIDATION (2026-10-09, read-only, user's own signed-in browser):
   with generated class names, no row markers and job links outside their rows. No stable
   selectors exist yet → ``SUPPORTED = False`` (the old page now redirects; the adapter
   would have stopped with ``unexpected_page``, never a false empty result).
-- naukri: the profile was signed out; the signed-out page (a registration form with a
-  login link) is now recognised as ``signed_out``. Row selectors remain unverified.
+- naukri: the real history page is ``/myapply/historypage`` (the old guess showed a
+  registration page for an unknown route — not a sign-out). Its cards carry title,
+  company and a status chip, but no job link or item ID, no applied date (the chip's time
+  is the last status change), only ~7 of the site's total are rendered (the rest load by
+  scrolling an inner panel), and "applies on external site" entries are not proof of
+  submission → ``SUPPORTED = False`` until an adapter handles identity and dates safely.
 - instahyre: there is no application-history page; "Activity" lists recruiters who
   viewed the résumé (with their names) — not proof of an application, and personal data
   the collector must not take → ``SUPPORTED = False``.
@@ -95,8 +99,12 @@ class NaukriAdapter(Adapter):
     """Naukri "Applies" history."""
 
     SOURCE_KEY = "naukri"
-    VERSION = "0.1.0"
-    HISTORY_URL = "https://www.naukri.com/mnjuser/applies"
+    VERSION = "0.2.0"
+    HISTORY_URL = "https://www.naukri.com/myapply/historypage"
+    SUPPORTED = False
+    UNSUPPORTED_REASON = (
+        "Naukri's history cards have no item IDs or applied dates; needs adapter rework"
+    )
     ALLOWED_HOSTS = ("naukri.com",)
     PAGINATION = "load_more"
     LOAD_MORE_SELECTOR = "button.apply-history-load-more"
@@ -123,9 +131,10 @@ class NaukriAdapter(Adapter):
         ),
     )
     MARKERS = StateMarkers(
-        # Signed out, the history URL shows a registration page with a "Login" link.
-        signed_out=("form#loginForm", "#usernameField", "a[href*='/nlogin/login']"),
-        signed_out_urls=("/nlogin/login", "/login", "/registration"),
+        # Not a login *link*: Naukri shows a registration page with one for unknown routes,
+        # which must surface as unexpected_page, not as "signed out".
+        signed_out=("form#loginForm", "#usernameField"),
+        signed_out_urls=("/nlogin/login", "/login"),
         empty=(".apply-history-empty",),
         list_container=(".apply-history-list", "section.jobTupleList"),
     )

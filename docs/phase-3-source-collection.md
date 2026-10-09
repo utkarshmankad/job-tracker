@@ -171,39 +171,47 @@ For each new observation, after claiming its evidence:
 Never: automatic merges, overwriting a person's decision, or silently overwriting an
 application's fields.
 
-## 7. Adapters and selector status
+## 7. Adapters and real-session readiness
 
-| Source | Pagination | Item ID | Live-verified |
-|---|---|---|---|
-| `linkedin` (My Jobs → Applied) | Next | `/jobs/view/<id>` | **No** — fixture-tested only |
-| `naukri` (Applies) | Load more | `data-job-id` | **No** |
-| `indeed` (My jobs → Applied) | Show more | `jk` | **No** |
-| `instahyre` (applications) | scroll | `data-application-id` | **No** |
-| `careernet` (applications) | Next | `data-application-ref` | **No** |
-| `employer-<slug>` | per definition | per definition | only if the user sets `verified_on` |
+Validated read-only on 2026-10-09 in the user's own signed-in browser. Only the
+application-history area was visited, and nothing was clicked except a read-only filter.
 
-**History URLs and selectors** are a structural best reading of each site and have not
-been checked against the live pages:
-- Each adapter has `LIVE_VERIFIED = None`.
-- Observations from primary selectors are labelled `extraction="unverified"`; fallback
-  selector sets are labelled `fallback`.
-- There is no free-form heuristic scraping (`heuristic` is reserved and never
-  auto-applied).
+| Source | Readiness | Evidence |
+|---|---|---|
+| `indeed` (My jobs → Applied) | **ready for controlled production collection** (`LIVE_VERIFIED`) | selectors rewritten from the live page (stable `data-testid` and ARIA hooks); 4/4 rows read, matching the site's own "4 Applied"; two runs gave identical identities and hashes; stable `jk` IDs; dates parsed |
+| `linkedin` | **needs selector update** → unsupported | history moved to a new Job tracker (`/jobs-tracker/?stage=applied`) with generated class names, no row markers and job links outside rows |
+| `naukri` | **needs adapter rework** → unsupported | real page is `/myapply/historypage`; cards have no item ID or applied date, ~7 of N render (inner scroll), "external site" applies aren't proof of submission |
+| `instahyre` | **unsupported** | no application-history page; "Activity" lists recruiters who viewed the résumé (with their names) |
+| `careernet` | **unsupported** | candidate platform is a separate site (mycareernet); history page not located; signed out there |
+| `employer-<slug>` | only with an explicit definition | — |
 
-**Stop conditions:**
-- A page showing the list container that no selector set can read stops with
+**What the validation proved.** Every wrong guess failed safe: `unexpected_page`, never a
+false empty success. It also found and fixed:
+- the driver's dependence on "network idle";
+- tab loss during sign-in;
+- reading client-rendered lists too early;
+- a Naukri unknown-route page that would have been misreported as signed out;
+- dates shown without a year.
+
+An adapter can declare the site's own count (Indeed's "<n> Applied"). Reading fewer
+unique items than that ends a run `partial` (`incomplete_history`).
+
+**Session persistence (operational limit).** A dedicated Playwright-driven profile did
+not keep Indeed or Naukri sign-ins across browser restarts (likely session-only cookies).
+Scheduled runs may therefore report `signed_out` until you sign in again with
+`open-profile`. The collector reports this and never works around it.
+
+**Selector discipline:**
+- An adapter's primary selectors yield `extraction="verified"` only when `LIVE_VERIFIED`
+  records a real-session check; otherwise `unverified`, which never auto-creates.
+- Fallback sets are labelled `fallback`.
+- A list the selectors cannot read, or a missing pagination control, stops with
   `selector_drift`.
-- So does a missing pagination control.
-- Signed-out, challenge (CAPTCHA, verification, "unusual activity"), consent and
-  rate-limit pages stop the run, as do redirects to other hosts and unknown pages.
-- Partial data is reported as `partial`, never as an empty success.
+- Signed-out, challenge, consent and rate-limit pages, unknown pages and redirects to
+  other hosts all stop the run.
 
-**Employer portals** are collected only with an explicit `[sources.employer]` definition:
-an https history URL on declared hosts, the container, row and field selectors, and a
-status map. Unknown portals are `unsupported`.
-
-**Fixtures** (`tests/fixtures/collector/`) are hand-authored and synthetic, and checked by
-a hygiene test.
+**Employer portals** need an explicit `[sources.employer]` definition. **Fixtures**
+(`tests/fixtures/collector/`) are synthetic; Indeed's mirror the live structure.
 
 ## 8. Privacy, secrets and retention
 
