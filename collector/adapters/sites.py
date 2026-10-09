@@ -22,20 +22,19 @@ REAL-SESSION VALIDATION (2026-10-09, read-only, user's own signed-in browser):
   history URL does not exist and the profile was signed out there → ``SUPPORTED = False``
   until its history page is located.
 
-STATUS OF ADAPTERS NOT LISTED AS VERIFIED ABOVE: fixture-tested only. The history URLs and selectors
-are a best structural reading of each site and have NOT been confirmed against the live
-sites (``LIVE_VERIFIED = None``). Consequences, by design:
+READINESS: Indeed is the only source ready for controlled collection. The unsupported
+adapters keep their best structural reading of each site only as a starting point for
+rework; ``adapter_for`` refuses them. ``SUPPORTED``, ``UNSUPPORTED_REASON`` and
+``LIVE_VERIFIED`` here must agree with backend/collection/readiness.py and the docs'
+readiness tables (tests/unit/test_source_readiness_consistency.py). Any adapter without
+``LIVE_VERIFIED`` (for example an employer definition) yields ``extraction="unverified"``,
+which never creates an application automatically — it links only on strong identifiers
+or goes to review (docs/phase-3-source-collection.md §5). When a live page does not
+match, an adapter stops with ``selector_drift`` or ``unexpected_page`` — it never reports
+an empty success.
 
-- observations are marked ``extraction="unverified"``, and the tracker never creates an
-  application from them automatically — they link only on strong identifiers or go to
-  review (docs/phase-3-source-collection.md §5);
-- when a live page does not match, the adapter stops with ``selector_drift`` or
-  ``unexpected_page`` and (if enabled) saves an encrypted snapshot for repair — it never
-  reports an empty success.
-
-To verify an adapter: run ``scripts/collect.py run --source <key> --dry-run`` against your
-signed-in profile, compare the saved dry-run file with the site, fix selectors, refresh the
-sanitized fixtures and set ``LIVE_VERIFIED`` to the date (docs/collector-operations.md).
+Verifying or reworking an adapter is the generic supervised process in
+docs/collector-operations.md §5.
 """
 
 from __future__ import annotations
@@ -52,9 +51,7 @@ class LinkedInAdapter(Adapter):
     VERSION = "0.2.0"
     HISTORY_URL = "https://www.linkedin.com/jobs-tracker/?stage=applied"
     SUPPORTED = False
-    UNSUPPORTED_REASON = (
-        "LinkedIn's new Job tracker has no stable row selectors yet (generated class names)"
-    )
+    UNSUPPORTED_REASON = "The new Job Tracker layout lacks safe stable row boundaries."
     ALLOWED_HOSTS = ("linkedin.com",)
     PAGINATION = "next"
     NEXT_SELECTOR = "button.artdeco-pagination__button--next"
@@ -103,7 +100,8 @@ class NaukriAdapter(Adapter):
     HISTORY_URL = "https://www.naukri.com/myapply/historypage"
     SUPPORTED = False
     UNSUPPORTED_REASON = (
-        "Naukri's history cards have no item IDs or applied dates; needs adapter rework"
+        "Unsupported until item identity, applied dates and complete inner-scroll "
+        "collection can be established."
     )
     ALLOWED_HOSTS = ("naukri.com",)
     PAGINATION = "load_more"
@@ -206,9 +204,7 @@ class InstahyreAdapter(Adapter):
     SOURCE_KEY = "instahyre"
     VERSION = "0.2.0"
     SUPPORTED = False
-    UNSUPPORTED_REASON = (
-        "Instahyre has no application-history page (its activity feed lists recruiter views)"
-    )
+    UNSUPPORTED_REASON = "Instahyre has no application-history page."
     HISTORY_URL = "https://www.instahyre.com/candidate/applications/"
     ALLOWED_HOSTS = ("instahyre.com",)
     PAGINATION = "scroll"
@@ -250,7 +246,7 @@ class CareerNetAdapter(Adapter):
     SOURCE_KEY = "careernet"
     VERSION = "0.2.0"
     SUPPORTED = False
-    UNSUPPORTED_REASON = "CareerNet's candidate history page has not been located (mycareernet)"
+    UNSUPPORTED_REASON = "CareerNet's candidate history page has not been located."
     HISTORY_URL = "https://www.careernet.in/candidate/applications"
     ALLOWED_HOSTS = ("careernet.in",)
     PAGINATION = "next"

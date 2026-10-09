@@ -21,7 +21,7 @@ Example::
     max_delay_seconds = 9
 
     [[sources]]
-    source_key = "linkedin"
+    source_key = "indeed"  # the only live-verified source (docs/collector-operations.md)
     account_label = "default"
 """
 

@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   Scheduled read-only collection (docs/collector-operations.md, "Scheduling on macOS").
-  NOT installed or enabled by anything in this repository. Copy it to
+  Optional and disabled: NOT installed or enabled by anything in this repository. Check
+  the prerequisites in docs/collector-operations.md §6 first; it runs only the sources
+  enabled in your config, so keep only live-verified sources (Indeed) enabled. Copy it to
   ~/Library/LaunchAgents/, replace the {PLACEHOLDERS}, then `launchctl load` it yourself.
   Runs once a day at 10:30 local time; scripts/collect.py holds a lock, so a scheduled run
   never overlaps a manual one. It runs in your user session because the signed-in browser

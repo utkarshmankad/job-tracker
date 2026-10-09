@@ -1,7 +1,9 @@
 # Phase 3 — Read-only collection from job sites
 
-Status: implemented on `feat/phase-3-source-collection` (base `main` @ `8ae581d`). Not
-deployed. Operations runbook: [`collector-operations.md`](collector-operations.md).
+Status: released (PR #19, merge `b319293`, schema `0005_source_collection`). Indeed is
+live-verified and is the only source ready for controlled collection; every other site
+adapter is unsupported (§7). Scheduling is optional and disabled. Operations runbook:
+[`collector-operations.md`](collector-operations.md).
 
 ## Goal
 
@@ -176,14 +178,22 @@ application's fields.
 Validated read-only on 2026-10-09 in the user's own signed-in browser. Only the
 application-history area was visited, and nothing was clicked except a read-only filter.
 
+<!-- readiness-table: kept in sync with collector/adapters/sites.py and
+     backend/collection/readiness.py by tests/unit/test_source_readiness_consistency.py -->
+
 | Source | Readiness | Evidence |
 |---|---|---|
-| `indeed` (My jobs → Applied) | **ready for controlled production collection** (`LIVE_VERIFIED`) | selectors rewritten from the live page (stable `data-testid` and ARIA hooks); 4/4 rows read, matching the site's own "4 Applied"; two runs gave identical identities and hashes; stable `jk` IDs; dates parsed |
-| `linkedin` | **needs selector update** → unsupported | history moved to a new Job tracker (`/jobs-tracker/?stage=applied`) with generated class names, no row markers and job links outside rows |
-| `naukri` | **needs adapter rework** → unsupported | real page is `/myapply/historypage`; cards have no item ID or applied date, ~7 of N render (inner scroll), "external site" applies aren't proof of submission |
+| `indeed` (My jobs → Applied) | **live verified 2026-10-09** — the only source ready for controlled collection | selectors rewritten from the live page (stable `data-testid` and ARIA hooks); 4/4 rows read, matching the site's own "4 Applied"; two runs gave identical identities and hashes; stable `jk` IDs; dates parsed. Production canary: one bounded batch, repeated once, idempotent |
+| `linkedin` | **unsupported** | the new Job Tracker layout (`/jobs-tracker/?stage=applied`) lacks safe stable row boundaries: generated class names, no row markers, job links outside rows |
+| `naukri` | **unsupported** | until item identity, applied dates and complete inner-scroll collection can be established: real page is `/myapply/historypage`; cards have no item ID or applied date, ~7 of N render (inner scroll), "external site" applies aren't proof of submission |
 | `instahyre` | **unsupported** | no application-history page; "Activity" lists recruiters who viewed the résumé (with their names) |
 | `careernet` | **unsupported** | candidate platform is a separate site (mycareernet); history page not located; signed out there |
-| `employer-<slug>` | only with an explicit definition | — |
+| `employer-<slug>` | only with an explicit local definition; `unverified` until its `verified_on` is set | — |
+
+Unsupported sources cannot be put in a collector's scope (the API rejects them, and the
+Sources page shows them disabled with the reason). Bringing a source back, or verifying
+any new adapter, is the generic supervised process in
+[`collector-operations.md`](collector-operations.md) §5.
 
 **What the validation proved.** Every wrong guess failed safe: `unexpected_page`, never a
 false empty success. It also found and fixed:
@@ -199,7 +209,9 @@ unique items than that ends a run `partial` (`incomplete_history`).
 **Session persistence (operational limit).** A dedicated Playwright-driven profile did
 not keep Indeed or Naukri sign-ins across browser restarts (likely session-only cookies).
 Scheduled runs may therefore report `signed_out` until you sign in again with
-`open-profile`. The collector reports this and never works around it.
+`open-profile`. The collector reports this and never works around it. Persistence must
+be shown (a manual run after a full browser restart) before a schedule is enabled
+([`collector-operations.md`](collector-operations.md) §6).
 
 **Selector discipline:**
 - An adapter's primary selectors yield `extraction="verified"` only when `LIVE_VERIFIED`
@@ -243,7 +255,7 @@ opts in.
 - **Low frequency, human pace.**
   - Randomized 4–9 s pauses (minimum 2 s enforced) between page actions.
   - A page limit (default 10, maximum 50).
-  - Scheduled at most daily by the template.
+  - At most daily if you enable the (optional, disabled) schedule template.
 - **No bypass.** CAPTCHAs, verification and rate limits are never bypassed: the run stops
   and asks you to resolve them in the visible browser.
 - **No evasion.** No stealth plugins, fingerprint spoofing, CAPTCHA solvers, proxy
@@ -255,9 +267,11 @@ opts in.
 
 ## 10. Known limits and risks
 
-- No adapter is live-verified yet, so until each one is verified every new item from it
-  goes to review (by design). Verifying an adapter is a manual, supervised step
+- Only Indeed is live-verified. LinkedIn, Naukri, Instahyre and CareerNet are
+  unsupported; an employer definition stays `unverified` (new items go to review) until a
+  person verifies it. Verification is a manual, supervised step
   ([`collector-operations.md`](collector-operations.md) §5).
+- Scheduling is optional and disabled; nothing installs it.
 - Status-label vocabularies are best guesses. Unknown labels map to `unknown`, which
   never proves submission or changes status.
 - Fingerprint items (no site ID) whose company or role text changes on the site become a
