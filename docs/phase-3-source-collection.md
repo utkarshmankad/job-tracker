@@ -129,7 +129,7 @@ The downgrade refuses while any observation exists, and is safe to re-run.
 | `POST /collector/runs/{run_key}/observations` | collector | idempotent batch (≤100 observations, ≤256 KB) |
 | `POST /collector/runs/{run_key}/finish` | collector | final status, items seen, fixed error code, counters |
 | `GET /collector/runs/{run_key}` | collector | run status |
-| `GET /collector/metrics` | collector | own aggregate counts |
+| `GET /collector/metrics` | collector | own aggregate counts (its runs, the observations they stored, those observations' items) |
 | `GET /collectors` | session | list collectors |
 | `POST /collectors` | session + CSRF | create; returns setup code and command once; unsupported scopes rejected (422) |
 | `POST /collectors/{id}/rotate` | session + CSRF | invalidate secret; new setup code; refused (409) while the scope holds an unsupported source — revoke instead |
@@ -138,8 +138,24 @@ The downgrade refuses while any observation exists, and is safe to re-run.
 | `GET /collection/sources` | session | sources with last attempt/success/attention |
 | `GET /collection/runs[?source_key]` | session | recent runs |
 | `GET /collection/runs/{id}` | session | run with its observations and decisions |
-| `GET /collection/metrics` | session | aggregate counts |
+| `GET /collection/metrics` | session | aggregate counts (see "Metrics" below) |
 | `GET /collection/review` | session | collected items waiting for a person |
+
+**Metrics.** Two kinds of figure, never mixed:
+
+| Field | Counts | Sources page label |
+|---|---|---|
+| `unique.source_items` | `sourceitem` rows (each item once) | Unique source items |
+| `unique.observations` | immutable `sourceobservation` rows (one per distinct content of an item) | Unique observations |
+| `observations_by_decision.created` / `.linked` | stored observations by decision | Imported (new) / Linked |
+| review queue length | collected evidence waiting for a person | Needs review |
+| `processed_across_runs.items_processed` | sum of each run's received observations | Items processed across runs |
+| `processed_across_runs.unchanged` / `.errors` | sum over runs | Already known / Failed items |
+
+An identical rerun of four items leaves four unique items and four unique observations,
+and raises items processed across runs from four to eight. Collector-scoped metrics
+count only that collector's runs, the observations they stored and those
+observations' items.
 
 **Validation.** The contract forbids extra fields and enforces length limits. It requires
 https URLs and strips tracking and query parameters (except known job-ID parameters),

@@ -700,18 +700,21 @@ def analytics_snapshot(store: DataStore, as_of: datetime) -> dict[str, Any]:
     conversions = engine.conversion_data(6)
     pulse = engine.search_pulse(window_days=28)
     statuses = Counter(str(_value(a.current_status)) for a in apps)
+    # Current status only. The dashboard's interview and offer rates instead count every
+    # application that ever reached the stage (status history), so they are larger.
     interviews = sum(1 for a in apps if _value(a.current_status) in _INTERVIEW_STATUSES)
     offers = sum(1 for a in apps if _value(a.current_status) in _OFFER_STATUSES)
     six_months = as_of - timedelta(days=180)
     return {
+        # Active = not merged into another record (record_state), not "in the pipeline".
         "total_active_applications": total,
         "status_distribution": dict(sorted(statuses.items())),
         "source_distribution": _counter(a.source_portal or "Unknown" for a in apps),
-        "interview_count": interviews,
-        "offer_count": offers,
-        "interview_conversion": round(interviews / total, 4) if total else 0.0,
-        "offer_conversion": round(offers / total, 4) if total else 0.0,
-        "six_month_opportunities": sum(1 for a in apps if _aware(a.applied_date) >= six_months),
+        "current_interview_or_later": interviews,
+        "current_offer_or_joined": offers,
+        "current_interview_or_later_share": round(interviews / total, 4) if total else 0.0,
+        "current_offer_or_joined_share": round(offers / total, 4) if total else 0.0,
+        "applied_last_180_days": sum(1 for a in apps if _aware(a.applied_date) >= six_months),
         "stale_count": sum(1 for a in apps if is_application_stale(a, now=as_of)),
         "funnel": report.funnel,
         "channel_performance": [

@@ -103,7 +103,9 @@ function mockData({ sources, runs, collectors, review } = {}) {
   );
   api.listCollectionRuns.mockResolvedValue(runs ?? [run(7, "succeeded"), run(8, "failed", { error_message: "The page layout changed; this adapter needs maintenance." })]);
   api.getCollectionMetrics.mockResolvedValue({
-    observation_totals: { observations: 12, created: 2, linked: 5, review: 1, unchanged: 4, errors: 0 },
+    unique: { source_items: 4, observations: 5 },
+    observations_by_decision: { created: 3, linked: 1, review: 1 },
+    processed_across_runs: { items_processed: 9, created: 3, linked: 1, review: 1, unchanged: 4, errors: 0 },
     runs_by_status: {},
     items_by_decision: {},
     items_by_source: {},
@@ -135,12 +137,23 @@ describe("SourcesPanel", () => {
     expect(alert).toHaveTextContent("Naukri (default): The browser is not signed in to this site.");
   });
 
-  it("shows totals that distinguish imported, linked, review and failed", async () => {
+  it("separates unique stored records from totals added up across runs", async () => {
     await renderPanel();
     const totals = screen.getByRole("region", { name: "Totals" });
-    for (const label of ["Observed", "Imported (new)", "Linked", "Needs review", "Already known", "Failed items"]) {
-      expect(within(totals).getByText(label)).toBeInTheDocument();
-    }
+    const value = (group, label) => within(group).getByText(label).closest("div").querySelector("dd").textContent;
+    const unique = totals.querySelector('dl[aria-labelledby="totals-unique"]');
+    const runs = totals.querySelector('dl[aria-labelledby="totals-processed"]');
+    expect(value(unique, "Unique source items")).toBe("4");
+    expect(value(unique, "Unique observations")).toBe("5");
+    expect(value(unique, "Imported (new)")).toBe("3");
+    expect(value(unique, "Linked")).toBe("1");
+    expect(value(unique, "Needs review")).toBe("1");
+    expect(value(runs, "Items processed across runs")).toBe("9");
+    expect(value(runs, "Already known")).toBe("4");
+    expect(value(runs, "Failed items")).toBe("0");
+    // A run-level sum is never labelled as a unique count.
+    expect(within(totals).queryByText("Observed")).not.toBeInTheDocument();
+    expect(within(unique).queryByText("Items processed across runs")).not.toBeInTheDocument();
   });
 
   it("inspects a run in place", async () => {

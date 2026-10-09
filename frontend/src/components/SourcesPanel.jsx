@@ -406,7 +406,9 @@ export default function SourcesPanel() {
     load();
   }, [load]);
 
-  const totals = data?.metrics?.observation_totals ?? {};
+  const unique = data?.metrics?.unique ?? {};
+  const decided = data?.metrics?.observations_by_decision ?? {};
+  const processed = data?.metrics?.processed_across_runs ?? {};
   const attention = data?.sources.filter((s) => s.needs_attention) ?? [];
 
   return (
@@ -445,14 +447,27 @@ export default function SourcesPanel() {
           )}
 
           <section aria-labelledby="collection-totals" className={card}>
-            <h3 id="collection-totals" className="mb-3 font-semibold text-gray-900 dark:text-gray-100">Totals</h3>
-            <dl className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
-              <Metric label="Observed" value={totals.observations} />
-              <Metric label="Imported (new)" value={totals.created} />
-              <Metric label="Linked" value={totals.linked} />
+            <h3 id="collection-totals" className="font-semibold text-gray-900 dark:text-gray-100">Totals</h3>
+            <h4 id="totals-unique" className="mt-3 text-sm font-medium text-gray-700 dark:text-gray-300">Unique records</h4>
+            <p className="mb-2 text-xs text-gray-500">
+              Each stored record counted once. Imported, linked and needs review count stored observations by
+              what the tracker decided.
+            </p>
+            <dl aria-labelledby="totals-unique" className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
+              <Metric label="Unique source items" value={unique.source_items} />
+              <Metric label="Unique observations" value={unique.observations} />
+              <Metric label="Imported (new)" value={decided.created} />
+              <Metric label="Linked" value={decided.linked} />
               <Metric label="Needs review" value={data.review.length} />
-              <Metric label="Already known" value={totals.unchanged} />
-              <Metric label="Failed items" value={totals.errors} />
+            </dl>
+            <h4 id="totals-processed" className="mt-4 text-sm font-medium text-gray-700 dark:text-gray-300">Across all runs</h4>
+            <p className="mb-2 text-xs text-gray-500">
+              Added up over every run, so re-running a source raises these even when nothing new is stored.
+            </p>
+            <dl aria-labelledby="totals-processed" className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+              <Metric label="Items processed across runs" value={processed.items_processed} />
+              <Metric label="Already known" value={processed.unchanged} />
+              <Metric label="Failed items" value={processed.errors} />
             </dl>
           </section>
 

@@ -553,3 +553,70 @@ def test_supported_collector_rotation_is_unaffected(env) -> None:
     assert rotated.status_code == 200
     assert rotated.json()["collector"]["scopes"] == ["indeed"]
     assert _start(env, collector).status_code == 401  # old credential stopped at once
+
+
+# ------------------------------------------------------------------ #
+# Metrics: unique stored rows versus processing across runs            #
+# ------------------------------------------------------------------ #
+
+
+def _run_batch(env, collector, observations: list[dict], source: str = "indeed") -> None:
+    run_key = _start(env, collector, source=source).json()["run_key"]
+    assert _submit(env, collector, run_key, _batch(observations)).status_code == 200
+    finish = env.collector.post(
+        f"{_BASE}/collector/runs/{run_key}/finish",
+        json={"status": "succeeded", "items_seen": len(observations)},
+        headers=collector.headers,
+    )
+    assert finish.status_code == 200, finish.text
+
+
+def test_rerun_counts_items_once_but_processing_twice(env) -> None:
+    collector = _collector(env)
+    batch = [_obs(source_item_id=f"{n:016x}") for n in range(1, 5)]
+    _run_batch(env, collector, batch)
+    _run_batch(env, collector, batch)  # identical rerun: nothing new is stored
+    metrics = env.client.get(f"{_BASE}/collection/metrics").json()
+    assert metrics["unique"] == {"source_items": 4, "observations": 4}
+    assert metrics["processed_across_runs"]["items_processed"] == 8
+    assert metrics["processed_across_runs"]["unchanged"] == 4
+    assert sum(metrics["observations_by_decision"].values()) == 4
+
+
+def test_collector_metrics_are_isolated_per_collector(env) -> None:
+    first = _collector(env)
+    second = _collector(env, scopes=("indeed", "employer-acme"))
+    shared = _obs(source_item_id="00000000000000a2")
+    _run_batch(env, first, [_obs(source_item_id="00000000000000a1"), shared])
+    # `shared` was already stored by the first collector: unchanged, nothing new stored.
+    _run_batch(env, second, [shared, _obs(source_item_id="00000000000000b3")])
+    _run_batch(
+        env,
+        second,
+        [_obs(source_key="employer-acme", source_item_id="emp-4", extraction="unverified")],
+        source="employer-acme",
+    )
+
+    def own(collector) -> dict:
+        resp = env.collector.get(f"{_BASE}/collector/metrics", headers=collector.headers)
+        assert resp.status_code == 200
+        return resp.json()
+
+    total = env.client.get(f"{_BASE}/collection/metrics").json()
+    assert total["unique"] == {"source_items": 4, "observations": 4}
+    assert total["items_by_source"] == {"indeed": 3, "employer-acme": 1}
+    assert total["processed_across_runs"]["items_processed"] == 5
+
+    a, b = own(first), own(second)
+    assert a["unique"] == {"source_items": 2, "observations": 2}
+    assert a["items_by_source"] == {"indeed": 2}
+    assert sum(a["items_by_decision"].values()) == 2
+    assert a["processed_across_runs"]["items_processed"] == 2
+    assert a["runs_by_status"] == {"succeeded": 1}
+
+    assert b["unique"] == {"source_items": 2, "observations": 2}
+    assert b["items_by_source"] == {"indeed": 1, "employer-acme": 1}
+    assert sum(b["items_by_decision"].values()) == 2
+    assert b["processed_across_runs"]["items_processed"] == 3
+    assert b["processed_across_runs"]["unchanged"] == 1
+    assert b["runs_by_status"] == {"succeeded": 2}

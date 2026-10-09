@@ -377,10 +377,43 @@ class CollectionStoreMixin:
             )
 
     def collection_metrics(self, collector_id: int | None = None) -> dict[str, Any]:
-        """Aggregate counts only — no names, URLs or page content."""
+        """Aggregate counts only — no names, URLs or page content.
+
+        Two kinds of figure, never mixed:
+
+        - ``unique``, ``observations_by_decision``, ``items_by_decision`` and
+          ``items_by_source`` count stored rows: each source item once, and each immutable
+          observation (one per distinct content of an item) once.
+        - ``processed_across_runs`` sums the per-run counters. An item seen in two runs is
+          processed twice, so ``items_processed`` grows with every run even when nothing
+          new is stored.
+
+        With ``collector_id`` every figure is limited to that collector: its runs, the
+        observations those runs stored, and the items those observations belong to. An
+        item another collector stored first, and this collector only re-saw unchanged,
+        is therefore not counted for it.
+        """
         with Session(self._engine) as session:
             run_filter = (
                 [col(CollectionRun.collector_id) == collector_id]
+                if collector_id is not None
+                else []
+            )
+            observation_filter = (
+                [
+                    col(SourceObservation.run_id).in_(
+                        select(CollectionRun.id).where(CollectionRun.collector_id == collector_id)
+                    )
+                ]
+                if collector_id is not None
+                else []
+            )
+            item_filter = (
+                [
+                    col(SourceItem.id).in_(
+                        select(SourceObservation.source_item_id).where(*observation_filter)
+                    )
+                ]
                 if collector_id is not None
                 else []
             )
@@ -391,7 +424,7 @@ class CollectionStoreMixin:
                     .group_by(col(CollectionRun.status))
                 ).all()
             )
-            totals = session.execute(
+            processed = session.execute(
                 core_select(
                     func.coalesce(func.sum(CollectionRun.observations_received), 0),
                     func.coalesce(func.sum(CollectionRun.created_count), 0),
@@ -401,20 +434,41 @@ class CollectionStoreMixin:
                     func.coalesce(func.sum(CollectionRun.error_count), 0),
                 ).where(*run_filter)
             ).one()
+            unique_items = session.exec(
+                select(func.count()).select_from(SourceItem).where(*item_filter)
+            ).one()
+            unique_observations = session.exec(
+                select(func.count()).select_from(SourceObservation).where(*observation_filter)
+            ).one()
+            observations_by_decision = dict(
+                session.exec(
+                    select(SourceObservation.decision, func.count())
+                    .where(*observation_filter)
+                    .group_by(col(SourceObservation.decision))
+                ).all()
+            )
             items_by_decision = dict(
                 session.exec(
-                    select(SourceItem.decision, func.count()).group_by(col(SourceItem.decision))
+                    select(SourceItem.decision, func.count())
+                    .where(*item_filter)
+                    .group_by(col(SourceItem.decision))
                 ).all()
             )
             items_by_source = dict(
                 session.exec(
-                    select(SourceItem.source_key, func.count()).group_by(col(SourceItem.source_key))
+                    select(SourceItem.source_key, func.count())
+                    .where(*item_filter)
+                    .group_by(col(SourceItem.source_key))
                 ).all()
             )
-        keys = ("observations", "created", "linked", "review", "unchanged", "errors")
+        keys = ("items_processed", "created", "linked", "review", "unchanged", "errors")
         return {
             "runs_by_status": {str(k): int(v) for k, v in runs_by_status.items()},
-            "observation_totals": dict(zip(keys, (int(v) for v in totals), strict=True)),
+            "unique": {"source_items": int(unique_items), "observations": int(unique_observations)},
+            "observations_by_decision": {
+                str(k): int(v) for k, v in observations_by_decision.items()
+            },
+            "processed_across_runs": dict(zip(keys, (int(v) for v in processed), strict=True)),
             "items_by_decision": {str(k): int(v) for k, v in items_by_decision.items()},
             "items_by_source": {str(k): int(v) for k, v in items_by_source.items()},
         }
