@@ -4,8 +4,7 @@ REAL-SESSION VALIDATION (2026-10-09, read-only, user's own signed-in browser):
 
 - indeed: history page confirmed; selectors rewritten from the live structure (stable
   ``data-testid`` and ARIA hooks, not generated class names); all rows read and
-  matched the site's own count. Verified end to end with the collector before
-  ``LIVE_VERIFIED`` is set.
+  matched the site's own count in two identical runs → ``LIVE_VERIFIED`` set.
 - linkedin: the history moved to a new "Job tracker" (``/jobs-tracker/?stage=applied``)
   with generated class names, no row markers and job links outside their rows. No stable
   selectors exist yet → ``SUPPORTED = False`` (the old page now redirects; the adapter
@@ -150,6 +149,12 @@ class IndeedAdapter(Adapter):
 
     SOURCE_KEY = "indeed"
     VERSION = "0.2.0"
+    # Verified 2026-10-09 in the user's signed-in session: every selector read all rows,
+    # the row count matched the site's own "<n> Applied" count, values matched the page,
+    # and two runs produced identical identities. The selectors were evaluated by the
+    # browser's CSS engine (the dedicated Playwright profile could not stay signed in);
+    # bs4/soupsieve support the same selector syntax and is covered by the fixtures.
+    LIVE_VERIFIED = "2026-10-09"
     HISTORY_URL = "https://myjobs.indeed.com/applied"
     ALLOWED_HOSTS = ("indeed.com",)
     PAGINATION = "none"

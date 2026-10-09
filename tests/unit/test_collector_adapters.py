@@ -174,7 +174,8 @@ def test_live_validation_status_is_honest() -> None:
             adapter_for(cls.SOURCE_KEY)
     assert NaukriAdapter.SUPPORTED and NaukriAdapter.LIVE_VERIFIED is None
     assert NaukriAdapter().extraction_label("primary") == "unverified"
-    assert IndeedAdapter.SUPPORTED
+    assert IndeedAdapter.SUPPORTED and IndeedAdapter.LIVE_VERIFIED == "2026-10-09"
+    assert IndeedAdapter().extraction_label("primary") == "verified"
     assert set(ADAPTERS) == {"linkedin", "naukri", "indeed", "instahyre", "careernet"}
 
 

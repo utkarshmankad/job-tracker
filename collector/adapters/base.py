@@ -225,6 +225,14 @@ class Adapter(ABC):
         match = self.EXPECTED_COUNT_PATTERN.search(label or "")
         return int(match.group(1)) if match else None
 
+    def ready_selectors(self) -> list[str]:
+        """Selectors whose presence means the page has rendered enough to decide its state."""
+        m = self.MARKERS
+        out = [*m.list_container, *m.empty, *m.signed_out, *m.consent, *m.challenge]
+        if self.EXPECTED_COUNT_SELECTOR:
+            out.append(self.EXPECTED_COUNT_SELECTOR)
+        return out
+
     def _list_present(self, soup: BeautifulSoup) -> bool:
         return any(soup.select_one(s) for s in self.MARKERS.list_container)
 

@@ -82,6 +82,8 @@ class CollectorConfig:
     api_url: str
     user_data_dir: Path
     channel: str | None = "chrome"
+    # A Chromium-based browser binary to drive instead of a Playwright channel (e.g. Brave).
+    executable_path: Path | None = None
     headless: bool = False
     allow_primary_profile: bool = False
     max_pages: int = 10
@@ -173,9 +175,14 @@ def parse_config(data: dict[str, object]) -> CollectorConfig:
     max_pages = int(limits.get("max_pages", 10))  # type: ignore[call-overload]
     if not 1 <= max_pages <= 50:
         raise ConfigError("limits.max_pages must be between 1 and 50.")
+    executable = browser.get("executable_path")
+    executable_path = Path(str(executable)).expanduser() if executable else None
+    if executable_path is not None and not executable_path.is_file():
+        raise ConfigError("browser.executable_path must point to a browser binary.")
     return CollectorConfig(
         api_url=api_url,
         user_data_dir=user_data_dir,
+        executable_path=executable_path,
         channel=(str(browser["channel"]) if browser.get("channel") else None),
         headless=bool(browser.get("headless", False)),
         allow_primary_profile=allow_primary,

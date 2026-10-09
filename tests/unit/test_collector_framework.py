@@ -451,3 +451,115 @@ def test_diagnostics_payload_has_no_free_text() -> None:
     ).to_payload()
     assert all(isinstance(v, int | str) for v in payload.values())
     assert set(payload) >= {"pages", "items_extracted", "stopped_state"}
+
+
+def test_executable_path_must_exist(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="executable_path"):
+        parse_config(
+            _config(
+                tmp_path,
+                browser={
+                    "user_data_dir": str(tmp_path / "p"),
+                    "executable_path": str(tmp_path / "nope"),
+                },
+            )
+        )
+    binary = tmp_path / "browser"
+    binary.write_text("")
+    cfg = parse_config(
+        _config(
+            tmp_path, browser={"user_data_dir": str(tmp_path / "p"), "executable_path": str(binary)}
+        )
+    )
+    assert cfg.executable_path == binary
+
+
+def test_live_driver_tolerates_pages_that_never_go_network_idle() -> None:
+    """Regression (real session): job sites keep polling, so "networkidle" never comes;
+    navigation must still succeed once the page has loaded."""
+    from playwright.sync_api import TimeoutError as PlaywrightTimeout
+
+    from collector.driver import PlaywrightDriver
+
+    class BusyPage:
+        url = "https://jobs.example.test/history"
+
+        def __init__(self) -> None:
+            self.waits: list[str] = []
+
+        def goto(self, url, wait_until):
+            self.waits.append(wait_until)
+
+        def is_closed(self):
+            return False
+
+        def wait_for_load_state(self, state, timeout):
+            raise PlaywrightTimeout("never idle")
+
+        def wait_for_timeout(self, ms):
+            self.waits.append(f"settle:{ms}")
+
+    driver = object.__new__(PlaywrightDriver)
+    driver._page = BusyPage()
+    driver.goto("https://jobs.example.test/history")
+    assert driver._page.waits == ["load", "settle:1500"]
+
+
+def test_live_driver_recovers_when_its_tab_was_closed() -> None:
+    """Regression (real session): the user's sign-in closed the collector's original tab;
+    navigation must continue in a live tab instead of failing."""
+    from collector.driver import PlaywrightDriver
+
+    class Page:
+        def __init__(self, closed: bool) -> None:
+            self.closed = closed
+            self.visited: list[str] = []
+
+        def is_closed(self):
+            return self.closed
+
+        def goto(self, url, wait_until):
+            assert not self.closed
+            self.visited.append(url)
+
+        def wait_for_load_state(self, state, timeout):
+            return None
+
+        def wait_for_timeout(self, ms):
+            return None
+
+    class Context:
+        def __init__(self) -> None:
+            self.pages = [Page(closed=True), Page(closed=False)]
+
+    driver = object.__new__(PlaywrightDriver)
+    driver._context = Context()
+    driver._page = driver._context.pages[0]
+    driver.goto("https://jobs.example.test/history")
+    assert driver._page is driver._context.pages[1]
+    assert driver._page.visited == ["https://jobs.example.test/history"]
+
+
+def test_navigation_failure_records_a_reason_code() -> None:
+    from collector.driver import classify_browser_error
+
+    assert (
+        classify_browser_error(RuntimeError("Target page, context or browser has been closed"))
+        == "target_closed"
+    )
+    assert classify_browser_error(RuntimeError("Timeout 30000ms exceeded")) == "timeout"
+    assert classify_browser_error(RuntimeError("net::ERR_NAME_NOT_RESOLVED")) == "network"
+    outcome = _runner(FixtureDriver({})).run(dry_run=True)
+    assert (outcome.status, outcome.error_code) == ("failed", "navigation_failed")
+    assert outcome.diagnostics.stopped_detail == "network"
+
+
+def test_runner_waits_for_client_rendered_state_before_reading() -> None:
+    """Regression (real session): Indeed renders its list after "load"; reading at once saw
+    an unrecognised page. The runner waits (bounded) for the adapter's state selectors."""
+    driver = FixtureDriver({HISTORY: _page(_row(1))})
+    seen: list[list[str]] = []
+    driver.wait_for_any = lambda selectors, timeout: seen.append(selectors) or True  # type: ignore[method-assign]
+    outcome = _runner(driver).run(dry_run=True)
+    assert outcome.status == "succeeded"
+    assert seen and "ul.apps" in seen[0] and "form#login" in seen[0]

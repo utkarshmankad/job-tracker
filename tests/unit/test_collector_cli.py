@@ -126,6 +126,7 @@ def test_adapters_are_honest_about_verification() -> None:
     assert result.exit_code == 0
     assert result.output.count("UNSUPPORTED:") == 3  # linkedin, instahyre, careernet
     assert "naukri" in result.output and "not yet (fixture-tested only)" in result.output
+    assert "live-verified: 2026-10-09" in result.output  # indeed
     assert "employer-<slug>" in result.output
 
 

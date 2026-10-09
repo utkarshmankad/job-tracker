@@ -137,8 +137,11 @@ class SourceRunner:
         seen: set[str] = set()
         try:
             self._driver.goto(self._adapter.HISTORY_URL)
-        except DriverError:
+        except DriverError as exc:
+            diag.stopped_detail = exc.reason
             return "failed", "navigation_failed"
+        # Client-rendered pages: wait (bounded) until the page shows a state we recognise.
+        self._driver.wait_for_any(self._adapter.ready_selectors(), 12)
         for page_number in range(self._max_pages):
             url = self._driver.current_url()
             html = self._driver.html()
@@ -182,7 +185,8 @@ class SourceRunner:
             self._driver.pause(self._rng.uniform(*self._delays))
             try:
                 advanced = self._advance()
-            except DriverError:
+            except DriverError as exc:
+                diag.stopped_detail = exc.reason
                 return "partial", "navigation_failed"
             if not advanced:
                 self._snapshot("selector_drift", html)

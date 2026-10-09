@@ -72,7 +72,12 @@ def _browser(cfg: CollectorConfig) -> Iterator[PageDriver]:
             f"Browser profile {cfg.user_data_dir} does not exist. Create it with "
             "`scripts/collect.py open-profile` and sign in to each site first."
         )
-    driver = PlaywrightDriver(cfg.user_data_dir, channel=cfg.channel, headless=cfg.headless)
+    driver = PlaywrightDriver(
+        cfg.user_data_dir,
+        channel=cfg.channel,
+        executable_path=cfg.executable_path,
+        headless=cfg.headless,
+    )
     try:
         yield driver
     finally:
@@ -380,7 +385,9 @@ def open_profile(config_file: Path | None) -> None:
     """Open the configured browser profile so you can sign in to job sites yourself."""
     cfg = _load(config_file)
     cfg.user_data_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    driver = PlaywrightDriver(cfg.user_data_dir, channel=cfg.channel, headless=False)
+    driver = PlaywrightDriver(
+        cfg.user_data_dir, channel=cfg.channel, executable_path=cfg.executable_path, headless=False
+    )
     click.echo("Sign in to each job site in the window, then press Enter here to close it.")
     try:
         input()
