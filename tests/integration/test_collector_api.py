@@ -255,7 +255,7 @@ def test_batch_is_idempotent_and_replay_safe(env) -> None:
     body = _batch([_obs()])
     first = _submit(env, collector, run_key, body)
     assert first.status_code == 200, first.text
-    assert first.json()["counts"] == {"pending": 1}
+    assert first.json()["counts"] == {"created": 1}
     replay = _submit(env, collector, run_key, body)
     assert replay.json() == first.json() and replay.headers["idempotent-replay"] == "true"
     # The same item in a new batch is unchanged; nothing new is stored.
