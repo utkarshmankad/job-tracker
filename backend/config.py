@@ -191,3 +191,15 @@ COLLECTOR_RATE_LIMIT_WINDOW_SECONDS = 60
 COLLECTOR_ENROLL_RATE_LIMIT_ATTEMPTS = 10  # per client address
 COLLECTOR_ENROLL_RATE_LIMIT_WINDOW_SECONDS = 300
 COLLECTOR_MAX_OBSERVATION_AGE_DAYS = 400
+
+# Reserved internal collector used by the authenticated Browser Agent Import surface.
+# It never receives a bearer secret: ChatGPT operates the already signed-in Job Tracker UI,
+# while the backend records those imports through the same idempotent Phase 3 pipeline.
+BROWSER_WORKFLOW_COLLECTOR_TOKEN_ID = "chatgpt-browser-workflow"
+BROWSER_WORKFLOW_COLLECTOR_NAME = "ChatGPT browser workflow"
+BROWSER_WORKFLOW_VERSION = "chatgpt-browser-v1"
+BROWSER_WORKFLOW_SOURCES = ("linkedin", "indeed")
+BROWSER_WORKFLOW_ALLOWED_HOSTS: dict[str, tuple[str, ...]] = {
+    "linkedin": ("linkedin.com", "www.linkedin.com"),
+    "indeed": ("indeed.com", "www.indeed.com", "in.indeed.com"),
+}

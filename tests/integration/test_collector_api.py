@@ -86,6 +86,19 @@ def _obs(**overrides) -> dict:
     return {**base, **overrides}
 
 
+def _browser_item(**overrides) -> dict:
+    base = {
+        "source_item_id": "0f1e2d3c4b5a6978",
+        "company": "Quuxwidget Labs",
+        "role": "Platform Engineer",
+        "applied_on": (datetime.now(UTC) - timedelta(days=3)).date().isoformat(),
+        "status": "applied",
+        "raw_status": "Applied",
+        "job_url": "https://www.indeed.com/viewjob?jk=0f1e2d3c4b5a6978&from=tracking",
+    }
+    return {**base, **overrides}
+
+
 def _batch(observations: list[dict], key: str | None = None, sent_at: datetime | None = None):
     return {
         "batch_key": key or uuid.uuid4().hex,
@@ -160,6 +173,83 @@ def test_admin_endpoints_require_session_and_csrf(env) -> None:
     anonymous = TestClient(app)
     assert anonymous.get(f"{_BASE}/collectors").status_code == 401
     assert anonymous.get(f"{_BASE}/collection/sources").status_code == 401
+
+
+def test_browser_import_previews_then_ingests_idempotently(env) -> None:
+    body = {"source_key": "indeed", "items": [_browser_item()]}
+    preview = env.client.post(
+        f"{_BASE}/collection/browser-import/preview", json=body, headers=env.csrf
+    )
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["count"] == 1
+    normalized = preview.json()["observations"][0]
+    assert normalized["extraction"] == "verified"
+    assert normalized["job_url"] == "https://indeed.com/viewjob?jk=0f1e2d3c4b5a6978"
+    assert env.db.collection_metrics()["unique"] == {"source_items": 0, "observations": 0}
+
+    first = env.client.post(f"{_BASE}/collection/browser-import", json=body, headers=env.csrf)
+    assert first.status_code == 200, first.text
+    assert first.json()["counts"] == {"created": 1}
+    second = env.client.post(f"{_BASE}/collection/browser-import", json=body, headers=env.csrf)
+    assert second.status_code == 200, second.text
+    assert second.json()["counts"] == {"unchanged": 1}
+    metrics = env.db.collection_metrics()
+    assert metrics["unique"] == {"source_items": 1, "observations": 1}
+    assert metrics["processed_across_runs"]["items_processed"] == 2
+    collectors = env.client.get(f"{_BASE}/collectors").json()
+    workflow = next(c for c in collectors if c["name"] == "ChatGPT browser workflow")
+    assert workflow["state"] == "browser_workflow"
+    assert workflow["token_hint"] == "signed-in browser"
+    assert (
+        env.client.post(f"{_BASE}/collectors/{workflow['id']}/rotate", headers=env.csrf).status_code
+        == 409
+    )
+    assert (
+        env.client.post(f"{_BASE}/collectors/{workflow['id']}/revoke", headers=env.csrf).status_code
+        == 409
+    )
+
+
+def test_browser_import_accepts_linkedin_but_requires_matching_stable_url(env) -> None:
+    linkedin = {
+        "source_key": "linkedin",
+        "items": [
+            _browser_item(
+                source_item_id="4187654321",
+                job_url="https://www.linkedin.com/jobs/view/4187654321/?trackingId=private",
+            )
+        ],
+    }
+    ok = env.client.post(
+        f"{_BASE}/collection/browser-import/preview", json=linkedin, headers=env.csrf
+    )
+    assert ok.status_code == 200, ok.text
+    bad = env.client.post(
+        f"{_BASE}/collection/browser-import/preview",
+        json={"source_key": "linkedin", "items": [_browser_item()]},
+        headers=env.csrf,
+    )
+    assert bad.status_code == 422 and "does not match linkedin" in bad.json()["detail"]
+
+
+def test_browser_import_rejects_duplicates_extra_fields_and_missing_csrf(env) -> None:
+    item = _browser_item()
+    duplicate = {"source_key": "indeed", "items": [item, item]}
+    resp = env.client.post(
+        f"{_BASE}/collection/browser-import/preview", json=duplicate, headers=env.csrf
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "Duplicate source item ID in import."
+    extra = {"source_key": "indeed", "items": [{**item, "page_text": "private page"}]}
+    resp = env.client.post(
+        f"{_BASE}/collection/browser-import/preview", json=extra, headers=env.csrf
+    )
+    assert resp.status_code == 422 and "private page" not in resp.text
+    without_csrf = env.client.post(
+        f"{_BASE}/collection/browser-import",
+        json={"source_key": "indeed", "items": [item]},
+    )
+    assert without_csrf.status_code == 403
 
 
 def test_bearer_failures_are_indistinguishable(env) -> None:

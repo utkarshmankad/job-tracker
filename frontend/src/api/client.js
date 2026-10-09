@@ -121,6 +121,16 @@ export const api = {
   getCollectionRun: (id) => request(`/collection/runs/${id}`),
   getCollectionMetrics: () => request("/collection/metrics"),
   listCollectionReview: () => request("/collection/review"),
+  previewBrowserImport: (body) =>
+    request("/collection/browser-import/preview", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  importFromBrowser: (body) =>
+    request("/collection/browser-import", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   dismissEvidence: (id) => request(`/evidence/${id}/dismiss`, { method: "POST" }),
   acceptEvidence: (id, applicationId) =>
     request(`/evidence/${id}/accept`, {
