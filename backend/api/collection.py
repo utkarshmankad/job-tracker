@@ -424,7 +424,7 @@ def _issue_setup(db: DataStore, collector: Collector) -> CollectorSetupResponse:
         collector=_collector_response(collector),
         setup_code=code,
         expires_at=expires_at,
-        command=f"python scripts/collector.py enroll --api-url {api_url} --code {code}",
+        command=f"python scripts/collect.py enroll --api-url {api_url} --code {code}",
     )
 
 

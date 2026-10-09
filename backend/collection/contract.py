@@ -303,6 +303,8 @@ ERROR_MESSAGES = {
     "navigation_failed": "The history page could not be opened.",
     "submission_failed": "Observations could not be sent to the tracker.",
     "interrupted": "The run was interrupted before it finished.",
+    "page_limit": "Stopped at the configured page limit; older history was not read.",
+    "invalid_items": "Some rows could not be validated and were not sent.",
 }
 
 
