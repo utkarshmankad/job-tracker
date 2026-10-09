@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import {
   LayoutList, Activity, Home, AlertTriangle,
-  Download, PlusCircle, Sun, Moon, MailSearch, ShieldCheck, LogOut, Loader2,
+  Download, PlusCircle, Sun, Moon, MailSearch, ShieldCheck, LogOut, Loader2, Radar,
 } from "lucide-react";
 import { api } from "./api/client";
 import { useTheme } from "./contexts/ThemeContext";
@@ -17,6 +17,7 @@ import AnalyticsPanel from "./components/AnalyticsPanel";
 import StatusPage from "./components/StatusPage";
 import ProspectsInbox from "./components/ProspectsInbox";
 import DataQualityPanel from "./components/DataQualityPanel";
+import SourcesPanel from "./components/SourcesPanel";
 import ConversionPanel from "./components/ConversionPanel";
 // LinkedIn import/withdraw tools removed — see CLAUDE.md task; endpoints in
 // backend/api/routes.py (linkedin_import_preview/confirmed) are now unused
@@ -27,6 +28,7 @@ const NAV_TABS = [
   { id: "applications", label: "Applications", Icon: LayoutList },
   { id: "prospects", label: "Opportunities", Icon: MailSearch },
   { id: "quality", label: "Data Quality", Icon: ShieldCheck },
+  { id: "sources", label: "Sources", Icon: Radar },
   { id: "stale", label: "Stale", Icon: AlertTriangle },
   { id: "status", label: "Status", Icon: Activity },
 ];
@@ -40,6 +42,7 @@ const TAB_TITLES = {
   applications: "Applications",
   prospects: "Opportunities",
   quality: "Data Quality",
+  sources: "Collection Sources",
   stale: "Stale Applications",
   status: "System Status",
 };
@@ -133,7 +136,7 @@ function Dashboard() {
             </span>
           </button>
           <div className="flex items-center gap-3 flex-wrap">
-            <nav className="flex items-center gap-1 bg-gray-100 dark:bg-gray-800 rounded-lg p-1">
+            <nav className="flex flex-wrap items-center gap-1 bg-gray-100 dark:bg-gray-800 rounded-lg p-1">
               {NAV_TABS.map(({ id, label, Icon }) => (
                 <button
                   key={id}
@@ -243,6 +246,11 @@ function Dashboard() {
         {visitedTabs.has("quality") && (
           <div className={activeTab === "quality" ? "" : "hidden"}>
             <DataQualityPanel />
+          </div>
+        )}
+        {visitedTabs.has("sources") && (
+          <div className={activeTab === "sources" ? "" : "hidden"}>
+            <SourcesPanel />
           </div>
         )}
         {visitedTabs.has("stale") && (

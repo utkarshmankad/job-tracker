@@ -91,6 +91,10 @@ you've stopped the API yourself (local development).
   (stamp `0003_resolver_audit`) is safe: an older release ignores the new columns. Merged
   records would then reappear in its lists, though, so undo merges first if that matters.
   Details: [`phase-2-identity-resolution.md`](phase-2-identity-resolution.md) §12.
+- `0005_source_collection` (Phase 3) adds the collector, enrollment, source, run, batch,
+  source-item and source-observation tables — additive and idempotent; its downgrade
+  refuses while any source observation exists. Details:
+  [`phase-3-source-collection.md`](phase-3-source-collection.md) §2.
 - Startup policy (`backend/db/schema.py`):
 
   | Database state | Development (`DB_AUTO_MIGRATE=true`, default) | Production (`APP_ENV=production`) |

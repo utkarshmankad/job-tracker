@@ -175,3 +175,19 @@ CACHE_ENABLED = os.environ.get("CACHE_ENABLED", "true").lower() == "true"
 CACHE_CONNECT_TIMEOUT_SECONDS = 0.2  # fail fast when Redis isn't running (e.g. local dev, CI)
 APPLICATIONS_CACHE_TTL_SECONDS = int(os.environ.get("APPLICATIONS_CACHE_TTL_SECONDS", "20"))
 INSIGHTS_CACHE_TTL_SECONDS = int(os.environ.get("INSIGHTS_CACHE_TTL_SECONDS", "20"))
+
+# --- Phase 3 source collection (docs/phase-3-source-collection.md) ---------------------
+# Sources a collector may be scoped to. Employer portals use "employer-<slug>" keys and are
+# only collected by an explicitly configured adapter, never heuristically.
+COLLECTOR_SOURCES = ("linkedin", "naukri", "indeed", "instahyre", "careernet")
+COLLECTOR_EMPLOYER_SOURCE_PATTERN = r"^employer-[a-z0-9][a-z0-9-]{1,38}$"
+COLLECTOR_CONTRACT_VERSION = 1
+COLLECTOR_ENROLLMENT_TTL_SECONDS = 600  # a setup code is single-use and expires quickly
+COLLECTOR_MAX_BATCH_OBSERVATIONS = 100
+COLLECTOR_MAX_BODY_BYTES = 256 * 1024
+COLLECTOR_BATCH_MAX_AGE_SECONDS = 900  # replay window: older unseen batches are refused
+COLLECTOR_RATE_LIMIT_REQUESTS = 120  # per collector
+COLLECTOR_RATE_LIMIT_WINDOW_SECONDS = 60
+COLLECTOR_ENROLL_RATE_LIMIT_ATTEMPTS = 10  # per client address
+COLLECTOR_ENROLL_RATE_LIMIT_WINDOW_SECONDS = 300
+COLLECTOR_MAX_OBSERVATION_AGE_DAYS = 400

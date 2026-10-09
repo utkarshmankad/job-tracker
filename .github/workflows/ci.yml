@@ -27,14 +27,14 @@ jobs:
       # regress silently. ruff (lint+format) still carries pre-existing debt across
       # backend/ and tests/ (tracked separately as a cleanup task), so it stays scoped
       # to files this PR actually touches, same as before.
-      - name: mypy (backend/, full package)
-        run: mypy backend/
+      - name: mypy (backend/ and the local collector, full packages)
+        run: mypy backend/ collector/
       - name: Lint/format changed Python files
         run: |
           git fetch origin main --depth=1
-          CHANGED_PY=$(git diff --name-only --diff-filter=ACMR origin/main...HEAD -- 'backend/*.py' 'tests/*.py' || true)
+          CHANGED_PY=$(git diff --name-only --diff-filter=ACMR origin/main...HEAD -- 'backend/*.py' 'tests/*.py' 'collector/*.py' 'scripts/*.py' || true)
           if [ -z "$CHANGED_PY" ]; then
-            echo "No changed Python files under backend/ or tests/."
+            echo "No changed Python files under backend/, collector/, scripts/ or tests/."
           else
             echo "$CHANGED_PY"
             echo "$CHANGED_PY" | xargs ruff check

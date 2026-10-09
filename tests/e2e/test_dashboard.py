@@ -7,6 +7,7 @@ import re
 import signal
 import subprocess
 import time
+import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -299,3 +300,87 @@ def test_merge_dialog_fits_mobile_viewport(page: Page, frontend_server: str, api
     page.keyboard.press("Escape")
     expect(dialog).to_be_hidden()
     assert _active_total(http, api, "MobileMergeCorp") == 2  # cancelled: nothing merged
+
+
+def _collect(http: requests.Session, api: str, base: str) -> None:
+    """Enroll a collector through the real API and submit one run like the local agent."""
+    setup = http.post(api + "/collectors", json={"name": "E2E laptop", "scopes": ["naukri"]})
+    setup.raise_for_status()
+    enrolled = requests.post(api + "/collector/enroll", json={"code": setup.json()["setup_code"]})
+    enrolled.raise_for_status()
+    bearer = {"Authorization": f"Bearer {enrolled.json()['credential']}"}
+    run_key = uuid.uuid4().hex
+    started = requests.post(
+        api + "/collector/runs",
+        headers=bearer,
+        json={
+            "run_key": run_key,
+            "source_key": "naukri",
+            "collector_version": "0.1.0",
+            "adapter_version": "naukri/0.1.0",
+        },
+    )
+    started.raise_for_status()
+    now = datetime.now(UTC)
+    observation = {
+        "source_key": "naukri",
+        "source_item_id": "e2e-1",
+        "company": "E2E Collected Co",
+        "role": "Collected Role",
+        "applied_on": (now - timedelta(days=2)).date().isoformat(),
+        "status": "applied",
+        "raw_status": "Application Sent",
+        "job_url": None,
+        "proves_submission": True,
+        "extraction": "unverified",
+        "observed_at": now.isoformat(),
+        "adapter_version": "naukri/0.1.0",
+    }
+    batch = {
+        "batch_key": uuid.uuid4().hex,
+        "sent_at": now.isoformat(),
+        "observations": [observation],
+    }
+    requests.post(
+        api + f"/collector/runs/{run_key}/observations", headers=bearer, json=batch
+    ).raise_for_status()
+    requests.post(
+        api + f"/collector/runs/{run_key}/finish",
+        headers=bearer,
+        json={"status": "signed_out", "items_seen": 1, "error_code": "signed_out"},
+    ).raise_for_status()
+
+
+def test_sources_page_shows_collection_state(page: Page, frontend_server: str, api_session) -> None:
+    http, api = api_session
+    _collect(http, api, frontend_server)
+    _sign_in(page, frontend_server)
+    _open_tab(page, "Sources")
+    expect(page.get_by_role("heading", level=1)).to_have_text("Collection Sources")
+    sources = page.get_by_role("region", name="Configured sources")
+    expect(sources).to_contain_text("Naukri")
+    expect(sources.get_by_text("Signed out")).to_be_visible()
+    expect(page.get_by_role("alert").filter(has_text="Needs your attention")).to_contain_text(
+        "not signed in"
+    )
+    review = page.get_by_role("region", name=re.compile("Needs review"))
+    expect(review).to_contain_text("E2E Collected Co")
+    expect(review.get_by_role("button", name="Create application")).to_be_visible()
+    runs = page.get_by_role("region", name="Recent runs")
+    runs.get_by_role("button", name="Inspect").first.click()
+    expect(runs).to_contain_text("Needs review")
+    collectors = page.get_by_role("region", name="Collectors")
+    expect(collectors).to_contain_text("E2E laptop")
+    # Only a short hint is ever shown — never a full credential.
+    expect(collectors).not_to_contain_text(re.compile(r"jtc_[0-9a-f]{16}\."))
+    expect(collectors).to_contain_text("jtc_")
+
+
+def test_sources_page_fits_mobile(page: Page, frontend_server: str) -> None:
+    """No horizontal page scroll on the Sources page at phone width (with collected data)."""
+    page.set_viewport_size({"width": 375, "height": 740})
+    _sign_in(page, frontend_server)
+    _open_tab(page, "Sources")
+    expect(page.get_by_role("region", name="Totals")).to_be_visible()
+    expect(page.get_by_role("region", name="Recent runs")).to_be_visible()
+    assert page.evaluate("document.documentElement.scrollWidth - window.innerWidth") <= 0

@@ -38,3 +38,9 @@ playwright/.auth/
 .auth/
 storage_state*.json
 *.storage-state.json
+
+# Local collection agent state and browser profiles: never commit (cookies, sessions)
+JobTrackerCollector/
+collector-home/
+browser-profile/
+*.browser-profile/

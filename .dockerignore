@@ -33,3 +33,8 @@ credentials*.json
 playwright/.auth/
 .auth/
 storage_state*.json
+
+# Local collection agent (runs on the user's computer, never in the API image)
+collector/
+requirements-collector.txt
+launchd/

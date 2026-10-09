@@ -8,3 +8,6 @@ mypy==1.10.0
 types-PyYAML==6.0.12.20240311
 playwright==1.55.0
 pip-audit==2.7.3
+# Collector adapter tests parse sanitized HTML fixtures (see requirements-collector.txt).
+beautifulsoup4==4.12.3
+soupsieve==2.9.0
