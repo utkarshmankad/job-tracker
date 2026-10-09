@@ -1,4 +1,4 @@
-import { render, screen, within, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, within, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import SourcesPanel from "./SourcesPanel";
@@ -19,6 +19,8 @@ vi.mock("../api/client", () => ({
     acceptEvidence: vi.fn(),
     createApplicationFromEvidence: vi.fn(),
     dismissEvidence: vi.fn(),
+    previewBrowserImport: vi.fn(),
+    importFromBrowser: vi.fn(),
   },
 }));
 
@@ -126,6 +128,36 @@ beforeEach(() => {
 });
 
 describe("SourcesPanel", () => {
+  it("previews and imports browser-agent JSON through the protected workflow", async () => {
+    const user = userEvent.setup();
+    api.previewBrowserImport.mockResolvedValue({ source_key: "indeed", count: 1, observations: [{}] });
+    api.importFromBrowser.mockResolvedValue({ counts: { unchanged: 1 }, results: [] });
+    await renderPanel();
+    const region = screen.getByRole("region", { name: "Browser Agent Import" });
+    const input = within(region).getByLabelText("Application rows (JSON)");
+    const rows = [{ source_item_id: "abc123", company: "Example Labs", role: "Engineer", job_url: "https://in.indeed.com/viewjob?jk=abc123" }];
+    fireEvent.change(input, { target: { value: JSON.stringify(rows) } });
+    await user.click(within(region).getByRole("button", { name: "Preview" }));
+    await waitFor(() => expect(api.previewBrowserImport).toHaveBeenCalledWith({ source_key: "indeed", items: rows }));
+    expect(within(region).getByText("Validated 1 row(s). Ready to import.")).toBeInTheDocument();
+    await user.click(within(region).getByRole("button", { name: "Import 1" }));
+    await waitFor(() => expect(api.importFromBrowser).toHaveBeenCalledWith({ source_key: "indeed", items: rows }));
+    expect(within(region).getByText(/Import complete: unchanged 1/)).toBeInTheDocument();
+  });
+
+  it("does not enable browser import until server preview succeeds", async () => {
+    const user = userEvent.setup();
+    await renderPanel();
+    const region = screen.getByRole("region", { name: "Browser Agent Import" });
+    expect(within(region).getByRole("button", { name: /^Import/ })).toBeDisabled();
+    const input = within(region).getByLabelText("Application rows (JSON)");
+    await user.clear(input);
+    await user.type(input, "not-json");
+    await user.click(within(region).getByRole("button", { name: "Preview" }));
+    expect(within(region).getByRole("alert")).toHaveTextContent("not valid");
+    expect(api.previewBrowserImport).not.toHaveBeenCalled();
+  });
+
   it("labels every state with words, not colour alone, and flags attention", async () => {
     await renderPanel();
     const sources = screen.getByRole("region", { name: "Configured sources" });
@@ -248,6 +280,23 @@ describe("SourcesPanel", () => {
     const collectors = screen.getByRole("region", { name: "Collectors" });
     expect(within(collectors).getByText(/sources: Indeed ·/)).toBeInTheDocument();
     expect(within(collectors).getByRole("button", { name: /Rotate/ })).toBeInTheDocument();
+  });
+
+  it("shows the browser workflow without bearer-credential controls", async () => {
+    mockData({
+      collectors: [collectorRow({
+        name: "ChatGPT browser workflow",
+        token_hint: "signed-in browser",
+        scopes: ["linkedin", "indeed"],
+        unsupported_scopes: ["linkedin"],
+        state: "browser_workflow",
+      })],
+    });
+    await renderPanel();
+    const collectors = screen.getByRole("region", { name: "Collectors" });
+    expect(within(collectors).getByText(/Uses signed-in browser/)).toBeInTheDocument();
+    expect(within(collectors).queryByRole("button", { name: /Rotate/ })).not.toBeInTheDocument();
+    expect(within(collectors).queryByRole("button", { name: "Revoke" })).not.toBeInTheDocument();
   });
 
   it("asks before rotating or revoking", async () => {

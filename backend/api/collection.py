@@ -16,8 +16,10 @@ sources, runs, metrics and the collector review queue.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
-from typing import Any
+from datetime import date, datetime, timedelta
+from typing import Any, Literal
+from urllib.parse import urlsplit
+from uuid import uuid4
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -34,7 +36,9 @@ from backend.api.auth import (
 from backend.api.routes import EvidenceDetailResponse, _evidence_detail, require_database
 from backend.collection import credentials
 from backend.collection.contract import (
+    CollectorStatus,
     ObservationBatch,
+    ObservedApplication,
     RunFinish,
     RunStart,
     error_message,
@@ -204,7 +208,7 @@ class CollectorResponse(BaseModel):
     token_hint: str  # "jtc_<first 4 of token id>…" — never the secret
     scopes: list[str]
     unsupported_scopes: list[str]  # scopes kept from before a source was withdrawn
-    state: str  # pending_enrollment | active | revoked
+    state: str  # pending_enrollment | active | revoked | browser_workflow
     created_at: datetime
     enrolled_at: datetime | None
     last_used_at: datetime | None
@@ -214,7 +218,9 @@ class CollectorResponse(BaseModel):
 
 def _collector_response(collector: Collector) -> CollectorResponse:
     assert collector.id is not None
-    if collector.revoked_at is not None:
+    if collector.token_id == app_config.BROWSER_WORKFLOW_COLLECTOR_TOKEN_ID:
+        state = "browser_workflow"
+    elif collector.revoked_at is not None:
         state = "revoked"
     elif collector.token_hash:
         state = "active"
@@ -223,7 +229,11 @@ def _collector_response(collector: Collector) -> CollectorResponse:
     return CollectorResponse(
         id=collector.id,
         name=collector.name,
-        token_hint=f"{credentials.TOKEN_PREFIX}{collector.token_id[:4]}…",
+        token_hint=(
+            "signed-in browser"
+            if state == "browser_workflow"
+            else f"{credentials.TOKEN_PREFIX}{collector.token_id[:4]}…"
+        ),
         scopes=list(collector.scopes),
         unsupported_scopes=unsupported_scopes(list(collector.scopes)),
         state=state,
@@ -494,6 +504,14 @@ async def rotate_collector(
     and create a new one for supported sources. Revocation is always available."""
     db = _db(request)
     existing = db.get_collector(collector_id)
+    if (
+        existing is not None
+        and existing.token_id == app_config.BROWSER_WORKFLOW_COLLECTOR_TOKEN_ID
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="The signed-in browser workflow has no bearer credential to rotate.",
+        )
     if existing is not None and existing.revoked_at is None:
         unsupported = unsupported_scopes(list(existing.scopes))
         if unsupported:
@@ -524,6 +542,15 @@ async def rotate_collector(
 )
 async def revoke_collector(collector_id: int, request: Request) -> CollectorResponse:
     user = require_user(request)
+    existing = _db(request).get_collector(collector_id)
+    if (
+        existing is not None
+        and existing.token_id == app_config.BROWSER_WORKFLOW_COLLECTOR_TOKEN_ID
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Disable the ChatGPT scheduled task instead of revoking this workflow.",
+        )
     try:
         collector = _db(request).revoke_collector(collector_id, revoked_by=user.email)
     except LookupError as exc:
@@ -660,6 +687,177 @@ async def run_detail(run_id: int, request: Request) -> RunDetailResponse:
 @admin_router.get("/collection/metrics")
 async def metrics(request: Request) -> dict[str, Any]:
     return _db(request).collection_metrics()
+
+
+# ------------------------------------------------------------------ #
+# ChatGPT browser workflow                                            #
+# ------------------------------------------------------------------ #
+
+
+class BrowserImportItem(BaseModel):
+    """One row read from a site's own Applied/history page by ChatGPT in the user's
+    existing signed-in browser. A stable site ID and matching canonical URL are mandatory,
+    so model-generated text alone can never create an application."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_item_id: str = Field(pattern=r"^[A-Za-z0-9._:~-]{1,128}$")
+    company: str = Field(min_length=1, max_length=200)
+    role: str = Field(min_length=1, max_length=300)
+    applied_on: date | None = None
+    status: CollectorStatus = CollectorStatus.APPLIED
+    raw_status: str | None = Field(default=None, max_length=80)
+    job_url: str = Field(min_length=10, max_length=2048)
+
+
+class BrowserImportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_key: Literal["linkedin", "indeed"]
+    items: list[BrowserImportItem] = Field(
+        min_length=1, max_length=app_config.COLLECTOR_MAX_BATCH_OBSERVATIONS
+    )
+
+
+class BrowserImportPreview(BaseModel):
+    source_key: str
+    count: int
+    observations: list[ObservedApplication]
+
+
+def _browser_observations(body: BrowserImportRequest) -> list[ObservedApplication]:
+    now = utc_now()
+    allowed = app_config.BROWSER_WORKFLOW_ALLOWED_HOSTS[body.source_key]
+    observations: list[ObservedApplication] = []
+    seen: set[str] = set()
+    for item in body.items:
+        host = (urlsplit(item.job_url).hostname or "").lower()
+        if host not in allowed:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Job URL host does not match {body.source_key}.",
+            )
+        if item.source_item_id in seen:
+            raise HTTPException(status_code=422, detail="Duplicate source item ID in import.")
+        seen.add(item.source_item_id)
+        observations.append(
+            ObservedApplication(
+                source_key=body.source_key,
+                source_item_id=item.source_item_id,
+                company=item.company,
+                role=item.role,
+                applied_on=item.applied_on,
+                status=item.status,
+                raw_status=item.raw_status,
+                job_url=item.job_url,
+                proves_submission=True,
+                extraction="verified",
+                observed_at=now,
+                adapter_version=app_config.BROWSER_WORKFLOW_VERSION,
+            )
+        )
+    return observations
+
+
+async def _parse_browser_import(request: Request) -> BrowserImportRequest:
+    try:
+        return BrowserImportRequest.model_validate_json(await request.body())
+    except ValidationError as exc:
+        # The page can contain private company/role text. Report structure only, never echo
+        # submitted values through FastAPI's default validation response.
+        raise HTTPException(
+            status_code=422,
+            detail=[{"loc": list(e["loc"]), "type": e["type"]} for e in exc.errors()][:20],
+        ) from exc
+
+
+def _browser_workflow_collector(db: DataStore, created_by: str) -> Collector:
+    collector = db.get_collector_by_token_id(app_config.BROWSER_WORKFLOW_COLLECTOR_TOKEN_ID)
+    if collector is not None and collector.revoked_at is None:
+        return collector
+    if collector is not None:
+        raise HTTPException(status_code=409, detail="Browser workflow is unavailable.")
+    return db.create_collector(
+        name=app_config.BROWSER_WORKFLOW_COLLECTOR_NAME,
+        token_id=app_config.BROWSER_WORKFLOW_COLLECTOR_TOKEN_ID,
+        scopes=list(app_config.BROWSER_WORKFLOW_SOURCES),
+        created_by=created_by,
+    )
+
+
+@admin_router.post(
+    "/collection/browser-import/preview",
+    response_model=BrowserImportPreview,
+    dependencies=[Depends(sensitive_rate_limit), Depends(limit_body)],
+)
+async def preview_browser_import(
+    request: Request,
+) -> BrowserImportPreview:
+    """Validate and normalize browser-read rows without writing anything."""
+    require_user(request)
+    body = await _parse_browser_import(request)
+    observations = _browser_observations(body)
+    return BrowserImportPreview(
+        source_key=body.source_key,
+        count=len(observations),
+        observations=observations,
+    )
+
+
+@admin_router.post(
+    "/collection/browser-import",
+    dependencies=[Depends(sensitive_rate_limit), Depends(limit_body)],
+)
+async def import_from_browser(request: Request) -> dict[str, Any]:
+    """Ingest browser-read applications through the normal Phase 3 resolver.
+
+    Authentication is the owner's session cookie plus CSRF. The reserved internal collector
+    has no bearer credential and cannot be used outside this endpoint.
+    """
+    user = require_user(request)
+    body = await _parse_browser_import(request)
+    observations = _browser_observations(body)
+    db = _db(request)
+    collector = _browser_workflow_collector(db, user.email)
+    assert collector.id is not None
+    nonce = uuid4().hex
+    run_key = f"browser-{body.source_key}-{nonce}"
+    run, _ = db.start_collection_run(
+        run_key=run_key,
+        collector_id=collector.id,
+        source_key=body.source_key,
+        account_label="chatgpt",
+        collector_version=app_config.BROWSER_WORKFLOW_VERSION,
+        adapter_version=app_config.BROWSER_WORKFLOW_VERSION,
+    )
+    batch = ObservationBatch(
+        batch_key=f"batch-{nonce}",
+        sent_at=utc_now(),
+        observations=observations,
+    )
+    result = ObservationIngestor(db, collection_decider(db)).ingest_batch(run, batch)
+    assert run.id is not None
+    db.save_collection_batch(run.id, batch.batch_key, len(observations), result.to_json())
+    finished = db.finish_collection_run(
+        run_key,
+        status="succeeded",
+        items_seen=len(observations),
+        error_code=None,
+        error_message=None,
+        diagnostics={"browser_workflow": True},
+    )
+    log.info(
+        "browser_import_completed",
+        run_id=finished.id,
+        source_key=body.source_key,
+        item_count=len(observations),
+        **result.counts(),
+    )
+    return {
+        "run": _run_response(finished),
+        "results": result.to_json()["results"],
+        "counts": result.counts(),
+    }
 
 
 class CollectionReviewItem(BaseModel):

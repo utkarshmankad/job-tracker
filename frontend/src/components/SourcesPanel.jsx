@@ -39,6 +39,7 @@ const COLLECTOR_STATE = {
   pending_enrollment: "Waiting for setup",
   active: "Connected",
   revoked: "Revoked",
+  browser_workflow: "Uses signed-in browser",
 };
 const TONES = {
   green: "bg-green-50 text-green-800 dark:bg-green-900/30 dark:text-green-200",
@@ -195,6 +196,7 @@ function CollectorRow({ collector, onChanged, onSetup }) {
     }
   };
   const revoked = collector.state === "revoked";
+  const managedBrowserWorkflow = collector.state === "browser_workflow";
   const canRotate = unsupported.length === 0;
   return (
     <li className="flex flex-wrap items-start justify-between gap-2 py-3">
@@ -216,7 +218,7 @@ function CollectorRow({ collector, onChanged, onSetup }) {
           </p>
         )}
       </div>
-      {!revoked && (
+      {!revoked && !managedBrowserWorkflow && (
         <div className="flex flex-wrap items-center gap-2">
           {confirm ? (
             <>
@@ -281,6 +283,91 @@ function SetupPanel({ setup, onClose }) {
         </button>
       </div>
     </div>
+  );
+}
+
+function BrowserAgentImport({ onImported }) {
+  const [sourceKey, setSourceKey] = useState("indeed");
+  const [text, setText] = useState("[]");
+  const [preview, setPreview] = useState(null);
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const payload = () => {
+    const items = JSON.parse(text);
+    if (!Array.isArray(items)) throw new Error("Paste a JSON array of application rows.");
+    return { source_key: sourceKey, items };
+  };
+  const run = async (commit) => {
+    setBusy(true);
+    setError(null);
+    setResult(null);
+    try {
+      const body = payload();
+      if (commit) {
+        const imported = await api.importFromBrowser(body);
+        setResult(imported);
+        setPreview(null);
+        onImported();
+      } else {
+        setPreview(await api.previewBrowserImport(body));
+      }
+    } catch (e) {
+      setError(e instanceof SyntaxError ? "The pasted JSON is not valid." : (e.detail ?? e.message ?? "Import failed."));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section aria-labelledby="browser-agent-import" className={card}>
+      <h3 id="browser-agent-import" className="font-semibold text-gray-900 dark:text-gray-100">
+        Browser Agent Import
+      </h3>
+      <p className="mt-1 text-xs text-gray-500">
+        For ChatGPT using your signed-in Brave session. Paste only rows visibly read from the site's Applied page.
+        Preview validates without writing; Import uses the same duplicate-safe resolver as collection.
+      </p>
+      <label className="mt-3 block text-xs text-gray-600 dark:text-gray-400" htmlFor="browser-import-source">
+        Source
+      </label>
+      <select
+        id="browser-import-source"
+        value={sourceKey}
+        onChange={(event) => { setSourceKey(event.target.value); setPreview(null); }}
+        className="mt-1 rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm dark:border-gray-600 dark:bg-gray-800"
+      >
+        <option value="indeed">Indeed</option>
+        <option value="linkedin">LinkedIn</option>
+      </select>
+      <label className="mt-3 block text-xs text-gray-600 dark:text-gray-400" htmlFor="browser-import-json">
+        Application rows (JSON)
+      </label>
+      <textarea
+        id="browser-import-json"
+        value={text}
+        onChange={(event) => { setText(event.target.value); setPreview(null); }}
+        rows={9}
+        spellCheck="false"
+        className="mt-1 w-full rounded-md border border-gray-300 bg-white p-2 font-mono text-xs dark:border-gray-600 dark:bg-gray-800"
+        aria-describedby="browser-import-format"
+      />
+      <p id="browser-import-format" className="mt-1 text-xs text-gray-500">
+        Required: source_item_id, company, role, job_url. Optional: applied_on, status, raw_status.
+      </p>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <button type="button" className={button} disabled={busy} onClick={() => run(false)}>
+          {busy ? "Checking…" : "Preview"}
+        </button>
+        <button type="button" className={button} disabled={busy || !preview} onClick={() => run(true)}>
+          Import {preview ? preview.count : ""}
+        </button>
+      </div>
+      {preview && <p role="status" className="mt-2 text-sm text-green-700">Validated {preview.count} row(s). Ready to import.</p>}
+      {result && <p role="status" className="mt-2 text-sm text-green-700">Import complete: {Object.entries(result.counts).map(([key, value]) => `${key} ${value}`).join(", ")}.</p>}
+      {error && <p role="alert" className="mt-2 text-sm text-red-600">{error}</p>}
+    </section>
   );
 }
 
@@ -470,6 +557,8 @@ export default function SourcesPanel() {
               <Metric label="Failed items" value={processed.errors} />
             </dl>
           </section>
+
+          <BrowserAgentImport onImported={load} />
 
           <section aria-labelledby="collection-sources" className={card}>
             <h3 id="collection-sources" className="mb-2 font-semibold text-gray-900 dark:text-gray-100">Configured sources</h3>
