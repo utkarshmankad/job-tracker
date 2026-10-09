@@ -17,6 +17,8 @@ from backend.api.auth import (
     require_user,
     validate_auth_config,
 )
+from backend.api.collection import admin_router as collection_admin_router
+from backend.api.collection import collector_router
 from backend.api.routes import public_router, require_database, router
 from backend.config import (
     API_HOST,
@@ -189,6 +191,15 @@ app.include_router(
     prefix="/api/v1",
     dependencies=[Depends(require_user), Depends(require_database)],
 )
+# Collection admin endpoints: same session + CSRF protection as every user endpoint.
+app.include_router(
+    collection_admin_router,
+    prefix="/api/v1",
+    dependencies=[Depends(require_user), Depends(require_database)],
+)
+# The local collector authenticates with its own scoped bearer credential, per endpoint
+# (backend/api/collection.py); no session cookie is accepted or needed there.
+app.include_router(collector_router, prefix="/api/v1")
 
 
 if __name__ == "__main__":

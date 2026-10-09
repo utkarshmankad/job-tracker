@@ -412,6 +412,7 @@ class CollectionRunStatus(enum.StrEnum):
 
 
 class ObservationDecision(enum.StrEnum):
+    PENDING = "pending"  # stored; the decision step has not completed (resumable)
     CREATED = "created"  # a new application was created from this observation
     LINKED = "linked"  # attached to an existing application
     REVIEW = "review"  # sent to the evidence review queue

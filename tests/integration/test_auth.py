@@ -25,6 +25,8 @@ from backend.api.auth import (
     IdentityProviderUnavailable,
     require_user,
 )
+from backend.api.collection import admin_router as collection_admin_router
+from backend.api.collection import collector_router
 from backend.api.routes import public_router
 from backend.api.routes import router as protected_router
 from backend.db.data_store import ApplicationFilter, DataStore
@@ -145,7 +147,7 @@ def test_every_mounted_endpoint_is_public_or_protected() -> None:
         for path, operations in app.openapi()["paths"].items()
         for method in operations
     }
-    assert mounted == _PUBLIC | set(_PROTECTED)
+    assert mounted == _PUBLIC | set(_PROTECTED) | set(_COLLECTOR) | _COLLECTOR_ENROLL
 
 
 def test_auth_config_exposes_only_public_values(env) -> None:
@@ -162,12 +164,22 @@ def test_auth_config_exposes_only_public_values(env) -> None:
 # Every protected route rejects anonymous callers                      #
 # ------------------------------------------------------------------ #
 
-_PROTECTED = sorted(
-    (method, _BASE + re.sub(r"\{[^}]+\}", "1", route.path))
-    for route in protected_router.routes
-    if isinstance(route, APIRoute)
-    for method in route.methods
-)
+
+def _routes(router) -> list[tuple[str, str]]:
+    return sorted(
+        (method, _BASE + re.sub(r"\{[^}]+\}", "1", route.path))
+        for route in router.routes
+        if isinstance(route, APIRoute)
+        for method in route.methods
+    )
+
+
+# Session-cookie (+ CSRF) protected: the main API and the collection admin endpoints.
+_PROTECTED = sorted(_routes(protected_router) + _routes(collection_admin_router))
+# The local collector's own endpoints: scoped bearer credential, never the session cookie.
+# Enrollment is authenticated by a single-use setup code instead (tested separately).
+_COLLECTOR_ENROLL = {("POST", f"{_BASE}/collector/enroll")}
+_COLLECTOR = [r for r in _routes(collector_router) if r not in _COLLECTOR_ENROLL]
 
 
 def test_protected_route_inventory_covers_required_areas() -> None:
@@ -195,6 +207,25 @@ def test_protected_route_requires_authentication(env, method: str, path: str) ->
     assert resp.status_code == 401, (method, path, resp.text)
     assert resp.json() == {"detail": "Authentication required.", "code": "not_authenticated"}
     assert resp.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.parametrize(("method", "path"), _COLLECTOR)
+def test_collector_route_requires_bearer_credential(env, method: str, path: str) -> None:
+    """No collector endpoint accepts an anonymous caller — or a signed-in browser session."""
+    resp = env.client.request(method, path, json={})
+    assert resp.status_code == 401, (method, path, resp.text)
+    assert resp.json()["code"] == "collector_unauthorized"
+
+
+def test_collector_route_inventory() -> None:
+    assert {path for _, path in _COLLECTOR} == {
+        f"{_BASE}/collector/me",
+        f"{_BASE}/collector/runs",
+        f"{_BASE}/collector/runs/1",
+        f"{_BASE}/collector/runs/1/observations",
+        f"{_BASE}/collector/runs/1/finish",
+        f"{_BASE}/collector/metrics",
+    }
 
 
 def test_anonymous_mutation_changes_nothing(env) -> None:
