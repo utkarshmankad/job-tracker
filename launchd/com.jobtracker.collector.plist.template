@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Scheduled read-only collection (docs/collector-operations.md, "Scheduling on macOS").
+  NOT installed or enabled by anything in this repository. Copy it to
+  ~/Library/LaunchAgents/, replace the {PLACEHOLDERS}, then `launchctl load` it yourself.
+  Runs once a day at 10:30 local time; scripts/collect.py holds a lock, so a scheduled run
+  never overlaps a manual one. It runs in your user session because the signed-in browser
+  profile is yours; it opens a visible browser window while it works.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.jobtracker.collector</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{PYTHON}</string><string>scripts/collect.py</string><string>run-all</string>
+    </array>
+    <key>WorkingDirectory</key><string>{PROJECT_ROOT}</string>
+    <key>StartCalendarInterval</key>
+    <dict><key>Hour</key><integer>10</integer><key>Minute</key><integer>30</integer></dict>
+    <key>RunAtLoad</key><false/>
+    <key>KeepAlive</key><false/>
+    <key>StandardOutPath</key><string>{HOME}/Library/Logs/JobTrackerCollector/collector.log</string>
+    <key>StandardErrorPath</key><string>{HOME}/Library/Logs/JobTrackerCollector/collector_error.log</string>
+    <key>EnvironmentVariables</key>
+    <dict><key>PYTHONPATH</key><string>{PROJECT_ROOT}</string></dict>
+</dict>
+</plist>
