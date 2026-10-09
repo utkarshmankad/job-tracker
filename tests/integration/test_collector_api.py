@@ -40,7 +40,7 @@ def env(tmp_path):
         )
 
 
-def _create(env, scopes=("linkedin",), name="laptop") -> dict:
+def _create(env, scopes=("indeed",), name="laptop") -> dict:
     resp = env.client.post(
         f"{_BASE}/collectors", json={"name": name, "scopes": list(scopes)}, headers=env.csrf
     )
@@ -56,7 +56,7 @@ def _bearer(credential: str) -> dict:
     return {"Authorization": f"Bearer {credential}"}
 
 
-def _collector(env, scopes=("linkedin",)) -> SimpleNamespace:
+def _collector(env, scopes=("indeed",)) -> SimpleNamespace:
     setup = _create(env, scopes)
     enrolled = _enroll(env, setup["setup_code"])
     assert enrolled.status_code == 200, enrolled.text
@@ -70,18 +70,18 @@ def _collector(env, scopes=("linkedin",)) -> SimpleNamespace:
 
 def _obs(**overrides) -> dict:
     base = {
-        "source_key": "linkedin",
-        "source_item_id": "li-1001",
+        "source_key": "indeed",
+        "source_item_id": "0f1e2d3c4b5a6978",
         "company": "Quuxwidget Labs",
         "role": "Platform Engineer",
         "applied_on": (datetime.now(UTC) - timedelta(days=3)).date().isoformat(),
         "status": "applied",
         "raw_status": "Applied",
-        "job_url": "https://www.linkedin.com/jobs/view/3912345678/?trk=public&refId=abc",
+        "job_url": "https://www.indeed.com/viewjob?jk=0f1e2d3c4b5a6978&trk=public&refId=abc",
         "proves_submission": True,
         "extraction": "verified",
         "observed_at": datetime.now(UTC).isoformat(),
-        "adapter_version": "linkedin/0.1.0",
+        "adapter_version": "indeed/0.2.0",
     }
     return {**base, **overrides}
 
@@ -94,7 +94,7 @@ def _batch(observations: list[dict], key: str | None = None, sent_at: datetime |
     }
 
 
-def _start(env, collector, source="linkedin", run_key=None):
+def _start(env, collector, source="indeed", run_key=None):
     return env.collector.post(
         f"{_BASE}/collector/runs",
         json={
@@ -154,9 +154,7 @@ def test_enroll_is_rate_limited(env) -> None:
 
 def test_admin_endpoints_require_session_and_csrf(env) -> None:
     assert (
-        env.client.post(
-            f"{_BASE}/collectors", json={"name": "x", "scopes": ["linkedin"]}
-        ).status_code
+        env.client.post(f"{_BASE}/collectors", json={"name": "x", "scopes": ["indeed"]}).status_code
         == 403
     )
     anonymous = TestClient(app)
@@ -182,7 +180,7 @@ def test_bearer_failures_are_indistinguishable(env) -> None:
     assert len(bodies) == 1
     assert env.collector.get(f"{_BASE}/collector/me", headers=collector.headers).json()[
         "scopes"
-    ] == ["linkedin"]
+    ] == ["indeed"]
 
 
 def test_rotation_and_revocation(env) -> None:
@@ -229,9 +227,9 @@ def test_collector_credential_cannot_reach_user_endpoints(env, method, path) -> 
 
 
 def test_scope_is_enforced(env) -> None:
-    collector = _collector(env, scopes=("linkedin",))
-    assert _start(env, collector, source="naukri").status_code == 403
-    assert _start(env, collector, source="linkedin").status_code == 200
+    collector = _collector(env, scopes=("indeed",))
+    assert _start(env, collector, source="employer-acme").status_code == 403
+    assert _start(env, collector, source="indeed").status_code == 200
     assert _start(env, collector, source="not-a-source").status_code == 422
 
 
@@ -265,7 +263,7 @@ def test_batch_is_idempotent_and_replay_safe(env) -> None:
     changed = _submit(
         env, collector, run_key, _batch([_obs(status="rejected", raw_status="Not selected")])
     )
-    assert changed.json()["results"][0]["item_key"] == "id:li-1001"
+    assert changed.json()["results"][0]["item_key"] == "id:0f1e2d3c4b5a6978"
     assert len(env.db.collection_metrics()["items_by_source"]) == 1
 
 
@@ -333,9 +331,9 @@ def test_payload_limits(env) -> None:
 
 
 def test_observation_for_another_source_in_a_run_is_rejected(env) -> None:
-    collector = _collector(env, scopes=("linkedin", "naukri"))
+    collector = _collector(env, scopes=("indeed", "employer-acme"))
     run_key = _start(env, collector).json()["run_key"]
-    result = _submit(env, collector, run_key, _batch([_obs(source_key="naukri")])).json()
+    result = _submit(env, collector, run_key, _batch([_obs(source_key="employer-acme")])).json()
     assert result["results"][0] == {
         "index": 0,
         "outcome": "error",
@@ -399,7 +397,7 @@ def test_admin_views(env) -> None:
         and detail["observations"][0]["company"] == "Quuxwidget Labs"
     )
     metrics = env.client.get(f"{_BASE}/collection/metrics").json()
-    assert metrics["items_by_source"] == {"linkedin": 2}
+    assert metrics["items_by_source"] == {"indeed": 2}
     assert (
         env.collector.get(f"{_BASE}/collector/metrics", headers=collector.headers).status_code
         == 200
@@ -470,3 +468,88 @@ def test_bogus_secrets_cannot_exhaust_a_real_collectors_budget(env, monkeypatch)
     # ...but the genuine collector, from another address, is not.
     monkeypatch.setattr(collection_api, "client_address", lambda _request: "10.9.9.9")
     assert env.collector.get(f"{_BASE}/collector/me", headers=collector.headers).status_code == 200
+
+
+# ------------------------------------------------------------------ #
+# Source readiness: only supported sources may be put in scope         #
+# ------------------------------------------------------------------ #
+
+
+def _legacy_collector(env, scopes: list[str]) -> SimpleNamespace:
+    """A collector created before a source was withdrawn (written directly, as the API no
+    longer allows it), enrolled through the normal endpoint."""
+    from backend.collection import credentials
+
+    collector = env.db.create_collector(
+        name="legacy", token_id=credentials.new_token_id(), scopes=scopes, created_by=None
+    )
+    code = credentials.new_enrollment_code()
+    env.db.add_collector_enrollment(
+        collector.id, credentials.code_hash(code), datetime.now(UTC) + timedelta(minutes=5)
+    )
+    enrolled = _enroll(env, code)
+    assert enrolled.status_code == 200, enrolled.text
+    return SimpleNamespace(
+        id=collector.id,
+        credential=enrolled.json()["credential"],
+        headers=_bearer(enrolled.json()["credential"]),
+    )
+
+
+def test_source_catalog_marks_only_indeed_supported(env) -> None:
+    catalog = {e["key"]: e for e in env.client.get(f"{_BASE}/collection/source-catalog").json()}
+    assert set(catalog) == {"indeed", "linkedin", "naukri", "instahyre", "careernet"}
+    assert catalog["indeed"] == {
+        "key": "indeed",
+        "label": "Indeed",
+        "supported": True,
+        "live_verified": "2026-10-09",
+        "reason": None,
+    }
+    for key in ("linkedin", "naukri", "instahyre", "careernet"):
+        assert catalog[key]["supported"] is False and catalog[key]["reason"]
+        assert catalog[key]["live_verified"] is None
+
+
+@pytest.mark.parametrize(
+    "scopes",
+    [["linkedin"], ["naukri"], ["instahyre"], ["careernet"], ["indeed", "linkedin"]],
+)
+def test_unsupported_scopes_are_rejected_on_create(env, scopes: list[str]) -> None:
+    resp = env.client.post(
+        f"{_BASE}/collectors", json={"name": "x", "scopes": scopes}, headers=env.csrf
+    )
+    assert resp.status_code == 422
+    assert "unsupported source" in resp.text
+    assert env.client.get(f"{_BASE}/collectors").json() == []
+
+
+def test_supported_and_employer_scopes_are_accepted(env) -> None:
+    created = _create(env, scopes=("indeed", "employer-acme"))
+    assert created["collector"]["scopes"] == ["employer-acme", "indeed"]
+    assert created["collector"]["unsupported_scopes"] == []
+
+
+def test_legacy_unsupported_scope_stays_listed_but_cannot_rotate_or_run(env) -> None:
+    legacy = _legacy_collector(env, ["indeed", "linkedin"])
+    listed = env.client.get(f"{_BASE}/collectors").json()
+    assert [(c["scopes"], c["unsupported_scopes"]) for c in listed] == [
+        (["indeed", "linkedin"], ["linkedin"])
+    ]
+    rotated = env.client.post(f"{_BASE}/collectors/{legacy.id}/rotate", headers=env.csrf)
+    assert rotated.status_code == 409 and "Revoke it" in rotated.json()["detail"]
+    # The refused rotation changed nothing: the credential still works for Indeed ...
+    assert _start(env, legacy, source="indeed").status_code == 200
+    # ... but the withdrawn source cannot start a run although it is still in scope.
+    assert _start(env, legacy, source="linkedin").status_code == 403
+    revoked = env.client.post(f"{_BASE}/collectors/{legacy.id}/revoke", headers=env.csrf)
+    assert revoked.status_code == 200 and revoked.json()["state"] == "revoked"
+    assert _start(env, legacy, source="indeed").status_code == 401
+
+
+def test_supported_collector_rotation_is_unaffected(env) -> None:
+    collector = _collector(env)
+    rotated = env.client.post(f"{_BASE}/collectors/{collector.id}/rotate", headers=env.csrf)
+    assert rotated.status_code == 200
+    assert rotated.json()["collector"]["scopes"] == ["indeed"]
+    assert _start(env, collector).status_code == 401  # old credential stopped at once

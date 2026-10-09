@@ -125,15 +125,16 @@ The downgrade refuses while any observation exists, and is safe to re-run.
 |---|---|---|
 | `POST /collector/enroll` | setup code | exchange a code for the credential (once) |
 | `GET /collector/me` | collector | identity and scopes |
-| `POST /collector/runs` | collector | start or resume a run (`run_key`, `source_key`, `account_label`, versions) |
+| `POST /collector/runs` | collector | start or resume a run (`run_key`, `source_key`, `account_label`, versions); refused (403) for a source in scope that is no longer supported |
 | `POST /collector/runs/{run_key}/observations` | collector | idempotent batch (≤100 observations, ≤256 KB) |
 | `POST /collector/runs/{run_key}/finish` | collector | final status, items seen, fixed error code, counters |
 | `GET /collector/runs/{run_key}` | collector | run status |
 | `GET /collector/metrics` | collector | own aggregate counts |
 | `GET /collectors` | session | list collectors |
-| `POST /collectors` | session + CSRF | create; returns setup code and command once |
-| `POST /collectors/{id}/rotate` | session + CSRF | invalidate secret; new setup code |
+| `POST /collectors` | session + CSRF | create; returns setup code and command once; unsupported scopes rejected (422) |
+| `POST /collectors/{id}/rotate` | session + CSRF | invalidate secret; new setup code; refused (409) while the scope holds an unsupported source — revoke instead |
 | `POST /collectors/{id}/revoke` | session + CSRF | permanent revocation |
+| `GET /collection/source-catalog` | session | which sources may be in a collector's scope, with the reason for each unsupported one |
 | `GET /collection/sources` | session | sources with last attempt/success/attention |
 | `GET /collection/runs[?source_key]` | session | recent runs |
 | `GET /collection/runs/{id}` | session | run with its observations and decisions |

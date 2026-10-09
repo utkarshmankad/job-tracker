@@ -11,6 +11,7 @@ vi.mock("../api/client", () => ({
     getCollectionMetrics: vi.fn(),
     listCollectors: vi.fn(),
     listCollectionReview: vi.fn(),
+    getCollectionSourceCatalog: vi.fn(),
     getCollectionRun: vi.fn(),
     createCollector: vi.fn(),
     rotateCollector: vi.fn(),
@@ -20,6 +21,24 @@ vi.mock("../api/client", () => ({
     dismissEvidence: vi.fn(),
   },
 }));
+
+const catalog = [
+  { key: "indeed", label: "Indeed", supported: true, live_verified: "2026-10-09", reason: null },
+  { key: "linkedin", label: "LinkedIn", supported: false, live_verified: null,
+    reason: "The new Job Tracker layout lacks safe stable row boundaries." },
+  { key: "naukri", label: "Naukri", supported: false, live_verified: null,
+    reason: "Unsupported until item identity, applied dates and complete inner-scroll collection can be established." },
+  { key: "instahyre", label: "Instahyre", supported: false, live_verified: null,
+    reason: "Instahyre has no application-history page." },
+  { key: "careernet", label: "CareerNet", supported: false, live_verified: null,
+    reason: "CareerNet's candidate history page has not been located." },
+];
+
+const collectorRow = (extra = {}) => ({
+  id: 1, name: "My laptop", token_hint: "jtc_ab12…", scopes: ["indeed"], unsupported_scopes: [], state: "active",
+  created_at: "2026-10-01T00:00:00Z", enrolled_at: "2026-10-01T00:00:00Z", last_used_at: "2026-10-09T08:00:00Z",
+  rotated_at: null, revoked_at: null, ...extra,
+});
 
 const source = (id, key, status, extra = {}) => ({
   id,
@@ -89,14 +108,9 @@ function mockData({ sources, runs, collectors, review } = {}) {
     items_by_decision: {},
     items_by_source: {},
   });
-  api.listCollectors.mockResolvedValue(
-    collectors ?? [
-      { id: 1, name: "My laptop", token_hint: "jtc_ab12…", scopes: ["linkedin", "naukri"], state: "active",
-        created_at: "2026-10-01T00:00:00Z", enrolled_at: "2026-10-01T00:00:00Z", last_used_at: "2026-10-09T08:00:00Z",
-        rotated_at: null, revoked_at: null },
-    ],
-  );
+  api.listCollectors.mockResolvedValue(collectors ?? [collectorRow()]);
   api.listCollectionReview.mockResolvedValue(review ?? [reviewItem]);
+  api.getCollectionSourceCatalog.mockResolvedValue(catalog);
 }
 
 async function renderPanel() {
@@ -163,8 +177,6 @@ describe("SourcesPanel", () => {
     const form = screen.getByRole("form", { name: "Set up a collector" });
     await user.clear(within(form).getByLabelText("Collector name"));
     await user.type(within(form).getByLabelText("Collector name"), "Desk");
-    await user.click(within(form).getByLabelText("LinkedIn"));
-    await user.click(within(form).getByLabelText("Indeed"));
     await user.click(within(form).getByRole("button", { name: "Create setup command" }));
     expect(api.createCollector).toHaveBeenCalledWith("Desk", ["indeed"]);
     const panel = await screen.findByRole("status");
@@ -178,10 +190,51 @@ describe("SourcesPanel", () => {
     await renderPanel();
     await user.click(screen.getByRole("button", { name: "Set up a collector" }));
     const form = screen.getByRole("form", { name: "Set up a collector" });
-    await user.click(within(form).getByLabelText("LinkedIn"));
+    await user.click(within(form).getByRole("checkbox", { name: /^Indeed/ }));
     await user.click(within(form).getByRole("button", { name: "Create setup command" }));
     expect(within(form).getByRole("alert")).toHaveTextContent("Choose at least one source.");
     expect(api.createCollector).not.toHaveBeenCalled();
+  });
+
+  it("defaults a new collector to Indeed only and disables unsupported sources with a reason", async () => {
+    const user = userEvent.setup();
+    await renderPanel();
+    await user.click(screen.getByRole("button", { name: "Set up a collector" }));
+    const form = screen.getByRole("form", { name: "Set up a collector" });
+    const indeed = within(form).getByRole("checkbox", { name: /^Indeed/ });
+    expect(indeed).toBeChecked();
+    expect(indeed).toBeEnabled();
+    expect(within(form).getByText("Live verified")).toBeInTheDocument();
+    for (const entry of catalog.filter((c) => !c.supported)) {
+      const box = within(form).getByRole("checkbox", { name: new RegExp(`^${entry.label}`) });
+      expect(box).toBeDisabled();
+      expect(box).not.toBeChecked();
+      expect(box).toHaveAccessibleDescription(entry.reason);
+    }
+    expect(within(form).getAllByText("Unsupported")).toHaveLength(4);
+    // A disabled source cannot be added, even by clicking it.
+    await user.click(within(form).getByRole("checkbox", { name: /^LinkedIn/ }));
+    await user.click(within(form).getByRole("button", { name: "Create setup command" }));
+    expect(api.createCollector).toHaveBeenCalledWith("My laptop", ["indeed"]);
+  });
+
+  it("keeps showing a collector with a now-unsupported scope, without offering rotation", async () => {
+    mockData({
+      collectors: [collectorRow({ scopes: ["indeed", "linkedin"], unsupported_scopes: ["linkedin"] })],
+    });
+    await renderPanel();
+    const collectors = screen.getByRole("region", { name: "Collectors" });
+    expect(within(collectors).getByText(/sources: Indeed, LinkedIn \(unsupported\)/)).toBeInTheDocument();
+    expect(within(collectors).getByText(/no longer supported/)).toBeInTheDocument();
+    expect(within(collectors).queryByRole("button", { name: /Rotate/ })).not.toBeInTheDocument();
+    expect(within(collectors).getByRole("button", { name: "Revoke" })).toBeInTheDocument();
+  });
+
+  it("offers rotation for a collector with only supported sources", async () => {
+    await renderPanel();
+    const collectors = screen.getByRole("region", { name: "Collectors" });
+    expect(within(collectors).getByText(/sources: Indeed ·/)).toBeInTheDocument();
+    expect(within(collectors).getByRole("button", { name: /Rotate/ })).toBeInTheDocument();
   });
 
   it("asks before rotating or revoking", async () => {

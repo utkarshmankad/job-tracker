@@ -41,6 +41,7 @@ from backend.collection.contract import (
     is_valid_source_key,
 )
 from backend.collection.ingest import ObservationIngestor, RunNotOpenError
+from backend.collection.readiness import SOURCE_READINESS, is_supported_scope, unsupported_scopes
 from backend.collection.resolution import collection_decider
 from backend.db.collection_store import CollectionConflictError
 from backend.db.data_store import DataStore
@@ -118,6 +119,16 @@ def _require_scope(collector: Collector, source_key: str) -> None:
         raise HTTPException(status_code=403, detail="Source is not in this collector's scope.")
 
 
+def _require_supported(collector: Collector, source_key: str) -> None:
+    """A collector created before a source was withdrawn may still hold it in scope; it can
+    no longer start runs for it (backend/collection/readiness.py)."""
+    if not is_supported_scope(source_key):
+        log.warning(
+            "collector_source_unsupported", collector_id=collector.id, source_key=source_key
+        )
+        raise HTTPException(status_code=403, detail="This source is not supported for collection.")
+
+
 async def limit_body(request: Request) -> None:
     """Reject oversized payloads before they are parsed (Content-Length and actual size)."""
     declared = request.headers.get("content-length")
@@ -192,6 +203,7 @@ class CollectorResponse(BaseModel):
     name: str
     token_hint: str  # "jtc_<first 4 of token id>…" — never the secret
     scopes: list[str]
+    unsupported_scopes: list[str]  # scopes kept from before a source was withdrawn
     state: str  # pending_enrollment | active | revoked
     created_at: datetime
     enrolled_at: datetime | None
@@ -213,6 +225,7 @@ def _collector_response(collector: Collector) -> CollectorResponse:
         name=collector.name,
         token_hint=f"{credentials.TOKEN_PREFIX}{collector.token_id[:4]}…",
         scopes=list(collector.scopes),
+        unsupported_scopes=unsupported_scopes(list(collector.scopes)),
         state=state,
         created_at=collector.created_at,
         enrolled_at=collector.enrolled_at,
@@ -284,6 +297,7 @@ async def start_run(
 ) -> RunResponse:
     """Start (or, with the same run_key, resume) a collection run for one source."""
     _require_scope(collector, body.source_key)
+    _require_supported(collector, body.source_key)
     db = _db(request)
     assert collector.id is not None
     try:
@@ -412,6 +426,9 @@ class CollectorCreate(BaseModel):
         bad = [s for s in value if not is_valid_source_key(s)]
         if bad:
             raise ValueError("unknown source key")
+        unsupported = unsupported_scopes(value)
+        if unsupported:
+            raise ValueError(f"unsupported source: {', '.join(sorted(set(unsupported)))}")
         return sorted(set(value))
 
 
@@ -471,8 +488,22 @@ async def create_collector(
 async def rotate_collector(
     collector_id: int, request: Request, response: Response
 ) -> CollectorSetupResponse:
-    """Invalidate the current credential immediately and issue a new setup code."""
+    """Invalidate the current credential immediately and issue a new setup code.
+
+    A collector whose scope still holds a now-unsupported source is not re-issued: revoke it
+    and create a new one for supported sources. Revocation is always available."""
     db = _db(request)
+    existing = db.get_collector(collector_id)
+    if existing is not None and existing.revoked_at is None:
+        unsupported = unsupported_scopes(list(existing.scopes))
+        if unsupported:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This collector includes unsupported sources "
+                    f"({', '.join(unsupported)}). Revoke it and set up a new collector."
+                ),
+            )
     try:
         collector = db.rotate_collector(collector_id, token_id=credentials.new_token_id())
     except LookupError as exc:
@@ -499,6 +530,29 @@ async def revoke_collector(collector_id: int, request: Request) -> CollectorResp
         raise HTTPException(status_code=404, detail="Collector not found.") from exc
     log.info("collector_revoked", collector_id=collector.id)
     return _collector_response(collector)
+
+
+class SourceCatalogEntry(BaseModel):
+    key: str
+    label: str
+    supported: bool
+    live_verified: str | None
+    reason: str | None
+
+
+@admin_router.get("/collection/source-catalog", response_model=list[SourceCatalogEntry])
+async def source_catalog() -> list[SourceCatalogEntry]:
+    """Which sources a collector may be scoped to, and why the others may not."""
+    return [
+        SourceCatalogEntry(
+            key=e.key,
+            label=e.label,
+            supported=e.supported,
+            live_verified=e.live_verified,
+            reason=e.reason,
+        )
+        for e in SOURCE_READINESS.values()
+    ]
 
 
 class SourceResponse(BaseModel):

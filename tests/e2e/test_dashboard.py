@@ -304,7 +304,7 @@ def test_merge_dialog_fits_mobile_viewport(page: Page, frontend_server: str, api
 
 def _collect(http: requests.Session, api: str, base: str) -> None:
     """Enroll a collector through the real API and submit one run like the local agent."""
-    setup = http.post(api + "/collectors", json={"name": "E2E laptop", "scopes": ["naukri"]})
+    setup = http.post(api + "/collectors", json={"name": "E2E laptop", "scopes": ["indeed"]})
     setup.raise_for_status()
     enrolled = requests.post(api + "/collector/enroll", json={"code": setup.json()["setup_code"]})
     enrolled.raise_for_status()
@@ -315,26 +315,26 @@ def _collect(http: requests.Session, api: str, base: str) -> None:
         headers=bearer,
         json={
             "run_key": run_key,
-            "source_key": "naukri",
+            "source_key": "indeed",
             "collector_version": "0.1.0",
-            "adapter_version": "naukri/0.1.0",
+            "adapter_version": "indeed/0.2.0",
         },
     )
     started.raise_for_status()
     now = datetime.now(UTC)
     observation = {
-        "source_key": "naukri",
-        "source_item_id": "e2e-1",
+        "source_key": "indeed",
+        "source_item_id": "e2e0000000000001",
         "company": "E2E Collected Co",
         "role": "Collected Role",
         "applied_on": (now - timedelta(days=2)).date().isoformat(),
         "status": "applied",
-        "raw_status": "Application Sent",
+        "raw_status": "Applied",
         "job_url": None,
         "proves_submission": True,
         "extraction": "unverified",
         "observed_at": now.isoformat(),
-        "adapter_version": "naukri/0.1.0",
+        "adapter_version": "indeed/0.2.0",
     }
     batch = {
         "batch_key": uuid.uuid4().hex,
@@ -358,7 +358,7 @@ def test_sources_page_shows_collection_state(page: Page, frontend_server: str, a
     _open_tab(page, "Sources")
     expect(page.get_by_role("heading", level=1)).to_have_text("Collection Sources")
     sources = page.get_by_role("region", name="Configured sources")
-    expect(sources).to_contain_text("Naukri")
+    expect(sources).to_contain_text("Indeed")
     expect(sources.get_by_text("Signed out")).to_be_visible()
     expect(page.get_by_role("alert").filter(has_text="Needs your attention")).to_contain_text(
         "not signed in"
@@ -374,6 +374,14 @@ def test_sources_page_shows_collection_state(page: Page, frontend_server: str, a
     # Only a short hint is ever shown — never a full credential.
     expect(collectors).not_to_contain_text(re.compile(r"jtc_[0-9a-f]{16}\."))
     expect(collectors).to_contain_text("jtc_")
+    # A new collector defaults to Indeed; unsupported sources cannot be chosen.
+    collectors.get_by_role("button", name="Set up a collector").click()
+    form = page.get_by_role("form", name="Set up a collector")
+    expect(form.get_by_role("checkbox", name=re.compile("^Indeed"))).to_be_checked()
+    for label in ("LinkedIn", "Naukri", "Instahyre", "CareerNet"):
+        box = form.get_by_role("checkbox", name=re.compile(f"^{label}"))
+        expect(box).to_be_disabled()
+        expect(box).not_to_be_checked()
 
 
 def test_sources_page_fits_mobile(page: Page, frontend_server: str) -> None:
