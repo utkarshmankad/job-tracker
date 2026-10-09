@@ -4,7 +4,7 @@ import enum
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import JSON, Column, Float, String, UniqueConstraint
+from sqlalchemy import JSON, Column, Float, Index, String, UniqueConstraint
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.types import DateTime, TypeDecorator
 from sqlmodel import Field, Relationship, SQLModel
@@ -49,6 +49,8 @@ class ApplicationStatus(str, enum.Enum):
 
 
 class Application(SQLModel, table=True):
+    __table_args__ = (Index("ix_application_identity", "normalized_company", "normalized_role"),)
+
     id: int | None = Field(default=None, primary_key=True)
     company: str | None = None
     role: str | None = None
@@ -244,12 +246,20 @@ class EvidenceSource(enum.StrEnum):
 
 class EvidenceStatus(enum.StrEnum):
     PENDING = "pending"  # recorded, not yet classified
+    PROCESSING = "processing"  # claimed by one worker (guards concurrent resolution)
     LINKED = "linked"  # attached to an existing application
     CREATED_APPLICATION = "created_application"  # an acknowledgement that created one
     NEEDS_REVIEW = "needs_review"  # job-related but identity unclear
     INFORMATIONAL = "informational"  # relevant but not about an application (prospects)
     IGNORED = "ignored"  # not job mail / suppressed; stored minimally
+    DISMISSED = "dismissed"  # a person marked it irrelevant
+    DEFERRED = "deferred"  # a person postponed the review decision
     ERROR = "error"
+
+
+class DecisionSource(enum.StrEnum):
+    RESOLVER = "resolver"
+    HUMAN = "human"  # always takes precedence over later automated decisions
 
 
 class LinkMethod(enum.StrEnum):
@@ -298,3 +308,18 @@ class Evidence(SQLModel, table=True):
     link_confidence: float | None = Field(default=None, sa_type=Float)
     created_at: datetime = Field(default_factory=utc_now, sa_type=UTCDateTime)
     updated_at: datetime = Field(default_factory=utc_now, sa_type=UTCDateTime)
+    # Revision 0003 — identity signals derived from the fields above (runtime-maintained)
+    sender_address: str | None = Field(default=None, index=True)
+    sender_domain: str | None = Field(default=None, index=True)
+    canonical_job_url: str | None = Field(default=None, index=True)
+    external_job_id: str | None = Field(default=None, index=True)
+    # Revision 0003 — resolver audit trail and decision ownership
+    resolver_version: str | None = None
+    resolver_decision: str | None = Field(default=None, index=True)
+    resolver_confidence: float | None = Field(default=None, sa_type=Float)
+    resolver_result: dict[str, Any] | None = Field(
+        default=None, sa_column=Column("resolver_result", JSON, nullable=True)
+    )
+    decided_by: str | None = None  # DecisionSource; "human" decisions are never overwritten
+    decided_at: datetime | None = Field(default=None, sa_type=UTCDateTime)
+    deferred_until: datetime | None = Field(default=None, sa_type=UTCDateTime)

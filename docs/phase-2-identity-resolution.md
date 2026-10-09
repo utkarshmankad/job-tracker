@@ -118,7 +118,10 @@ rows; the loser simply receives the winner's row.
    → `follow_up`;
 3. otherwise → `acknowledgement`.
 
-**Application resolution** (`IdentityResolver`, first rule that decides wins):
+> **Superseded by resolver v2 (§11).** The first-rule-wins table below describes the
+> Prompt 4 rule set (recorded as resolver version `1` on evidence decided by it).
+
+**Application resolution** (`IdentityResolver` v1, first rule that decides wins):
 
 | # | Rule | Link method | Confidence |
 |---|---|---|---|
@@ -242,3 +245,133 @@ maintenance refills the derived identity columns.
 * **Lookback window.** Identity matching still considers only applications from the last
   180 days (`IDENTITY_LOOKBACK_DAYS`), as in Phase 1; older applications receiving mail will
   surface as `needs_review` rather than being linked.
+
+## 11. Resolver v2 — deterministic scoring with review
+
+Implemented in `backend/engine/identity_resolver.py` (`RESOLVER_VERSION = "2.0.0"`), weights
+and thresholds in `backend/config.py`. Precision over recall: when in doubt, a person decides.
+No LLM is involved; results depend only on the evidence and stored data, ties break on
+application ID, so the same input gives the same output in any process.
+
+### 11.1 Normalization (`backend/engine/normalization.py`, shared by everything)
+
+| Value | Rule |
+|---|---|
+| company | NFKC, case-fold, accents stripped, `&`→`and`, punctuation removed; **trailing** legal designators only (`pvt ltd`, `private limited`, `inc`, `llc`, `corp`, `gmbh`, `sa`, …), never emptying the name. "Technologies", "Labs", "Group" stay — they distinguish companies. |
+| role | Same folding; unambiguous abbreviations expanded (`sr`→senior, `jr`→junior, `mgr`→manager, `engg`→engineering). |
+| subject | `Re:`/`Fwd:`/`FW[2]:`/full-width colon/`[EXTERNAL]` prefixes stripped; forwarded detection. |
+| sender | Address folded; registrable domain (two-label suffixes like `co.in` respected); job-board/ATS/scheduler domains and free-mail domains never count as employer identity; shared mailboxes (`noreply`, `careers`, `talent`, …) never count as a personal sender. |
+| job URL | https, host without `www.`, no fragment/trailing slash, tracking parameters (`utm_*`, `trk`, `refId`, `gh_src`, …) removed, remaining parameters sorted. |
+| external job ID | Folded and trimmed; extracted from LinkedIn, Naukri, Indeed, Greenhouse (`/jobs/N`, `gh_jid`), Lever and Workday URLs together with its source. |
+| thread / source | Thread IDs trimmed and lower-cased; portal names mapped to one source key (`Instahire`→`instahyre`, Greenhouse/Lever/Workday/Direct→`company_portal`). |
+
+The evidence fingerprint keeps the frozen `evidence-v1` rules so stored fingerprints remain
+valid. Stored application identity columns are recomputed at startup when the rules change.
+
+### 11.2 Candidate generation (bounded, indexed)
+
+In order: same external job ID → same canonical URL → application owning the Gmail thread →
+applications this personal sender's evidence is linked to → applications evidence from this
+employer domain is linked to → same normalized company (index, 50 most recent) → same first
+company word (index range, 25). At most `RESOLVER_MAX_CANDIDATES` (25). No full-table scan;
+a test fails the resolver if it calls the unfiltered application listing.
+
+### 11.3 Signals and weights
+
+| Signal | Weight | Kind |
+|---|---:|---|
+| same Gmail thread | +100 | strong |
+| same external job ID, same source | +100 | strong |
+| same canonical job URL | +90 | strong |
+| sender previously linked by a person | +60 | strong |
+| sender previously linked by the resolver | +40 | |
+| same external job ID, different source | +25 | |
+| known employer domain | +25 | |
+| company exact / similar | +35 / +15 | |
+| role exact / similar | +35 / +20 | |
+| sole active application at the company (status or follow-up mail) | +30 | |
+| date within −14…+180 days of applied date | +10 | |
+| same source | +5 | |
+| external job ID conflict (same source) | −100 | strong conflict |
+| company conflict | −60 | |
+| role conflict | −45 | |
+| date outside window | −40 | |
+| acknowledgement for a closed application | −30 | |
+| job URL differs | −20 | |
+| company/role mismatch inside the same thread | −10 | thread beats extraction noise |
+
+### 11.4 Decision rules and thresholds
+
+1. Nothing identifying → **review** (`insufficient_identity`).
+2. Strong identifiers on two different applications → **review**
+   (`conflicting_strong_identifiers`).
+3. Best candidate's strong identifier contradicted by a job-ID conflict → **review**.
+4. Text favours one application while a strong identifier names another → **review**
+   (`strong_identifier_disagrees_with_text`).
+5. Best score ≥ **80** and lead ≥ **25** → **linked** (confidence = score/120, capped at 1).
+6. Best score ≥ **40** → **review** (`ambiguous_candidates` or `below_auto_link_threshold`).
+7. A strong identifier matched but scored lower → **review**.
+8. A *credible* acknowledgement (not forwarded, company known, not free-mail, and either a
+   confident portal classification or an employer domain) → **new application**, unless
+   some candidate has the same company and role (`possible_reapplication` → review).
+9. Otherwise → **review** (`follow_up_without_application`,
+   `status_update_without_application`, `not_a_credible_new_application`).
+
+Non-job mail and prospects are recorded with outcome **ignored**.
+
+### 11.5 Persistence, human precedence, idempotency, concurrency
+
+* Revision `0003_resolver_audit` stores `resolver_version`, `resolver_decision`,
+  `resolver_confidence`, `resolver_result` (JSON: outcome, reason, explanation, confidence,
+  selected application, message kind, top-5 candidates with per-signal weights, thresholds —
+  no addresses, subjects, snippets or extracted text), `decided_by`, `decided_at`,
+  `deferred_until`, plus derived evidence signals (`sender_address`, `sender_domain`,
+  `canonical_job_url`, `external_job_id`) and an `(normalized_company, normalized_role)` index.
+* `decided_by = human` is set by manual link/unlink, accept, create-from-review, dismiss and
+  defer. Automated processing never changes such evidence: `record_resolution` and
+  `claim_evidence` refuse it, and replays report `human_decision_retained`.
+* Workers claim evidence atomically (`processing`, expires after 600 s); the processed-message
+  ledger write is an upsert. Replaying messages leaves applications, status history,
+  milestones and evidence unchanged.
+* A linked follow-up may advance status (only through `StatusUpdater._advance_status`) or, for a
+  repeated interview stage, add one milestone event per message; it never creates an
+  application.
+
+### 11.6 Review API
+
+| Method & path | Purpose |
+|---|---|
+| `GET /evidence/review[?include_deferred=true]` | items needing review with resolution, candidates, signals and candidate application summaries |
+| `GET /evidence/{id}` | one item with its resolution |
+| `POST /evidence/{id}/accept` `{application_id}` | confirm one of the resolver's candidates (409 otherwise); applies its status signal |
+| `POST /evidence/{id}/create-application` `{company?, role?, source_portal?}` | new application from reviewed evidence |
+| `POST /evidence/{id}/dismiss` | irrelevant |
+| `POST /evidence/{id}/defer` `{until?}` | postpone; leaves the default queue |
+| `GET /evidence/metrics` | process counters + persistent totals by decision/status/owner |
+
+All actions are idempotent, authenticated, CSRF-protected and rate limited; dismiss/defer of
+linked evidence returns 409 (unlink first).
+
+### 11.7 Duplicate detector
+
+`DuplicateDetector.find_candidate_pairs` uses the resolver's `compare_applications` (same
+identifiers, normalization and weights; suggestion threshold 70) and never merges.
+`find_duplicate` was removed — it was unused since Prompt 4 and duplicated matching logic.
+
+### 11.8 Observability
+
+In-process counters (`backend/engine/resolver_metrics.py`): evidence_processed, auto_linked,
+new_application_created, sent_to_review, ignored, duplicate_skipped,
+human_decision_retained, concurrent_claim_skipped, resolver_errors. Logs carry evidence ID,
+outcome, reason, confidence, candidate count and version — never snippets, tokens, full
+sender addresses or raw evidence.
+
+### 11.9 Known limits
+
+* Company aliases that share no words (e.g. a brand vs. its legal entity) are not matched;
+  such mail goes to review.
+* Thread reuse by a recruiter for a different role would link to the thread's application;
+  text conflicts inside a thread only cost −10 by design.
+* Job-ID extraction covers the URL formats listed above; other portals rely on URL equality.
+* Accepting a candidate after an automated link moved elsewhere does not revert status
+  changes the earlier link caused.

@@ -38,7 +38,8 @@ from backend.db.models import (
     Prospect,
     utc_now,
 )
-from backend.engine.identity_resolver import classify_message_kind
+from backend.engine.identity_resolver import ResolutionResult, classify_message_kind
+from backend.engine.resolver_metrics import metrics
 from backend.engine.status_updater import StatusUpdater
 from backend.parser.email_parser import EmailParser, RawEmail, extract_sender_domain
 from backend.poller.error_retry import AuthError, StaleHistoryError, gmail_retry
@@ -279,6 +280,7 @@ class GmailPoller:
 
             for msg_id, thread_id in message_ids:
                 if self._db.is_processed(msg_id):
+                    metrics.increment("duplicate_skipped")
                     continue
 
                 outcome = self._process_message(msg_id, suppress_rules)
@@ -383,21 +385,24 @@ class GmailPoller:
                             "prospect_category": prospect.category,
                         },
                     )
-                    if stored.application_id is not None:
-                        self._db.link_evidence(
-                            evidence_id,
-                            stored.application_id,
-                            LinkMethod.MANUAL.value,
-                            1.0,
-                            status=EvidenceStatus.INFORMATIONAL.value,
-                        )
-                    else:
-                        self._db.update_evidence_processing(
-                            evidence_id, EvidenceStatus.INFORMATIONAL.value
-                        )
+                    linked = stored.application_id is not None
+                    self._db.record_resolution(
+                        evidence_id,
+                        resolution=ResolutionResult.ignored("recruiting_prospect").to_json(),
+                        status=EvidenceStatus.INFORMATIONAL.value,
+                        application_id=stored.application_id,
+                        link_method=LinkMethod.MANUAL.value if linked else None,
+                        link_confidence=1.0 if linked else None,
+                    )
+                    metrics.increment("ignored")
                     self._db.mark_processed(msg_id, "prospect")
                     return "prospect" if created else "suppressed"
-                self._db.update_evidence_processing(evidence_id, EvidenceStatus.IGNORED.value)
+                self._db.record_resolution(
+                    evidence_id,
+                    resolution=ResolutionResult.ignored("not_job_related").to_json(),
+                    status=EvidenceStatus.IGNORED.value,
+                )
+                metrics.increment("ignored")
                 self._db.mark_processed(msg_id, "suppressed")
                 return "suppressed"
 
@@ -450,7 +455,12 @@ class GmailPoller:
                 return "not_found"
             raise  # let the outer handler deal with auth/rate errors
         except Exception as exc:
-            log.error("email_processing_error_skipping", message_id=msg_id, error=str(exc))
+            log.error(
+                "email_processing_error_skipping",
+                evidence_id=evidence_id,
+                error_type=type(exc).__name__,
+            )
+            metrics.increment("resolver_errors")
             if evidence_id is not None:
                 try:
                     self._db.update_evidence_processing(

@@ -225,9 +225,21 @@ def test_body_text_fetched_when_company_is_none(poller, db):
     poller.service = service
     poller.poll_once()
 
-    # Application was created (company may or may not be refined depending on NER)
-    _, total = db.get_applications(ApplicationFilter())
-    assert total == 1
+    full_fetches = [
+        c
+        for c in service.users.return_value.messages.return_value.get.call_args_list
+        if c.kwargs.get("format") == "full"
+    ]
+    assert full_fetches  # the body was read to refine company/role
+    # Resolver v2 only creates an application when a company is known; otherwise the
+    # acknowledgement waits for review rather than becoming a company-less record.
+    apps, total = db.get_applications(ApplicationFilter())
+    evidence = db.get_evidence_by_external_id("gmail", "msg-nobody")
+    if total == 1:
+        assert apps[0].company
+        assert evidence.processing_status == "created_application"
+    else:
+        assert evidence.processing_status == "needs_review"
 
 
 def test_build_raw_email_with_bad_date_falls_back_to_utcnow(poller):

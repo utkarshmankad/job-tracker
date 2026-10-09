@@ -40,6 +40,7 @@ from backend.db.data_store import (
     ApplicationFilter,
     ApplicationNotFoundError,
     DataStore,
+    EvidenceConflictError,
     EvidenceFilter,
     EvidenceNotFoundError,
     is_application_stale,
@@ -49,6 +50,7 @@ from backend.db.models import (
     ApplicationEvent,
     ApplicationEventType,
     ApplicationStatus,
+    DecisionSource,
     Evidence,
     EvidenceSource,
     EvidenceStatus,
@@ -61,6 +63,7 @@ from backend.db.models import (
 from backend.diagnostics import DiagnosticRunner
 from backend.engine.duplicate_detector import DuplicateDetector
 from backend.engine.insights_engine import InsightsEngine
+from backend.engine.resolver_metrics import metrics as resolver_metrics
 from backend.engine.status_updater import StatusUpdater
 
 log = structlog.get_logger(__name__)
@@ -1563,6 +1566,10 @@ class EvidenceResponse(BaseModel):
     link_confidence: float | None
     summary: EvidenceSummary
     updated_at: datetime
+    decided_by: str | None = None
+    resolver_decision: str | None = None
+    resolver_confidence: float | None = None
+    deferred_until: datetime | None = None
 
 
 class EvidenceListResponse(BaseModel):
@@ -1609,6 +1616,10 @@ def _evidence_response(evidence: Evidence) -> EvidenceResponse:
             status_signal=_str_or_none(parser.get("status_signal")),
         ),
         updated_at=evidence.updated_at,
+        decided_by=evidence.decided_by,
+        resolver_decision=evidence.resolver_decision,
+        resolver_confidence=evidence.resolver_confidence,
+        deferred_until=evidence.deferred_until,
     )
 
 
@@ -1658,6 +1669,122 @@ async def evidence_counts(request: Request) -> EvidenceCountsResponse:
     return EvidenceCountsResponse(**db.count_evidence())
 
 
+class CandidateApplicationSummary(BaseModel):
+    id: int
+    company: str | None
+    role: str | None
+    current_status: ApplicationStatus
+    source_portal: str
+    applied_date: datetime
+
+
+class ResolutionCandidate(BaseModel):
+    application_id: int
+    score: int
+    signals: dict[str, int]
+    application: CandidateApplicationSummary | None
+
+
+class ResolutionResponse(BaseModel):
+    version: str | None
+    outcome: str | None
+    reason: str | None
+    explanation: str | None
+    confidence: float | None
+    selected_application_id: int | None
+    message_kind: str | None
+    candidates: list[ResolutionCandidate]
+
+
+class EvidenceDetailResponse(EvidenceResponse):
+    resolution: ResolutionResponse | None
+
+
+class ReviewListResponse(BaseModel):
+    items: list[EvidenceDetailResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+def _evidence_detail(db: DataStore, evidence: Evidence) -> EvidenceDetailResponse:
+    base = _evidence_response(evidence).model_dump()
+    result = evidence.resolver_result if isinstance(evidence.resolver_result, dict) else None
+    if result is None:
+        return EvidenceDetailResponse(**base, resolution=None)
+    raw_candidates = [c for c in result.get("candidates") or [] if isinstance(c, dict)]
+    apps = {
+        a.id: a
+        for a in db.get_applications_by_ids(
+            [int(c["application_id"]) for c in raw_candidates if "application_id" in c]
+        )
+    }
+    candidates = []
+    for c in raw_candidates:
+        app = apps.get(int(c.get("application_id", 0)))
+        candidates.append(
+            ResolutionCandidate(
+                application_id=int(c.get("application_id", 0)),
+                score=int(c.get("score", 0)),
+                signals={str(k): int(v) for k, v in (c.get("signals") or {}).items()},
+                application=CandidateApplicationSummary(
+                    id=app.id,
+                    company=app.company,
+                    role=app.role,
+                    current_status=app.current_status,
+                    source_portal=app.source_portal,
+                    applied_date=app.applied_date,
+                )
+                if app is not None and app.id is not None
+                else None,
+            )
+        )
+    return EvidenceDetailResponse(
+        **base,
+        resolution=ResolutionResponse(
+            version=_str_or_none(result.get("version")),
+            outcome=_str_or_none(result.get("outcome")),
+            reason=_str_or_none(result.get("reason")),
+            explanation=_str_or_none(result.get("explanation")),
+            confidence=result.get("confidence")
+            if isinstance(result.get("confidence"), int | float)
+            else None,
+            selected_application_id=result.get("selected_application_id")
+            if isinstance(result.get("selected_application_id"), int)
+            else None,
+            message_kind=_str_or_none(result.get("message_kind")),
+            candidates=candidates,
+        ),
+    )
+
+
+@router.get("/evidence/review", response_model=ReviewListResponse)
+async def evidence_review_queue(
+    request: Request,
+    include_deferred: bool = False,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+) -> ReviewListResponse:
+    """Evidence waiting for a person, with the resolver's candidates and explanation."""
+    db: DataStore = request.app.state.db
+    statuses = [EvidenceStatus.NEEDS_REVIEW.value]
+    if include_deferred:
+        statuses.append(EvidenceStatus.DEFERRED.value)
+    items, total = db.list_evidence(
+        EvidenceFilter(statuses=tuple(statuses), page=page, page_size=page_size)
+    )
+    return ReviewListResponse(
+        items=[_evidence_detail(db, e) for e in items], total=total, page=page, page_size=page_size
+    )
+
+
+@router.get("/evidence/metrics")
+async def evidence_metrics(request: Request) -> dict:
+    """Counters since process start plus persistent totals — counts only, no content."""
+    db: DataStore = request.app.state.db
+    return {"process": resolver_metrics.snapshot(), "totals": db.evidence_decision_counts()}
+
+
 @router.get("/applications/{id}/evidence", response_model=list[EvidenceResponse])
 async def application_evidence(id: int, request: Request) -> list[EvidenceResponse]:
     db: DataStore = request.app.state.db
@@ -1676,7 +1803,13 @@ async def link_evidence(
     status change; use the application status update for that."""
     db: DataStore = request.app.state.db
     try:
-        evidence = db.link_evidence(evidence_id, body.application_id, LinkMethod.MANUAL.value, 1.0)
+        evidence = db.link_evidence(
+            evidence_id,
+            body.application_id,
+            LinkMethod.MANUAL.value,
+            1.0,
+            decided_by=DecisionSource.HUMAN.value,
+        )
     except (EvidenceNotFoundError, ApplicationNotFoundError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     _invalidate_applications_cache()
@@ -1699,6 +1832,135 @@ async def unlink_evidence(evidence_id: int, request: Request) -> EvidenceRespons
     _invalidate_applications_cache()
     log.info("evidence_unlinked_manually", evidence_id=evidence_id)
     return _evidence_response(evidence)
+
+
+class EvidenceAcceptRequest(BaseModel):
+    application_id: int = Field(gt=0)
+
+
+class EvidenceCreateApplicationRequest(BaseModel):
+    company: str | None = Field(default=None, max_length=200)
+    role: str | None = Field(default=None, max_length=200)
+    source_portal: str | None = Field(default=None, max_length=100)
+
+
+class EvidenceDeferRequest(BaseModel):
+    until: datetime | None = None
+
+
+def _get_evidence_or_404(db: DataStore, evidence_id: int) -> Evidence:
+    evidence = db.get_evidence(evidence_id)
+    if evidence is None:
+        raise HTTPException(status_code=404, detail=f"Evidence {evidence_id} not found")
+    return evidence
+
+
+@router.get("/evidence/{evidence_id}", response_model=EvidenceDetailResponse)
+async def evidence_detail(evidence_id: int, request: Request) -> EvidenceDetailResponse:
+    db: DataStore = request.app.state.db
+    return _evidence_detail(db, _get_evidence_or_404(db, evidence_id))
+
+
+@router.post(
+    "/evidence/{evidence_id}/accept", response_model=EvidenceDetailResponse, dependencies=_SENSITIVE
+)
+async def accept_evidence_candidate(
+    evidence_id: int, body: EvidenceAcceptRequest, request: Request
+) -> EvidenceDetailResponse:
+    """Confirm one of the resolver's candidates. A human decision: later automated runs
+    never change it. Applies the evidence's status signal, if any. Idempotent."""
+    db: DataStore = request.app.state.db
+    updater: StatusUpdater = request.app.state.updater
+    evidence = _get_evidence_or_404(db, evidence_id)
+    result = evidence.resolver_result if isinstance(evidence.resolver_result, dict) else {}
+    candidate_ids = {
+        c.get("application_id") for c in result.get("candidates") or [] if isinstance(c, dict)
+    }
+    already = evidence.application_id == body.application_id
+    if body.application_id not in candidate_ids and not already:
+        raise HTTPException(
+            status_code=409,
+            detail="Application is not one of the resolver's candidates; use /link instead",
+        )
+    try:
+        updater.accept_candidate(evidence_id, body.application_id)
+    except (EvidenceNotFoundError, ApplicationNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _invalidate_applications_cache()
+    log.info("evidence_review_accepted", evidence_id=evidence_id)
+    return _evidence_detail(db, _get_evidence_or_404(db, evidence_id))
+
+
+@router.post(
+    "/evidence/{evidence_id}/create-application",
+    response_model=ApplicationResponse,
+    dependencies=_SENSITIVE,
+)
+async def create_application_from_evidence(
+    evidence_id: int, body: EvidenceCreateApplicationRequest, request: Request
+) -> ApplicationResponse:
+    """A person decides the evidence is a new application. Idempotent."""
+    db: DataStore = request.app.state.db
+    updater: StatusUpdater = request.app.state.updater
+    _get_evidence_or_404(db, evidence_id)
+    try:
+        created = updater.create_from_review(
+            evidence_id, company=body.company, role=body.role, source_portal=body.source_portal
+        )
+    except EvidenceConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _invalidate_applications_cache()
+    log.info("evidence_review_created_application", evidence_id=evidence_id)
+    return _to_response(created)
+
+
+@router.post(
+    "/evidence/{evidence_id}/dismiss",
+    response_model=EvidenceDetailResponse,
+    dependencies=_SENSITIVE,
+)
+async def dismiss_evidence(evidence_id: int, request: Request) -> EvidenceDetailResponse:
+    """Mark evidence irrelevant (a human decision). Idempotent; linked evidence must be
+    unlinked first."""
+    db: DataStore = request.app.state.db
+    evidence = _get_evidence_or_404(db, evidence_id)
+    if evidence.processing_status != EvidenceStatus.DISMISSED.value:
+        try:
+            db.apply_human_review(
+                evidence_id,
+                status=EvidenceStatus.DISMISSED.value,
+                review_reason="dismissed_by_reviewer",
+            )
+        except EvidenceConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _evidence_detail(db, _get_evidence_or_404(db, evidence_id))
+
+
+@router.post(
+    "/evidence/{evidence_id}/defer", response_model=EvidenceDetailResponse, dependencies=_SENSITIVE
+)
+async def defer_evidence(
+    evidence_id: int, body: EvidenceDeferRequest, request: Request
+) -> EvidenceDetailResponse:
+    """Postpone the decision (a human decision; stays out of the default review queue)."""
+    db: DataStore = request.app.state.db
+    evidence = _get_evidence_or_404(db, evidence_id)
+    if not (
+        evidence.processing_status == EvidenceStatus.DEFERRED.value
+        and evidence.deferred_until == body.until
+    ):
+        try:
+            db.apply_human_review(
+                evidence_id,
+                status=EvidenceStatus.DEFERRED.value,
+                review_reason=evidence.review_reason,
+                deferred_until=body.until,
+            )
+        except EvidenceConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _evidence_detail(db, _get_evidence_or_404(db, evidence_id))
 
 
 # ------------------------------------------------------------------ #

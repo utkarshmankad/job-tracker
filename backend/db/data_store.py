@@ -12,10 +12,16 @@ from typing import Any
 
 import structlog
 from sqlalchemy import ColumnElement, Table, event, func, inspect, or_, update
+from sqlalchemy import select as core_select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlmodel import Session, SQLModel, col, create_engine, select
 
-from backend.config import DB_PATH, EVIDENCE_SNIPPET_MAX_CHARS, STALE_DAYS_THRESHOLD
+from backend.config import (
+    DB_PATH,
+    EVIDENCE_SNIPPET_MAX_CHARS,
+    RESOLVER_PROCESSING_CLAIM_TTL_SECONDS,
+    STALE_DAYS_THRESHOLD,
+)
 from backend.db import schema
 from backend.db.models import (
     Application,
@@ -23,6 +29,7 @@ from backend.db.models import (
     ApplicationEventType,
     ApplicationStatus,
     ApplicationThreadId,
+    DecisionSource,
     Evidence,
     EvidenceSource,
     EvidenceStatus,
@@ -40,9 +47,13 @@ from backend.db.schema import SchemaPolicy, SchemaStatus
 from backend.engine.normalization import (
     canonical_job_url,
     evidence_fingerprint,
+    external_job_id_from_url,
     normalize_company,
+    normalize_email_address,
     normalize_role,
     normalize_subject,
+    registrable_domain,
+    sender_domain,
 )
 
 
@@ -73,6 +84,7 @@ class EvidenceFilter:
     source: str | None = None
     evidence_type: str | None = None
     processing_status: str | None = None
+    statuses: tuple[str, ...] | None = None  # any of these processing statuses
     date_from: datetime | None = None  # on occurred_at
     date_to: datetime | None = None
     application_id: int | None = None
@@ -93,6 +105,27 @@ class EvidenceNotFoundError(LookupError):
 
 class ApplicationNotFoundError(LookupError):
     pass
+
+
+class EvidenceConflictError(RuntimeError):
+    """The requested evidence action contradicts its current state (e.g. it is linked)."""
+
+
+def _evidence_identity(
+    sender: str | None, metadata: dict[str, Any] | None
+) -> dict[str, str | None]:
+    """Derived evidence identity columns (revision 0003) from sender and parser metadata."""
+    parser = (metadata or {}).get("parser")
+    job_url = parser.get("job_url") if isinstance(parser, dict) else None
+    url = canonical_job_url(job_url) if isinstance(job_url, str) else None
+    extracted = external_job_id_from_url(url)
+    domain = sender_domain(sender)
+    return {
+        "sender_address": normalize_email_address(sender) or None,
+        "sender_domain": registrable_domain(domain) or None if domain else None,
+        "canonical_job_url": url,
+        "external_job_id": extracted[1] if extracted else None,
+    }
 
 
 def _check_choice(value: str | None, allowed: type[enum.StrEnum], field_name: str) -> None:
@@ -233,6 +266,9 @@ class DataStore:
         app.normalized_company = normalize_company(app.company) or None
         app.normalized_role = normalize_role(app.role) or None
         app.canonical_job_url = canonical_job_url(app.job_url)
+        if app.external_job_id is None:
+            extracted = external_job_id_from_url(app.canonical_job_url)
+            app.external_job_id = extracted[1] if extracted else None
 
     def upsert_application(self, app: Application) -> Application:
         with Session(self._engine, expire_on_commit=False) as session:
@@ -741,6 +777,9 @@ class DataStore:
             evidence.snippet = evidence.snippet[:EVIDENCE_SNIPPET_MAX_CHARS]
         if evidence.normalized_subject is None:
             evidence.normalized_subject = normalize_subject(evidence.subject)
+        for key, value in _evidence_identity(evidence.sender, evidence.raw_metadata).items():
+            if getattr(evidence, key) is None:
+                setattr(evidence, key, value)
         if not evidence.content_fingerprint:
             evidence.content_fingerprint = evidence_fingerprint(
                 evidence_type=evidence.evidence_type,
@@ -798,6 +837,8 @@ class DataStore:
             conditions.append(col(Evidence.evidence_type) == filters.evidence_type)
         if filters.processing_status:
             conditions.append(col(Evidence.processing_status) == filters.processing_status)
+        elif filters.statuses:
+            conditions.append(col(Evidence.processing_status).in_(filters.statuses))
         elif not filters.include_ignored:
             conditions.append(col(Evidence.processing_status) != EvidenceStatus.IGNORED.value)
         if filters.date_from:
@@ -856,9 +897,11 @@ class DataStore:
         method: str,
         confidence: float,
         status: str = EvidenceStatus.LINKED.value,
+        decided_by: str = DecisionSource.RESOLVER.value,
     ) -> Evidence:
         """Attach evidence to an application in one transaction, refreshing
-        last_evidence_at on both the previous and the new application."""
+        last_evidence_at on both the previous and the new application. An automated link
+        never replaces a human decision."""
         _check_choice(method, LinkMethod, "link_method")
         _check_choice(status, EvidenceStatus, "processing_status")
         if not 0 <= confidence <= 1:
@@ -869,12 +912,19 @@ class DataStore:
                 raise EvidenceNotFoundError(f"Evidence {evidence_id} not found")
             if session.get(Application, application_id) is None:
                 raise ApplicationNotFoundError(f"Application {application_id} not found")
+            if (
+                decided_by != DecisionSource.HUMAN.value
+                and evidence.decided_by == DecisionSource.HUMAN.value
+            ):
+                return evidence
             previous = evidence.application_id
             evidence.application_id = application_id
             evidence.link_method = method
             evidence.link_confidence = confidence
             evidence.processing_status = status
             evidence.review_reason = None
+            evidence.decided_by = decided_by
+            evidence.decided_at = utc_now()
             evidence.updated_at = utc_now()
             session.add(evidence)
             session.flush()
@@ -897,6 +947,8 @@ class DataStore:
             evidence.link_confidence = None
             evidence.processing_status = EvidenceStatus.NEEDS_REVIEW.value
             evidence.review_reason = reason
+            evidence.decided_by = DecisionSource.HUMAN.value
+            evidence.decided_at = utc_now()
             evidence.updated_at = utc_now()
             session.add(evidence)
             session.flush()
@@ -953,6 +1005,8 @@ class DataStore:
             evidence.snippet = snippet[:EVIDENCE_SNIPPET_MAX_CHARS] if snippet else None
             if metadata:
                 evidence.raw_metadata = {**(evidence.raw_metadata or {}), **metadata}
+            for key, value in _evidence_identity(sender, evidence.raw_metadata).items():
+                setattr(evidence, key, value)
             evidence.updated_at = utc_now()
             session.add(evidence)
             session.commit()
@@ -1000,32 +1054,393 @@ class DataStore:
             evidence.link_confidence = None
             evidence.processing_status = EvidenceStatus.NEEDS_REVIEW.value
             evidence.review_reason = reason
+            evidence.decided_by = None  # the decision pointed at a record that no longer exists
+            evidence.decided_at = None
             evidence.updated_at = utc_now()
             session.add(evidence)
 
     def _backfill_identity_fields(self) -> None:
-        """Fill derived identity columns where NULL (rows from before Phase 2, or written
-        by an older release). Core columns only, so legacy enum data cannot break startup."""
+        """Keep derived identity columns in step with the current normalization rules.
+
+        Applications: normalized company/role and canonical URL are recomputed for every row
+        and written only where they changed (rows from an older release or an older rule
+        set); external_job_id is filled from the job URL only where it is NULL. Evidence:
+        sender and job-URL signals are filled where NULL. Core columns only, so legacy enum
+        data cannot break startup.
+        """
         app_table = _table(Application)
         c = app_table.c
-        needs = or_(
-            (c.normalized_company.is_(None)) & (c.company.is_not(None)),
-            (c.normalized_role.is_(None)) & (c.role.is_not(None)),
-            (c.canonical_job_url.is_(None)) & (c.job_url.is_not(None)),
-        )
+        ev_table = _table(Evidence)
+        e = ev_table.c
         with Session(self._engine) as session:
-            rows = session.execute(select(c.id, c.company, c.role, c.job_url).where(needs)).all()
-            for app_id, company, role, job_url in rows:
-                session.execute(
-                    update(app_table)
-                    .where(c.id == app_id)
-                    .values(
-                        normalized_company=normalize_company(company) or None,
-                        normalized_role=normalize_role(role) or None,
-                        canonical_job_url=canonical_job_url(job_url),
+            rows = session.execute(
+                core_select(
+                    c.id,
+                    c.company,
+                    c.role,
+                    c.job_url,
+                    c.normalized_company,
+                    c.normalized_role,
+                    c.canonical_job_url,
+                    c.external_job_id,
+                )
+            ).all()
+            for row in rows:
+                url = canonical_job_url(row.job_url)
+                wanted: dict[str, Any] = {
+                    "normalized_company": normalize_company(row.company) or None,
+                    "normalized_role": normalize_role(row.role) or None,
+                    "canonical_job_url": url,
+                }
+                if row.external_job_id is None:
+                    extracted = external_job_id_from_url(url)
+                    if extracted:
+                        wanted["external_job_id"] = extracted[1]
+                changed = {k: v for k, v in wanted.items() if getattr(row, k) != v}
+                if changed:
+                    session.execute(update(app_table).where(c.id == row.id).values(**changed))
+
+            pending = session.execute(
+                select(e.id, e.sender, e.raw_metadata).where(
+                    or_(
+                        (e.sender_address.is_(None)) & (e.sender.is_not(None)),
+                        e.canonical_job_url.is_(None),
                     )
                 )
+            ).all()
+            for ev_id, sender, metadata in pending:
+                derived = _evidence_identity(sender, metadata)
+                values = {k: v for k, v in derived.items() if v is not None}
+                if values:
+                    session.execute(update(ev_table).where(e.id == ev_id).values(**values))
             session.commit()
+
+    # ------------------------------------------------------------------ #
+    # Identity resolution support (Phase 2, revision 0003)                 #
+    # ------------------------------------------------------------------ #
+
+    def get_applications_by_ids(self, ids: list[int]) -> list[Application]:
+        if not ids:
+            return []
+        with Session(self._engine, expire_on_commit=False) as session:
+            return list(session.exec(select(Application).where(col(Application.id).in_(ids))).all())
+
+    def find_applications_by_external_job_id(self, job_id: str, limit: int) -> list[Application]:
+        with Session(self._engine, expire_on_commit=False) as session:
+            return list(
+                session.exec(
+                    select(Application)
+                    .where(Application.external_job_id == job_id)
+                    .order_by(col(Application.id))
+                    .limit(limit)
+                ).all()
+            )
+
+    def find_applications_by_canonical_url(self, url: str, limit: int) -> list[Application]:
+        with Session(self._engine, expire_on_commit=False) as session:
+            return list(
+                session.exec(
+                    select(Application)
+                    .where(Application.canonical_job_url == url)
+                    .order_by(col(Application.id))
+                    .limit(limit)
+                ).all()
+            )
+
+    def find_applications_by_company(
+        self, normalized_company: str, since: datetime | None, limit: int
+    ) -> list[Application]:
+        """Exact normalized company (indexed), most recent first."""
+        conditions = [col(Application.normalized_company) == normalized_company]
+        if since is not None:
+            conditions.append(col(Application.applied_date) >= since)
+        with Session(self._engine, expire_on_commit=False) as session:
+            return list(
+                session.exec(
+                    select(Application)
+                    .where(*conditions)
+                    .order_by(col(Application.applied_date).desc(), col(Application.id))
+                    .limit(limit)
+                ).all()
+            )
+
+    def find_applications_by_company_prefix(
+        self, first_token: str, since: datetime | None, limit: int
+    ) -> list[Application]:
+        """Companies whose normalized name starts with the same first word — an index range
+        scan, used to surface near-variants ("acme" / "acme india") for scoring."""
+        conditions = [
+            col(Application.normalized_company) >= first_token,
+            col(Application.normalized_company) < first_token + "\U0010ffff",
+        ]
+        if since is not None:
+            conditions.append(col(Application.applied_date) >= since)
+        with Session(self._engine, expire_on_commit=False) as session:
+            return list(
+                session.exec(
+                    select(Application)
+                    .where(*conditions)
+                    .order_by(col(Application.applied_date).desc(), col(Application.id))
+                    .limit(limit)
+                ).all()
+            )
+
+    def find_linked_applications_by_sender(
+        self, sender_address: str, limit: int
+    ) -> list[tuple[int, str | None]]:
+        """(application_id, decided_by) for evidence from this sender that is linked."""
+        with Session(self._engine) as session:
+            rows = session.exec(
+                select(Evidence.application_id, Evidence.decided_by)
+                .where(
+                    Evidence.sender_address == sender_address,
+                    col(Evidence.application_id).is_not(None),
+                )
+                .distinct()
+                .limit(limit)
+            ).all()
+        return [(int(app_id), decided_by) for app_id, decided_by in rows if app_id is not None]
+
+    def find_linked_applications_by_sender_domain(self, domain: str, limit: int) -> list[int]:
+        with Session(self._engine) as session:
+            rows = session.exec(
+                select(Evidence.application_id)
+                .where(
+                    Evidence.sender_domain == domain,
+                    col(Evidence.application_id).is_not(None),
+                )
+                .distinct()
+                .limit(limit)
+            ).all()
+        return [int(app_id) for app_id in rows if app_id is not None]
+
+    def evidence_identities_for_applications(
+        self, ids: list[int]
+    ) -> dict[int, dict[str, set[str]]]:
+        """Per application: sender domains, and sender addresses split by decision owner,
+        seen on its linked evidence."""
+        result: dict[int, dict[str, set[str]]] = {
+            i: {"domains": set(), "senders_human": set(), "senders_resolver": set()} for i in ids
+        }
+        if not ids:
+            return result
+        e = _table(Evidence).c
+        with Session(self._engine) as session:
+            rows = session.execute(
+                select(e.application_id, e.sender_domain, e.sender_address, e.decided_by).where(
+                    e.application_id.in_(ids)
+                )
+            ).all()
+        for app_id, domain, address, decided_by in rows:
+            if app_id is None:
+                continue
+            bucket = result[int(app_id)]
+            if domain:
+                bucket["domains"].add(domain)
+            if address:
+                key = (
+                    "senders_human"
+                    if decided_by == DecisionSource.HUMAN.value
+                    else "senders_resolver"
+                )
+                bucket[key].add(address)
+        return result
+
+    def claim_evidence(self, evidence_id: int) -> bool:
+        """Atomically mark evidence as being processed. Returns False when another worker
+        holds a fresh claim or a person owns the decision. A claim older than
+        RESOLVER_PROCESSING_CLAIM_TTL_SECONDS (a crashed worker) can be taken over."""
+        ev_table = _table(Evidence)
+        e = ev_table.c
+        now = utc_now()
+        stale = now - timedelta(seconds=RESOLVER_PROCESSING_CLAIM_TTL_SECONDS)
+        statement = (
+            update(ev_table)
+            .where(
+                e.id == evidence_id,
+                or_(e.decided_by.is_(None), e.decided_by != DecisionSource.HUMAN.value),
+                or_(
+                    e.processing_status != EvidenceStatus.PROCESSING.value,
+                    e.updated_at < stale,
+                ),
+            )
+            .values(processing_status=EvidenceStatus.PROCESSING.value, updated_at=now)
+        )
+        with Session(self._engine) as session:
+            claimed = session.execute(statement).rowcount == 1  # type: ignore[attr-defined]
+            session.commit()
+        return claimed
+
+    def record_resolution(
+        self,
+        evidence_id: int,
+        *,
+        resolution: dict[str, Any],
+        status: str,
+        review_reason: str | None = None,
+        application_id: int | None = None,
+        link_method: str | None = None,
+        link_confidence: float | None = None,
+    ) -> Evidence | None:
+        """Persist an automated decision and its link in one transaction. Returns None —
+        and changes nothing — when a person already owns the decision."""
+        _check_choice(status, EvidenceStatus, "processing_status")
+        _check_choice(link_method, LinkMethod, "link_method")
+        with Session(self._engine, expire_on_commit=False) as session:
+            evidence = session.get(Evidence, evidence_id)
+            if evidence is None:
+                raise EvidenceNotFoundError(f"Evidence {evidence_id} not found")
+            if evidence.decided_by == DecisionSource.HUMAN.value:
+                return None
+            if application_id is not None and session.get(Application, application_id) is None:
+                raise ApplicationNotFoundError(f"Application {application_id} not found")
+            previous = evidence.application_id
+            now = utc_now()
+            evidence.application_id = application_id
+            evidence.link_method = link_method
+            evidence.link_confidence = link_confidence
+            evidence.processing_status = status
+            evidence.review_reason = review_reason
+            evidence.resolver_version = resolution.get("version")
+            evidence.resolver_decision = resolution.get("outcome")
+            evidence.resolver_confidence = resolution.get("confidence")
+            evidence.resolver_result = resolution
+            evidence.decided_by = DecisionSource.RESOLVER.value
+            evidence.decided_at = now
+            evidence.updated_at = now
+            session.add(evidence)
+            session.flush()
+            for app_id in {previous, application_id} - {None}:
+                self._refresh_last_evidence_at(session, app_id)  # type: ignore[arg-type]
+            session.commit()
+            session.refresh(evidence)
+            return evidence
+
+    def create_application_from_evidence(
+        self,
+        application: Application,
+        evidence_id: int,
+        *,
+        decided_by: str,
+        history_trigger: str,
+        resolution: dict[str, Any] | None = None,
+    ) -> Application:
+        """Create an application at Applied, its first status-history entry and milestone,
+        and link the evidence to it — all in one transaction (called by StatusUpdater)."""
+        _check_choice(decided_by, DecisionSource, "decided_by")
+        with Session(self._engine, expire_on_commit=False) as session:
+            evidence = session.get(Evidence, evidence_id)
+            if evidence is None:
+                raise EvidenceNotFoundError(f"Evidence {evidence_id} not found")
+            if (
+                decided_by == DecisionSource.RESOLVER.value
+                and evidence.decided_by == DecisionSource.HUMAN.value
+            ):
+                raise EvidenceConflictError("A person already decided this evidence")
+            if evidence.application_id is not None:
+                raise EvidenceConflictError("Evidence is already linked to an application")
+            application.current_status = ApplicationStatus.APPLIED
+            self._apply_identity_fields(application)
+            session.add(application)
+            session.flush()
+            assert application.id is not None
+            message_id = evidence.external_id if evidence.source == EvidenceSource.GMAIL else None
+            history = StatusHistory(
+                application_id=application.id,
+                from_status=None,
+                to_status=ApplicationStatus.APPLIED.value,
+                trigger=history_trigger,
+                message_id=message_id,
+            )
+            session.add(history)
+            session.flush()
+            session.add(
+                ApplicationEvent(
+                    application_id=application.id,
+                    event_type=ApplicationEventType.APPLICATION_SUBMITTED,
+                    occurred_at=application.applied_date,
+                    source=history_trigger,
+                    source_message_id=message_id,
+                    status_history_id=history.id,
+                )
+            )
+            now = utc_now()
+            evidence.application_id = application.id
+            evidence.link_method = LinkMethod.CREATED.value
+            evidence.link_confidence = 1.0
+            evidence.processing_status = EvidenceStatus.CREATED_APPLICATION.value
+            evidence.review_reason = None
+            evidence.decided_by = decided_by
+            evidence.decided_at = now
+            evidence.updated_at = now
+            if resolution is not None:
+                evidence.resolver_version = resolution.get("version")
+                evidence.resolver_decision = resolution.get("outcome")
+                evidence.resolver_confidence = resolution.get("confidence")
+                evidence.resolver_result = resolution
+            session.add(evidence)
+            session.flush()
+            self._refresh_last_evidence_at(session, application.id)
+            session.commit()
+            session.refresh(application)
+            self._sync_thread_ids(session, application.id, application.thread_ids)
+            return application
+
+    def apply_human_review(
+        self,
+        evidence_id: int,
+        *,
+        status: str,
+        review_reason: str | None = None,
+        deferred_until: datetime | None = None,
+    ) -> Evidence:
+        """Record a person's non-link review decision (dismissed / deferred)."""
+        _check_choice(status, EvidenceStatus, "processing_status")
+        with Session(self._engine, expire_on_commit=False) as session:
+            evidence = session.get(Evidence, evidence_id)
+            if evidence is None:
+                raise EvidenceNotFoundError(f"Evidence {evidence_id} not found")
+            if evidence.application_id is not None:
+                raise EvidenceConflictError("Unlink the evidence before dismissing or deferring it")
+            now = utc_now()
+            evidence.processing_status = status
+            evidence.review_reason = review_reason
+            evidence.deferred_until = deferred_until
+            evidence.decided_by = DecisionSource.HUMAN.value
+            evidence.decided_at = now
+            evidence.updated_at = now
+            session.add(evidence)
+            session.commit()
+            session.refresh(evidence)
+            return evidence
+
+    def has_event_for_message(self, application_id: int, message_id: str, event_type: str) -> bool:
+        with Session(self._engine) as session:
+            return (
+                session.exec(
+                    select(func.count())
+                    .select_from(ApplicationEvent)
+                    .where(
+                        ApplicationEvent.application_id == application_id,
+                        ApplicationEvent.source_message_id == message_id,
+                        ApplicationEvent.event_type == event_type,
+                    )
+                ).one()
+                > 0
+            )
+
+    def evidence_decision_counts(self) -> dict[str, dict[str, int]]:
+        """Persistent totals by resolver decision, processing status and decision owner."""
+        with Session(self._engine) as session:
+            out: dict[str, dict[str, int]] = {}
+            for name, column in (
+                ("by_decision", Evidence.resolver_decision),
+                ("by_status", Evidence.processing_status),
+                ("by_decided_by", Evidence.decided_by),
+            ):
+                rows = session.exec(select(column, func.count()).group_by(column)).all()
+                out[name] = {str(key) if key is not None else "none": int(n) for key, n in rows}
+            return out
 
     # ------------------------------------------------------------------ #
     # Backup primitives — the only raw sqlite3 use in the codebase         #
@@ -1218,8 +1633,20 @@ class DataStore:
     # ------------------------------------------------------------------ #
 
     def mark_processed(self, message_id: str, result: str) -> None:
+        """Record (or update) the processing result. Idempotent: concurrent or repeated
+        processing of the same message updates the existing ledger row."""
+        statement = sqlite_insert(_table(ProcessedMessage)).values(
+            message_id=message_id, result=result, processed_at=utc_now()
+        )
+        statement = statement.on_conflict_do_update(
+            index_elements=["message_id"],
+            set_={
+                "result": statement.excluded.result,
+                "processed_at": statement.excluded.processed_at,
+            },
+        )
         with Session(self._engine) as session:
-            session.add(ProcessedMessage(message_id=message_id, result=result))
+            session.execute(statement)
             session.commit()
 
     def is_processed(self, message_id: str) -> bool:

@@ -190,7 +190,9 @@ def test_follow_up_on_new_thread_for_known_application_links_instead_of_creating
     assert len(apps(db)) == 1
     row = db.get_evidence_by_external_id("gmail", "fu-2")
     assert row.application_id == apps(db)[0].id
-    assert row.link_method == "company_role"
+    # The reminder carries no role; it links as the company's only active application.
+    assert row.link_method == "company_only"
+    assert row.resolver_result["candidates"][0]["signals"]["sole_active_application_at_company"]
 
 
 def test_scheduling_email_for_unknown_application_does_not_create_one(poller, db) -> None:
@@ -252,7 +254,8 @@ def test_rejection_for_known_company_links_and_advances_status(poller, db) -> No
     row = db.get_evidence_by_external_id("gmail", "rej-1")
     assert row.application_id == app.id
     assert row.link_method == "company_only"
-    assert row.link_confidence == pytest.approx(0.6)
+    assert row.resolver_decision == "linked"
+    assert 0.6 <= row.link_confidence < 1.0
 
 
 def test_ambiguous_status_mail_stays_reviewable_and_changes_nothing(poller, db) -> None:
@@ -279,7 +282,7 @@ def test_ambiguous_status_mail_stays_reviewable_and_changes_nothing(poller, db) 
     row = db.get_evidence_by_external_id("gmail", "rej-2")
     assert (row.processing_status, row.review_reason, row.application_id) == (
         "needs_review",
-        "ambiguous_company",
+        "ambiguous_candidates",
         None,
     )
 

@@ -257,7 +257,7 @@ def test_stamp_cli_only_moves_down(tmp_path: Path, revision: str) -> None:
     runner = CliRunner()
     up = runner.invoke(
         migrate_group,
-        ["stamp", "0002_evidence_model", "--db", str(path), "--backup-dir", str(tmp_path / "b")],
+        ["stamp", schema.head_revision(), "--db", str(path), "--backup-dir", str(tmp_path / "b")],
     )
     assert up.exit_code != 0 and "not older" in up.output
     down = runner.invoke(

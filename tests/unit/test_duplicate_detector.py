@@ -63,108 +63,8 @@ def _make_parsed(
 
 
 # ---------------------------------------------------------------------------
-# find_duplicate tests
+# Duplicate suggestions (review only; scoring shared with the identity resolver)
 # ---------------------------------------------------------------------------
-
-
-def test_find_duplicate_exact_match(tmp_path: Path) -> None:
-    db = _make_db(tmp_path)
-    existing = _seed_app(db, company="Google", role="SWE")
-    detector = DuplicateDetector(db)
-
-    result = detector.find_duplicate(_make_parsed(company="Google", role="SWE"))
-    assert result is not None
-    assert result.id == existing.id
-
-
-def test_find_duplicate_high_fuzzy_score(tmp_path: Path) -> None:
-    db = _make_db(tmp_path)
-    existing = _seed_app(db, company="Google LLC", role="Software Engineer")
-    detector = DuplicateDetector(db, threshold=80)
-
-    result = detector.find_duplicate(_make_parsed(company="Google LLC", role="Software Engineer I"))
-    assert result is not None
-    assert result.id == existing.id
-
-
-def test_find_duplicate_low_score_returns_none(tmp_path: Path) -> None:
-    db = _make_db(tmp_path)
-    _seed_app(db, company="Amazon", role="Developer")
-    detector = DuplicateDetector(db, threshold=85)
-
-    result = detector.find_duplicate(_make_parsed(company="Microsoft", role="Designer"))
-    assert result is None
-
-
-def test_find_duplicate_no_candidates_returns_none(tmp_path: Path) -> None:
-    db = _make_db(tmp_path)
-    detector = DuplicateDetector(db)
-
-    result = detector.find_duplicate(_make_parsed())
-    assert result is None
-
-
-def test_find_duplicate_empty_query_returns_none(tmp_path: Path) -> None:
-    db = _make_db(tmp_path)
-    _seed_app(db, company="Meta", role="PM")
-    detector = DuplicateDetector(db)
-
-    result = detector.find_duplicate(_make_parsed(company="", role=""))
-    assert result is None
-
-
-def test_find_duplicate_outside_lookup_window_not_matched(tmp_path: Path) -> None:
-    """Applications older than 180 days should not be considered for deduplication."""
-    db = _make_db(tmp_path)
-    _seed_app(db, company="OldCo", role="Engineer", days_ago=181)
-    detector = DuplicateDetector(db)
-
-    result = detector.find_duplicate(_make_parsed(company="OldCo", role="Engineer"))
-    assert result is None
-
-
-def test_find_duplicate_matches_across_source_portals(tmp_path: Path) -> None:
-    """The same application can surface through a portal and a direct email."""
-    db = _make_db(tmp_path)
-    _seed_app(db, company="Acme", role="Engineer", source_portal="Naukri")
-    detector = DuplicateDetector(db)
-
-    result = detector.find_duplicate(
-        _make_parsed(company="Acme", role="Engineer", source_portal="LinkedIn")
-    )
-    assert result is not None
-
-
-def test_find_duplicate_matches_canonical_url(tmp_path: Path) -> None:
-    db = _make_db(tmp_path)
-    existing = _seed_app(db, company="Acme", role="Engineer")
-    existing.job_url = "https://jobs.example.com/123?utm_source=linkedin"
-    db.upsert_application(existing)
-
-    result = DuplicateDetector(db).find_duplicate(
-        _make_parsed(
-            company="Different extraction",
-            role="Different role",
-            job_url="https://jobs.example.com/123",
-        )
-    )
-    assert result is not None
-    assert result.id == existing.id
-
-
-def test_status_email_with_missing_role_matches_single_company_application(tmp_path: Path) -> None:
-    db = _make_db(tmp_path)
-    existing = _seed_app(db, company="Acme Pvt Ltd", role="Engineering Manager")
-
-    result = DuplicateDetector(db).find_duplicate(
-        _make_parsed(
-            company="Acme",
-            role="",
-            status_signal=ApplicationStatus.INTERVIEW_SCHEDULED,
-        )
-    )
-    assert result is not None
-    assert result.id == existing.id
 
 
 def test_duplicate_candidate_pairs_are_review_only(tmp_path: Path) -> None:
@@ -176,20 +76,39 @@ def test_duplicate_candidate_pairs_are_review_only(tmp_path: Path) -> None:
 
     assert len(pairs) == 1
     assert {pairs[0]["primary"].id, pairs[0]["duplicate"].id} == {first.id, second.id}
+    assert "Same normalized company" in pairs[0]["reasons"]
     assert db.get_application(first.id) is not None
     assert db.get_application(second.id) is not None
 
 
-def test_find_duplicate_same_portal_matched(tmp_path: Path) -> None:
+def test_same_company_different_role_is_not_suggested(tmp_path: Path) -> None:
     db = _make_db(tmp_path)
-    existing = _seed_app(db, company="Acme", role="Engineer", source_portal="LinkedIn")
-    detector = DuplicateDetector(db)
+    _seed_app(db, company="Acme", role="Data Engineer")
+    _seed_app(db, company="Acme", role="Sales Manager")
+    assert DuplicateDetector(db).find_candidate_pairs() == []
 
-    result = detector.find_duplicate(
-        _make_parsed(company="Acme", role="Engineer", source_portal="LinkedIn")
-    )
-    assert result is not None
-    assert result.id == existing.id
+
+def test_same_role_different_company_is_not_suggested(tmp_path: Path) -> None:
+    db = _make_db(tmp_path)
+    _seed_app(db, company="Acme", role="Software Engineer")
+    _seed_app(db, company="Globex", role="Software Engineer")
+    assert DuplicateDetector(db).find_candidate_pairs() == []
+
+
+def test_same_canonical_url_is_suggested_despite_text_differences(tmp_path: Path) -> None:
+    db = _make_db(tmp_path)
+    a = _seed_app(db, company="Acme", role="Engineer")
+    a.job_url = "https://jobs.example.com/123?utm_source=linkedin"
+    db.upsert_application(a)
+    b = _seed_app(db, company="Acme India", role="Software Engineer")
+    b.job_url = "https://jobs.example.com/123"
+    db.upsert_application(b)
+    [pair] = DuplicateDetector(db).find_candidate_pairs()
+    assert "Same canonical job URL" in pair["reasons"]
+
+
+def test_find_duplicate_was_removed_in_favour_of_the_resolver() -> None:
+    assert not hasattr(DuplicateDetector, "find_duplicate")
 
 
 # ---------------------------------------------------------------------------

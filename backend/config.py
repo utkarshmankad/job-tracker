@@ -125,6 +125,47 @@ EVIDENCE_SNIPPET_MAX_CHARS = 500
 # Identity matching considers applications from this many days back.
 IDENTITY_LOOKBACK_DAYS = 180
 
+# Identity resolver (backend/engine/identity_resolver.py; docs/phase-2-identity-resolution.md
+# §11). Deterministic weighted scoring: strong identifiers outweigh text similarity.
+RESOLVER_WEIGHTS: dict[str, int] = {
+    # strong identifiers
+    "same_gmail_thread": 100,
+    "same_external_job_id": 100,  # within the same source
+    "same_canonical_job_url": 90,
+    "sender_linked_by_human": 60,
+    "sender_linked_by_resolver": 40,
+    # supporting signals
+    "same_external_job_id_other_source": 25,
+    "known_company_domain": 25,
+    "company_exact": 35,
+    "company_similar": 15,
+    "role_exact": 35,
+    "role_similar": 20,
+    "sole_active_application_at_company": 30,
+    "date_in_window": 10,
+    "source_match": 5,
+    # negative signals
+    "external_job_id_conflict": -100,
+    "company_conflict": -60,
+    "role_conflict": -45,
+    "date_out_of_window": -40,
+    "terminal_application_new_acknowledgement": -30,
+    "job_url_differs": -20,
+    "text_mismatch_in_thread": -10,  # thread wins over extraction noise
+}
+RESOLVER_AUTO_LINK_SCORE = 80  # best score needed to link without review
+RESOLVER_AUTO_LINK_MARGIN = 25  # and its lead over the runner-up
+RESOLVER_REVIEW_SCORE = 40  # a candidate at/above this blocks "new application"
+RESOLVER_MAX_CANDIDATES = 25
+RESOLVER_DATE_WINDOW_BEFORE_DAYS = 14  # evidence this long before applied_date still fits
+RESOLVER_DATE_WINDOW_AFTER_DAYS = 180  # …and this long after
+RESOLVER_COMPANY_SIMILARITY = 92  # rapidfuzz ratio for "company_similar"
+RESOLVER_COMPANY_CONFLICT_BELOW = 80
+RESOLVER_ROLE_SIMILARITY = 90  # rapidfuzz token_set_ratio for "role_similar"
+RESOLVER_ROLE_CONFLICT_BELOW = 70
+RESOLVER_PROCESSING_CLAIM_TTL_SECONDS = 600  # a crashed worker's claim expires after this
+DUPLICATE_SUGGESTION_SCORE = 70  # pairwise score for "possible duplicate" suggestions
+
 # Cache — speeds up repeated reads (e.g. re-fetching /applications or /insights on every
 # tab switch) by caching short-lived GET responses in Redis. Fails open: if Redis is
 # unreachable, every request just falls through to the DB as if caching were off.

@@ -350,7 +350,7 @@ def test_identity_columns_derived_on_save(store: DataStore) -> None:
         role="Senior Engineer",
         job_url="https://Jobs.acme.com/1/?utm_medium=x",
     )
-    assert app.normalized_company == "acme"
+    assert app.normalized_company == "acme technologies"  # legal suffixes only
     assert app.normalized_role == "senior engineer"
     assert app.canonical_job_url == "https://jobs.acme.com/1"
     app.company = "Globex"

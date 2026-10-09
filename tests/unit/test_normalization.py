@@ -27,7 +27,7 @@ MIGRATION_0002 = REPO_ROOT / "backend/db/alembic/versions/0002_evidence_model.py
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
-        ("Acme Technologies Pvt. Ltd.", "acme"),
+        ("Acme Technologies Pvt. Ltd.", "acme technologies"),  # only legal suffixes go
         ("  GLOBEX, Inc ", "globex"),
         ("Initech LLC", "initech"),
         (None, ""),
@@ -74,8 +74,8 @@ def test_normalize_email_address(raw, expected) -> None:
 
 def test_canonical_job_url() -> None:
     assert (
-        canonical_job_url("HTTPS://Jobs.Example.com/view/123/?utm_source=x&ref=y#frag")
-        == "https://jobs.example.com/view/123?ref=y"
+        canonical_job_url("HTTP://www.Jobs.Example.com/view/123/?utm_source=x&b=2&a=1&ref=y#frag")
+        == "https://jobs.example.com/view/123?a=1&b=2"
     )
     assert canonical_job_url("  ") is None
     assert canonical_job_url(None) is None
@@ -196,5 +196,153 @@ def test_migration_frozen_copies_match_runtime() -> None:
         assert module._fingerprint_external("email", "gmail", message_id) == evidence_fingerprint(
             evidence_type="email", source="gmail", external_id=message_id
         )
+    # 0002 stored normalized_subject with the v1 rules; they still agree on plain ASCII
+    # subjects (later rules only add Unicode folding and [EXTERNAL] stripping).
     for subject in ("Re: Hello  World", "FW[3]: x", "", None, "Plain"):
         assert module._normalize_subject(subject) == normalize_subject(subject)
+
+
+# ------------------------------------------------------------------ #
+# Resolver v2 helpers                                                  #
+# ------------------------------------------------------------------ #
+
+from backend.engine.normalization import (  # noqa: E402
+    company_domain,
+    external_job_id_from_url,
+    is_forwarded_subject,
+    is_vendor_domain,
+    normalize_external_job_id,
+    normalize_source,
+    normalize_thread_id,
+    personal_sender_address,
+    registrable_domain,
+    sender_domain,
+)
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [
+        ("Société Générale SA", "SOCIETE GENERALE"),
+        ("ＡＣＭＥ Corp", "Acme Corporation"),
+        ("Acme Pvt. Ltd.", "ACME PRIVATE LIMITED"),
+        ("Infosys Limited", "infosys"),
+    ],
+)
+def test_company_variants_that_must_agree(left, right) -> None:
+    assert normalize_company(left) == normalize_company(right)
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [
+        ("Unity Technologies", "Unity"),
+        ("Acme Labs", "Acme"),
+        ("Tata Consultancy Services", "Tata Motors"),
+        ("Corporate Bank", "Bank"),
+        ("General Motors", "General Mills"),
+    ],
+)
+def test_distinct_companies_stay_distinct(left, right) -> None:
+    assert normalize_company(left) != normalize_company(right)
+
+
+def test_suffix_only_names_are_not_emptied() -> None:
+    assert normalize_company("Limited") == "limited"
+    assert normalize_company("Inc") == "inc"
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "equal"),
+    [
+        ("Sr. Software Engineer", "Senior Software Engineer", True),
+        ("Jr Analyst", "junior analyst", True),
+        ("Data Engineer", "Platform Engineer", False),
+        ("Engineering Manager", "Engineer", False),
+    ],
+)
+def test_role_normalization(left, right, equal) -> None:
+    assert (normalize_role(left) == normalize_role(right)) is equal
+
+
+def test_subject_unicode_and_tags() -> None:
+    assert normalize_subject("[EXTERNAL] RE：Interview") == "interview"
+    assert is_forwarded_subject("Fwd: x") and is_forwarded_subject("[EXTERNAL] FW: x")
+    assert not is_forwarded_subject("Re: x")
+
+
+def test_domains_and_senders() -> None:
+    assert sender_domain("Jane <Jane@Mail.ACME.co.in>") == "mail.acme.co.in"
+    assert registrable_domain("mail.acme.co.in") == "acme.co.in"
+    assert registrable_domain("careers.acme.com") == "acme.com"
+    assert is_vendor_domain("us.greenhouse-mail.io") and is_vendor_domain("hire.lever.co")
+    assert company_domain("x@mail.greenhouse.io") is None
+    assert company_domain("x@gmail.com") is None
+    assert company_domain("Jane <jane@careers.acme.com>") == "acme.com"
+    assert personal_sender_address("Jane Doe <Jane.Doe@acme.com>") == "jane.doe@acme.com"
+    for shared in (
+        "noreply@acme.com",
+        "careers@acme.com",
+        "talent+x@acme.com",
+        "a@linkedin.com",
+        "me@gmail.com",
+    ):
+        assert personal_sender_address(shared) is None
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://www.linkedin.com/jobs/view/3912345678/?trk=x", ("linkedin", "3912345678")),
+        (
+            "https://www.linkedin.com/jobs/collections/?currentJobId=3912345678",
+            ("linkedin", "3912345678"),
+        ),
+        (
+            "https://www.naukri.com/job-listings-sre-acme-bengaluru-061024012345",
+            ("naukri", "061024012345"),
+        ),
+        ("https://in.indeed.com/viewjob?jk=0a1b2c3d4e5f6a7b", ("indeed", "0a1b2c3d4e5f6a7b")),
+        ("https://boards.greenhouse.io/acme/jobs/4567890", ("company_portal", "4567890")),
+        ("https://acme.com/careers?gh_jid=4567890", ("company_portal", "4567890")),
+        (
+            "https://jobs.lever.co/acme/0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
+            ("company_portal", "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"),
+        ),
+        (
+            "https://acme.wd5.myworkdayjobs.com/Careers/job/Pune/SRE_R12345",
+            ("company_portal", "r12345"),
+        ),
+        ("https://example.com/about", None),
+        (None, None),
+    ],
+)
+def test_external_job_id_from_url(url, expected) -> None:
+    assert external_job_id_from_url(url) == expected
+
+
+def test_identifier_normalizers() -> None:
+    assert normalize_external_job_id("  Job ID: #R-123 ") == "r-123"
+    assert normalize_external_job_id("") is None
+    assert normalize_thread_id(" 18F0ABC ") == "18f0abc"
+    assert normalize_thread_id("") is None
+    assert canonical_job_url("https://jobs.example.com/1?gh_src=abc&lever-source=x") == (
+        "https://jobs.example.com/1"
+    )
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("LinkedIn", "linkedin"),
+        ("Naukri", "naukri"),
+        ("Instahire", "instahyre"),
+        ("Direct/Consultancy", "company_portal"),
+        ("Greenhouse", "company_portal"),
+        ("Direct/Unknown", "other"),
+        ("Something New", "other"),
+        (None, "other"),
+    ],
+)
+def test_normalize_source(raw, expected) -> None:
+    assert normalize_source(raw) == expected

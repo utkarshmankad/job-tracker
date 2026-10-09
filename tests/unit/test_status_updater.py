@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from backend.db.data_store import ApplicationFilter, DataStore
-from backend.db.models import Application, ApplicationStatus, utc_now
+from backend.db.models import ApplicationStatus, utc_now
 from backend.engine.duplicate_detector import DuplicateDetector
+from backend.engine.identity_resolver import signals_from_parsed
 from backend.engine.status_updater import StatusUpdater
 from backend.parser.email_parser import ParsedApplication
 
@@ -46,15 +47,8 @@ def _make_db(tmp_path: Path) -> DataStore:
     return DataStore(tmp_path / "test.db")
 
 
-def _mock_detector(existing: Application | None = None) -> MagicMock:
-    detector = MagicMock(spec=DuplicateDetector)
-    detector.find_duplicate.return_value = existing
-    detector.merge.side_effect = lambda e, p: e
-    return detector
-
-
-def _make_updater(db: DataStore, existing: Application | None = None) -> StatusUpdater:
-    return StatusUpdater(db, _mock_detector(existing))
+def _make_updater(db: DataStore) -> StatusUpdater:
+    return StatusUpdater(db, DuplicateDetector(db))
 
 
 # --------------------------------------------------------------------------- #
@@ -148,11 +142,13 @@ def test_existing_found_by_thread_id(tmp_path: Path) -> None:
     assert app is not None and app.id is not None
 
     # The resolver finds it by thread, before any fuzzy matching.
-    match = updater._resolver.resolve(_make_parsed(thread_id="thread-001", message_id="msg-002"))
+    match = updater._resolver.resolve(
+        signals_from_parsed(_make_parsed(thread_id="thread-001", message_id="msg-002"))
+    )
 
-    assert match.application is not None
-    assert match.application.id == app.id
-    assert match.method == "thread"
+    assert match.outcome == "linked"
+    assert match.application_id == app.id
+    assert match.link_method == "thread"
     assert match.confidence == 1.0
 
 
@@ -187,9 +183,10 @@ def test_find_existing_uses_thread_id_lookup(tmp_path: Path) -> None:
     assert created is not None and created.id is not None
 
     with patch.object(db, "get_applications", wraps=db.get_applications) as scan:
-        match = updater._resolver.resolve(_make_parsed(thread_id="t-lookup", message_id="msg-2"))
-    assert match.application is not None
-    assert match.application.id == created.id
+        match = updater._resolver.resolve(
+            signals_from_parsed(_make_parsed(thread_id="t-lookup", message_id="msg-2"))
+        )
+    assert match.application_id == created.id
     scan.assert_not_called()
 
 
@@ -199,10 +196,11 @@ def test_resolution_falls_back_to_company_role_when_no_thread_match(tmp_path: Pa
     created, _ = updater.process(_make_parsed(thread_id="t-original", message_id="msg-1"))
     assert created is not None
 
-    match = updater._resolver.resolve(_make_parsed(thread_id="brand-new-thread"))
-    assert match.application is not None
-    assert match.application.id == created.id
-    assert match.method == "company_role"
+    match = updater._resolver.resolve(
+        signals_from_parsed(_make_parsed(thread_id="brand-new-thread"))
+    )
+    assert match.application_id == created.id
+    assert match.link_method == "company_role"
 
 
 def test_status_email_without_application_needs_review_instead_of_creating(
