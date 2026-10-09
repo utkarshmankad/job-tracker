@@ -52,14 +52,14 @@ class ExtractedItem:
     status: str  # a contract.CollectorStatus value
     job_url: str | None
     proves_submission: bool
-    extraction: str  # verified | fallback | heuristic
+    extraction: str  # verified | unverified | fallback (see adapters/base.py)
 
 
 @dataclass
 class PageResult:
     state: PageState
     items: list[ExtractedItem] = field(default_factory=list)
-    selector_tier: str = "verified"  # which selector set matched: verified | fallback
+    selector_tier: str = "primary"  # which selector set matched: primary | fallback
     has_more: bool = False
 
 

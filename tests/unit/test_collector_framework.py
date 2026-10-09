@@ -68,7 +68,7 @@ class ExampleAdapter(Adapter):
     NEXT_SELECTOR = "a.next"
     SELECTORS = (
         SelectorSet(
-            "verified",
+            "primary",
             row="li.app",
             company=".co",
             role=".role",

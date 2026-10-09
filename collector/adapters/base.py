@@ -5,9 +5,10 @@ signed-out, challenge, consent, rate-limit and empty states, which selectors rea
 how to page through history, and how to map the site's status labels.
 
 Honesty about selectors:
-- ``SelectorSet.tier`` is ``"verified"`` only for selectors confirmed against the live site
-  by a person (``LIVE_VERIFIED`` records when). Until then the primary set is still
-  labelled by what it is checked against — sanitized fixtures — via ``LIVE_VERIFIED=None``.
+- The ``"primary"`` selector set yields ``extraction="verified"`` only after a person has
+  confirmed it against the live site and recorded the date in ``LIVE_VERIFIED``. Until
+  then it yields ``extraction="unverified"`` — it has been checked against sanitized
+  fixtures only — and the tracker never creates applications from it automatically.
 - ``"fallback"`` sets are alternative structures tried only when the primary set finds no
   rows; observations extracted with them are marked ``extraction="fallback"``.
 - There is no free-form heuristic scraping. If no selector set finds rows on a page that is
@@ -91,7 +92,7 @@ def parse_applied_date(text: str | None, today: date) -> str | None:
 
 @dataclass(frozen=True)
 class SelectorSet:
-    tier: str  # "verified" (primary) | "fallback"
+    tier: str  # "primary" | "fallback"
     row: str
     company: str
     role: str
@@ -215,7 +216,7 @@ class Adapter(ABC):
         raise AdapterError("selector_drift", "no_rows")
 
     def _extract(self, row: Tag, sel: SelectorSet, today: date) -> ExtractedItem | None:
-        company = text_of(row.select_one(sel.company))
+        company = text_of(row if sel.company == ":scope" else row.select_one(sel.company))
         if not company:
             return None
         role = text_of(row.select_one(sel.role))
@@ -241,8 +242,13 @@ class Adapter(ABC):
             status=status,
             job_url=job_url,
             proves_submission=self.PROVES_SUBMISSION and status != "unknown",
-            extraction="verified" if sel.tier == "verified" else "fallback",
+            extraction=self.extraction_label(sel.tier),
         )
+
+    def extraction_label(self, tier: str) -> str:
+        if tier != "primary":
+            return "fallback"
+        return "verified" if self.LIVE_VERIFIED else "unverified"
 
     def map_status(self, raw: str | None) -> str:
         """Site label → contract status. Matched on lowercase substrings, longest first, so

@@ -152,7 +152,7 @@ class SourceRunner:
             if result.state is PageState.EMPTY:
                 # The site's explicit "no applications" state, not a guess.
                 return "succeeded", None
-            if result.selector_tier != "verified":
+            if result.selector_tier != "primary":
                 diag.fallback_pages += 1
             new_items = 0
             for item in result.items:

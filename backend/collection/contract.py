@@ -154,7 +154,10 @@ class ObservedApplication(BaseModel):
     raw_status: str | None = Field(default=None, max_length=80)
     job_url: str | None = Field(default=None, max_length=2048)
     proves_submission: bool
-    extraction: Literal["verified", "fallback", "heuristic"]
+    # verified: primary selectors a person confirmed against the live site (adapter's
+    # LIVE_VERIFIED date); unverified: primary selectors checked only against fixtures;
+    # fallback: alternative selectors; heuristic: reserved, never auto-applied.
+    extraction: Literal["verified", "unverified", "fallback", "heuristic"]
     observed_at: datetime
     adapter_version: Version
 
