@@ -42,11 +42,12 @@ def _ddl(path: Path) -> dict[str, str]:
 
 
 def test_revision_chain() -> None:
-    assert schema.head_revision() == "0003_resolver_audit"
+    assert schema.head_revision() == "0004_merge_operations"
     assert schema.known_revisions() == {
         "0001_baseline",
         "0002_evidence_model",
         "0003_resolver_audit",
+        "0004_merge_operations",
     }
 
 
@@ -66,15 +67,17 @@ def test_head_schema_only_adds_to_the_baseline(tmp_path: Path) -> None:
     DataStore(head).close()
     baseline = _ddl(build_legacy_database(tmp_path / "legacy.db"))
     current = _ddl(head)
+    grown = {"application", "statushistory", "applicationevent"}  # columns added, none changed
     for name, sql in baseline.items():
-        if name == "application":
+        if name in grown:
             continue
         assert current[name] == sql, name
-    legacy_cols = {
-        c["name"] for c in inspect(_engine(tmp_path / "legacy.db")).get_columns("application")
-    }
-    head_cols = {c["name"] for c in inspect(_engine(head)).get_columns("application")}
-    assert legacy_cols < head_cols
+    for table in grown:
+        legacy_cols = {
+            c["name"] for c in inspect(_engine(tmp_path / "legacy.db")).get_columns(table)
+        }
+        head_cols = {c["name"] for c in inspect(_engine(head)).get_columns(table)}
+        assert legacy_cols < head_cols, table
     assert "evidence" in current
 
 
@@ -147,7 +150,7 @@ def test_upgrade_pre_phase1_database_preserves_data(tmp_path: Path) -> None:
     assert status.is_current
     after_ddl = _ddl(legacy)
     for name, sql in before_ddl.items():  # adoption + expand-only: nothing pre-existing changed
-        if name != "application":
+        if name not in {"application", "statushistory", "applicationevent"}:
             assert after_ddl[name] == sql, name
     # The one prospect is backfilled as evidence; every other table keeps its row count.
     assert DataStore.count_rows_readonly(legacy) == {

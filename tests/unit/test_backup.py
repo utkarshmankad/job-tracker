@@ -402,3 +402,41 @@ def test_latest_backup_is_by_creation_time_not_label(live_db: Path, backup_root:
     assert list_backups(backup_root) == [older.path, newer.path]
     assert latest_backup(backup_root) == newer.path
     assert prune_backups(backup_root, keep=1) == [older.path]
+
+
+def test_backup_with_merged_records_verifies_restores_and_undoes(
+    live_db: Path, backup_root: Path, tmp_path: Path
+) -> None:
+    """Merged applications are rows too: the manifest, verification and restore keep them,
+    and the merge can still be undone on the restored copy."""
+    from backend.engine.merge_planner import plan_merge, resolve_field_values
+
+    store = DataStore(live_db)
+    state = store.load_merge_state([1, 2])
+    state["application_ids"] = [1, 2]
+    plan = plan_merge(state, survivor_id=1)
+    values = resolve_field_values(plan, {name: 1 for name in plan.conflicts})
+    op, _ = store.execute_merge(
+        application_ids=[1, 2],
+        survivor_id=1,
+        field_values=values,
+        expected_token=plan.token,
+        idempotency_key="backup-merge-0001",
+    )
+    assert store.get_applications(ApplicationFilter())[1] == 3
+    store.close()
+
+    result = create_backup(live_db, backup_root, now=NOW)
+    assert result.manifest.application_count == 4
+    assert verify_backup(result.path).application_count == 4
+
+    dest = tmp_path / "restored" / "applications.db"
+    dest.parent.mkdir()
+    restore_backup(result.path, dest)
+    restored = DataStore(dest)
+    assert restored.get_applications(ApplicationFilter())[1] == 3
+    assert restored.find_application_by_thread_id("thread-1").id == 1  # follows the merge
+    _, undone_now = restored.undo_merge(op.id)
+    assert undone_now
+    assert restored.get_applications(ApplicationFilter())[1] == 4
+    restored.close()

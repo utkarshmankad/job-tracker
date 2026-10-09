@@ -44,8 +44,22 @@ def _sql(path: Path, query: str, *params) -> list[tuple]:
         conn.close()
 
 
+_PHASE1_COLUMNS = {
+    "statushistory": (
+        'id, application_id, from_status, to_status, "trigger", changed_at, message_id'
+    ),
+    "applicationevent": (
+        "id, application_id, event_type, occurred_at, interview_round, source, "
+        "source_message_id, status_history_id, notes, created_at"
+    ),
+}
+
+
 def _legacy_snapshot(path: Path) -> dict[str, list[tuple]]:
-    snapshot = {t: _sql(path, f"SELECT * FROM {t} ORDER BY 1") for t in LEGACY_TABLES}
+    snapshot = {
+        t: _sql(path, f"SELECT {_PHASE1_COLUMNS.get(t, '*')} FROM {t} ORDER BY 1")
+        for t in LEGACY_TABLES
+    }
     snapshot["application"] = _sql(
         path, f"SELECT {APPLICATION_PHASE1_COLUMNS} FROM application ORDER BY id"
     )

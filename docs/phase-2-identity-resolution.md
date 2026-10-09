@@ -375,3 +375,161 @@ sender addresses or raw evidence.
 * Job-ID extraction covers the URL formats listed above; other portals rely on URL equality.
 * Accepting a candidate after an automated link moved elsewhere does not revert status
   changes the earlier link caused.
+
+## 12. Reversible multi-application merge
+
+Duplicates are merged only by a person. Suggestions (§11.7) are advisory: nothing merges
+automatically, and "Not a duplicate" dismisses a pair permanently
+(`duplicatedismissal.pair_key`).
+
+### 12.1 Schema (`0004_merge_operations`, additive)
+
+* `application`: `record_state` (`active` | `merged`, server default `active`, so rows an
+  older release inserts are active), `merged_into_application_id`, `merge_operation_id`,
+  `merged_at`. `merged_into_application_id` has no database foreign key: adding one to an
+  existing SQLite table needs a table rebuild. `DataStore` maintains it.
+* `statushistory`, `applicationevent`: `superseded_by_merge_id`. A duplicate entry hidden by
+  a merge is flagged, never deleted.
+* `mergeoperation`: survivor ID, source IDs, a versioned snapshot plus its SHA-256 checksum,
+  the result (moved child IDs with their previous owner, superseded IDs, the survivor's
+  values after the merge), the applied field values, the preview token, a unique idempotency
+  key, initiating user, reason, `created_at`, and `undone_at` / `undone_by` / `undo_metadata`.
+* `duplicatedismissal`: one row per dismissed pair.
+
+The snapshot (`backend/db/merge_snapshot.py`, `SNAPSHOT_VERSION = 1`) holds every column of
+each involved application, and only identifiers and ownership columns of their evidence,
+status history, events, thread links and prospects. It contains no email bodies, snippets,
+subjects or secrets. `validate_snapshot` checks version, structure and checksum before any
+undo uses it.
+
+Downgrading 0004 refuses while any application is merged ("undo those merges first"). With
+no merges in effect, it drops exactly what 0004 added.
+
+### 12.2 Preview (`POST /applications/merge/preview`, never writes)
+
+Input: 2 to `MERGE_MAX_APPLICATIONS` (20) distinct IDs and an optional survivor.
+Output: proposed survivor, field-by-field comparison, conflicts, warnings, blocking reasons,
+`safe`, the child rows to be relinked, the history and event entries that will be
+superseded, counts, and a `preview_token`. The token is a hash of the involved
+applications and their child ownership rows.
+
+**Default survivor** (`merge_planner.default_survivor`), deterministic:
+1. A record with person-confirmed evidence.
+2. Then the most filled fields.
+3. Then the most evidence.
+4. Then the earliest applied date.
+5. Then the lowest ID.
+
+The user can choose any selected record instead.
+
+**Field rules:**
+* `applied_date` takes the earliest value.
+* Thread IDs are unioned.
+* Identity fields are recomputed.
+* `current_status` with differing values is a conflict. The suggestion is the most advanced
+  status.
+* Any other field with two or more different non-empty values is a conflict. The suggestion
+  is the survivor's value.
+* Values treated as empty: `None`, `""`, `Direct/Unknown`/`Unknown` source,
+  `Unknown` method.
+* A non-empty value is never dropped silently. Every conflict needs an explicit choice
+  (`field_choices: {field: application_id}`). The UI starts all conflicts unselected.
+
+**Warnings** (the merge is still allowed):
+* Different job IDs.
+* Company names that differ after normalization.
+* Different roles.
+* Applied dates more than 180 days apart.
+
+**Blocking** (`safe = false`):
+* A record is missing or already merged.
+* Fewer than 2 or more than 20 records.
+* The chosen survivor is not in the selection.
+
+### 12.3 Execute (`POST /applications/merge`)
+
+Takes IDs, survivor, field choices, optional reason, `preview_token`, and
+`idempotency_key`. Everything runs in one SQLite transaction, which first takes the write
+lock (a no-op `UPDATE` on the survivor). Steps:
+
+1. Check the key: the same key with the same parameters returns the existing operation;
+   the same key with different parameters returns 409.
+2. Reload the state. A token mismatch returns 409 "changed since the preview". A record no
+   longer active returns 409.
+3. Write the snapshot and checksum.
+4. Relink evidence, status history, events, thread links and prospects to the survivor,
+   recording each row's previous owner.
+5. Deduplicate history and events by flagging, not deleting:
+   * History keeps the earliest row per `(from, to)`.
+   * Events linked to a superseded history row are superseded.
+   * Once-only milestones (submitted, rejected, offer) keep the earliest row per type.
+   * Other milestones keep one row per type, round and UTC day.
+6. Apply the chosen field values and union the thread IDs. The status is set directly; this
+   is the one documented exception to `StatusUpdater._advance_status` (CLAUDE.md), because
+   it is a user choice between existing statuses, audited and reversible.
+7. Mark sources `merged`, pointing at the survivor and the operation.
+8. Recompute `last_evidence_at` and store the result.
+
+Any exception rolls back the whole transaction, including the operation row. Concurrent
+identical requests produce exactly one merge (tested with 4 threads). Merged records are
+excluded from:
+* lists, counts, taxonomy and stale lists;
+* all analytics (flow, pulse, conversions, rejection, insights);
+* resolver and duplicate candidates.
+
+Superseded history and events are excluded from timelines and analytics. Nothing is
+counted twice. `include_merged=true` on `GET /applications` and `include_superseded` in
+`DataStore` show them. Mail arriving later on a merged record's thread follows
+`merged_into_application_id` to the active survivor. A merged record, or a survivor with
+merged sources, cannot be deleted (409); undo first.
+
+### 12.4 Undo (`POST /applications/merges/{id}/undo`)
+
+Transactional and idempotent: undoing an undone operation returns it unchanged. Before
+touching anything it validates the snapshot checksum and checks for unsafe conflicts:
+* the survivor is missing or merged again;
+* any merge-chosen survivor field (or its thread IDs) differs from the stored after-merge
+  value, for example an edit or status change made after the merge;
+* a source is no longer merged under this operation;
+* a moved child row is missing or now belongs to another application.
+
+Any conflict returns **409** with
+`{message: "This merge can't be undone automatically without overwriting newer changes.", conflicts: [...]}`.
+Nothing is overwritten. Otherwise undo:
+* moves each moved row back to its previous owner;
+* clears the superseded flags this operation set;
+* restores every column of every involved application from the snapshot;
+* recomputes `last_evidence_at`;
+* sets `undone_at`/`undone_by`.
+
+Evidence, history or events attached to the survivor after the merge stay with the survivor
+and are listed in `undo_metadata.kept_with_survivor`. The operation row is kept as the audit
+trail. After undo the same records can be merged again.
+
+### 12.5 Failure recovery
+
+* **Failed merge:** the transaction rolls back. The preview is still valid unless data
+  changed; otherwise preview again.
+* **Stale preview (409):** the UI disables Confirm and offers "Refresh preview".
+* **Unsafe undo (409):** revert the post-merge change listed in `conflicts` (for example,
+  set the status back), then undo. Alternatively, keep the merge and edit the survivor by
+  hand.
+* **Tampered or corrupt snapshot:** undo refuses (409). Restore a backup made before the
+  merge (`docs/database-operations.md`). Backups include `mergeoperation`.
+
+### 12.6 UI
+
+* **Applications table:** select two or more rows, then "Merge duplicates". The dialog
+  (`MergeDialog.jsx`, focus-trapped, Escape closes) shows:
+  * the "nothing is permanently deleted" note;
+  * a survivor radio group with "Kept" / "Will be hidden (merged)" badges and per-record
+    counts of emails, status changes and milestones;
+  * warnings and blocking reasons;
+  * one radio group per conflict, which must all be answered;
+  * the automatically kept values and their rule;
+  * relink and dedupe counts.
+
+  Confirm is disabled while loading, unsafe, stale or unresolved. On success a status
+  message offers Undo. If undo is unsafe, the conflicts are listed inline.
+* **Data Quality:** suggestions offer "Review merge" (opens the dialog) and "Not a
+  duplicate". The "Merge history" section lists operations with Undo.

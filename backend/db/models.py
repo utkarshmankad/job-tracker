@@ -90,6 +90,24 @@ class Application(SQLModel, table=True):
     canonical_job_url: str | None = Field(default=None, index=True)
     external_job_id: str | None = Field(default=None, index=True)
     last_evidence_at: datetime | None = Field(default=None, sa_type=UTCDateTime)
+    # Revision 0004 — soft merge. Merged records stay in the table (never hard-deleted) and
+    # are excluded from default lists, counts and analytics.
+    record_state: str = Field(
+        default="active",
+        sa_column=Column(
+            "record_state",
+            String,
+            default="active",
+            server_default="active",
+            nullable=False,
+            index=True,
+        ),
+    )
+    # No database FK: SQLite cannot add one to an existing table without rebuilding it;
+    # the merge code validates the target (same approach as prospect.application_id).
+    merged_into_application_id: int | None = Field(default=None, index=True)
+    merge_operation_id: int | None = Field(default=None, index=True)
+    merged_at: datetime | None = Field(default=None, sa_type=UTCDateTime)
     status_history: list["StatusHistory"] = Relationship(back_populates="application")
 
 
@@ -101,6 +119,9 @@ class StatusHistory(SQLModel, table=True):
     trigger: str  # "email" | "manual"
     changed_at: datetime = Field(default_factory=utc_now, sa_type=UTCDateTime)
     message_id: str | None = None
+    # Revision 0004 — set when a merge found this row duplicated by another entry on the
+    # survivor; hidden from default history and analytics, restored by undo.
+    superseded_by_merge_id: int | None = Field(default=None, index=True)
     application: Application | None = Relationship(back_populates="status_history")
 
 
@@ -151,6 +172,7 @@ class ApplicationEvent(SQLModel, table=True):
     status_history_id: int | None = Field(default=None, index=True, unique=True)
     notes: str | None = None
     created_at: datetime = Field(default_factory=utc_now, sa_type=UTCDateTime)
+    superseded_by_merge_id: int | None = Field(default=None, index=True)  # revision 0004
 
 
 class ApplicationThreadId(SQLModel, table=True):
@@ -323,3 +345,51 @@ class Evidence(SQLModel, table=True):
     decided_by: str | None = None  # DecisionSource; "human" decisions are never overwritten
     decided_at: datetime | None = Field(default=None, sa_type=UTCDateTime)
     deferred_until: datetime | None = Field(default=None, sa_type=UTCDateTime)
+
+
+# ------------------------------------------------------------------ #
+# Merge operations (revision 0004) — docs/phase-2-identity-resolution.md §12
+# ------------------------------------------------------------------ #
+
+
+class RecordState(enum.StrEnum):
+    ACTIVE = "active"
+    MERGED = "merged"
+
+
+class MergeOperation(SQLModel, table=True):
+    """One human-confirmed merge of several applications into a survivor.
+
+    `snapshot` is the complete pre-merge state of every involved application and the
+    application links of their evidence, status history, events, thread links and
+    prospects — IDs, statuses, dates and link metadata only, never message content.
+    `snapshot_checksum` (SHA-256 of its canonical JSON) is verified before any undo.
+    """
+
+    id: int | None = Field(default=None, primary_key=True)
+    operation_version: int = 1
+    survivor_application_id: int = Field(foreign_key="application.id", index=True)
+    source_application_ids: list[int] = Field(sa_column=Column(JSON, nullable=False))
+    snapshot: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    snapshot_checksum: str
+    result: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    field_values: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    preview_token: str
+    idempotency_key: str = Field(unique=True, index=True)
+    initiated_by: str | None = None
+    reason: str | None = None
+    created_at: datetime = Field(default_factory=utc_now, sa_type=UTCDateTime, index=True)
+    undone_at: datetime | None = Field(default=None, sa_type=UTCDateTime)
+    undone_by: str | None = None
+    undo_metadata: dict[str, Any] | None = Field(
+        default=None, sa_column=Column(JSON, nullable=True)
+    )
+
+
+class DuplicateDismissal(SQLModel, table=True):
+    """A duplicate suggestion a person said is not a duplicate. Advisory only."""
+
+    id: int | None = Field(default=None, primary_key=True)
+    pair_key: str = Field(unique=True, index=True)  # "<lower id>:<higher id>"
+    dismissed_by: str | None = None
+    created_at: datetime = Field(default_factory=utc_now, sa_type=UTCDateTime)

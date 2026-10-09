@@ -375,8 +375,9 @@ def verify_backup(backup_dir: Path, *, check_migration: bool = True) -> VerifyRe
 
         store = DataStore(restored, schema_policy=SchemaPolicy.VERIFY)
         try:
-            # Exercise the normal read paths, as the app would on startup.
-            _, total = store.get_applications(ApplicationFilter(page_size=1))
+            # Exercise the normal read paths, as the app would on startup. Merged records
+            # are rows too: the manifest counts every application, so include them.
+            _, total = store.get_applications(ApplicationFilter(page_size=1, include_merged=True))
             store.get_prospects(limit=1)
             store.get_all_status_history()
             store.get_poller_state()

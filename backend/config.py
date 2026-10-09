@@ -165,6 +165,7 @@ RESOLVER_ROLE_SIMILARITY = 90  # rapidfuzz token_set_ratio for "role_similar"
 RESOLVER_ROLE_CONFLICT_BELOW = 70
 RESOLVER_PROCESSING_CLAIM_TTL_SECONDS = 600  # a crashed worker's claim expires after this
 DUPLICATE_SUGGESTION_SCORE = 70  # pairwise score for "possible duplicate" suggestions
+MERGE_MAX_APPLICATIONS = 20  # largest group one merge may combine
 
 # Cache — speeds up repeated reads (e.g. re-fetching /applications or /insights on every
 # tab switch) by caching short-lived GET responses in Redis. Fails open: if Redis is

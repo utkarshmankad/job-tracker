@@ -7,7 +7,9 @@ import enum
 import io
 import re
 import secrets
+import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -43,8 +45,14 @@ from backend.db.data_store import (
     EvidenceConflictError,
     EvidenceFilter,
     EvidenceNotFoundError,
+    MergeError,
+    MergeInvalidError,
+    MergeNotFoundError,
+    MergeStaleError,
+    MergeUndoConflictError,
     is_application_stale,
 )
+from backend.db.merge_snapshot import SnapshotError
 from backend.db.models import (
     Application,
     ApplicationEvent,
@@ -57,12 +65,14 @@ from backend.db.models import (
     EvidenceType,
     InterviewRound,
     LinkMethod,
+    MergeOperation,
     ProspectStatus,
     utc_now,
 )
 from backend.diagnostics import DiagnosticRunner
 from backend.engine.duplicate_detector import DuplicateDetector
 from backend.engine.insights_engine import InsightsEngine
+from backend.engine.merge_planner import MergePlan, MergePlanError, plan_merge, resolve_field_values
 from backend.engine.resolver_metrics import metrics as resolver_metrics
 from backend.engine.status_updater import StatusUpdater
 
@@ -136,6 +146,8 @@ class ApplicationResponse(BaseModel):
     updated_at: datetime
     is_stale: bool
     last_evidence_at: datetime | None = None
+    record_state: str = "active"
+    merged_into_application_id: int | None = None
 
 
 class ApplicationDetailResponse(ApplicationResponse):
@@ -412,6 +424,8 @@ def _to_response(app: Application) -> ApplicationResponse:
         updated_at=app.updated_at,
         is_stale=is_application_stale(app),
         last_evidence_at=app.last_evidence_at,
+        record_state=app.record_state,
+        merged_into_application_id=app.merged_into_application_id,
     )
 
 
@@ -546,6 +560,7 @@ async def list_applications(
     is_stale: bool | None = None,
     interviewed: bool | None = None,
     outcome: str | None = Query(default=None, pattern="^(active|offer|rejected|withdrawn)$"),
+    include_merged: bool = False,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=500),
 ) -> ApplicationListResponse:
@@ -568,12 +583,13 @@ async def list_applications(
         is_stale=is_stale,
         interviewed=interviewed,
         outcome=outcome,
+        include_merged=include_merged,
         page=page,
         page_size=page_size,
     )
     cache_key = (
         f"{_APPLICATIONS_CACHE_PREFIX}{status}:{source_portal}:{application_method}:{date_from}:{date_to}:"
-        f"{search}:{is_stale}:{interviewed}:{outcome}:{page}:{page_size}"
+        f"{search}:{is_stale}:{interviewed}:{outcome}:{include_merged}:{page}:{page_size}"
     )
     cached = cache.get_json(cache_key)
     if cached is not None:
@@ -616,31 +632,363 @@ async def get_application_taxonomy(request: Request) -> dict[str, list[str]]:
 
 @router.get("/applications/duplicates", dependencies=_SENSITIVE)
 async def list_duplicate_candidates(request: Request) -> list[dict]:
+    """Advisory duplicate suggestions among active applications, minus dismissed pairs.
+    Nothing is ever merged automatically."""
     db: DataStore = request.app.state.db
-    detector = DuplicateDetector(db)
-    return [
-        {
-            "primary": _to_response(pair["primary"]).model_dump(mode="json"),
-            "duplicate": _to_response(pair["duplicate"]).model_dump(mode="json"),
-            "score": pair["score"],
-            "reasons": pair["reasons"],
-        }
-        for pair in detector.find_candidate_pairs()
-    ]
+    dismissed = db.dismissed_pair_keys()
+    out = []
+    for pair in DuplicateDetector(db).find_candidate_pairs():
+        key = db.pair_key(pair["primary"].id, pair["duplicate"].id)
+        if key in dismissed:
+            continue
+        out.append(
+            {
+                "pair_key": key,
+                "primary": _to_response(pair["primary"]).model_dump(mode="json"),
+                "duplicate": _to_response(pair["duplicate"]).model_dump(mode="json"),
+                "score": pair["score"],
+                "reasons": pair["reasons"],
+            }
+        )
+    return out
+
+
+class DuplicateDismissRequest(BaseModel):
+    application_ids: list[int] = Field(min_length=2, max_length=2)
+
+
+@router.post("/applications/duplicates/dismiss", dependencies=_SENSITIVE)
+async def dismiss_duplicate_suggestion(
+    body: DuplicateDismissRequest,
+    request: Request,
+    user: AuthenticatedUser = Depends(require_user),
+) -> dict:
+    """Hide a suggested pair; both applications stay untouched. Idempotent."""
+    db: DataStore = request.app.state.db
+    first, second = body.application_ids
+    try:
+        row = db.dismiss_duplicate(first, second, dismissed_by=user.email)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"pair_key": row.pair_key, "dismissed": True}
+
+
+_MERGE_NOTE = (
+    "Nothing is permanently deleted: merged records are hidden, every email, status change "
+    "and milestone moves to the survivor, and the merge can be undone."
+)
+
+
+class MergePreviewRequest(BaseModel):
+    application_ids: list[int] = Field(min_length=2, max_length=50)
+    survivor_id: int | None = None
+
+
+class MergeFieldResponse(BaseModel):
+    name: str
+    values: dict[str, Any]
+    proposed: Any
+    proposed_from: int | None
+    rule: str
+    conflict: bool
+
+
+class MergeApplicationSummary(BaseModel):
+    id: int
+    company: str | None
+    role: str | None
+    source_portal: str | None
+    application_method: str | None
+    current_status: str | None
+    applied_date: str | None
+    record_state: str | None
+    external_job_id: str | None
+    evidence_count: int
+    status_history_count: int
+    event_count: int
+    human_confirmed: bool
+    filled_fields: int
+
+
+class MergePreviewResponse(BaseModel):
+    application_ids: list[int]
+    survivor_id: int
+    default_survivor_id: int
+    preview_token: str
+    safe: bool
+    blocking: list[str]
+    conflicts: list[str]
+    warnings: list[str]
+    applications: list[MergeApplicationSummary]
+    fields: list[MergeFieldResponse]
+    relink: dict[str, list[int]]
+    superseded: dict[str, list[int]]
+    counts: dict[str, int]
+    note: str
+
+
+class MergeExecuteRequest(BaseModel):
+    application_ids: list[int] = Field(min_length=2, max_length=50)
+    survivor_id: int
+    field_choices: dict[str, int] = Field(default_factory=dict)
+    reason: str | None = Field(default=None, max_length=500)
+    preview_token: str = Field(min_length=8, max_length=128)
+    idempotency_key: str = Field(min_length=8, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+class MergeOperationResponse(BaseModel):
+    id: int
+    status: str  # applied | undone
+    survivor_application_id: int
+    source_application_ids: list[int]
+    applications: list[dict[str, Any]]
+    counts: dict[str, int]
+    superseded: dict[str, int]
+    field_values: dict[str, Any]
+    reason: str | None
+    initiated_by: str | None
+    created_at: datetime
+    undone_at: datetime | None
+    undone_by: str | None
+    undo_metadata: dict[str, Any] | None
+
+
+class MergeOperationListResponse(BaseModel):
+    items: list[MergeOperationResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+def _plan_response(plan: MergePlan) -> MergePreviewResponse:
+    return MergePreviewResponse(
+        application_ids=plan.application_ids,
+        survivor_id=plan.survivor_id,
+        default_survivor_id=plan.default_survivor_id,
+        preview_token=plan.token,
+        safe=plan.safe,
+        blocking=plan.blocking,
+        conflicts=plan.conflicts,
+        warnings=plan.warnings,
+        applications=[MergeApplicationSummary(**a) for a in plan.applications],
+        fields=[
+            MergeFieldResponse(
+                name=f.name,
+                values={str(k): v for k, v in f.values.items()},
+                proposed=f.proposed,
+                proposed_from=f.proposed_from,
+                rule=f.rule,
+                conflict=f.conflict,
+            )
+            for f in plan.fields
+        ],
+        relink=plan.relink,
+        superseded=plan.superseded,
+        counts=plan.counts,
+        note=_MERGE_NOTE,
+    )
+
+
+def _operation_response(op: MergeOperation) -> MergeOperationResponse:
+    assert op.id is not None
+    snapshot_apps = (op.snapshot or {}).get("applications") or {}
+    result = op.result or {}
+    superseded = result.get("superseded") or {}
+    return MergeOperationResponse(
+        id=op.id,
+        status="undone" if op.undone_at else "applied",
+        survivor_application_id=op.survivor_application_id,
+        source_application_ids=list(op.source_application_ids),
+        applications=[
+            {
+                "id": row.get("id"),
+                "company": row.get("company"),
+                "role": row.get("role"),
+                "source_portal": row.get("source_portal"),
+                "current_status": row.get("current_status"),
+                "survivor": row.get("id") == op.survivor_application_id,
+            }
+            for _, row in sorted(snapshot_apps.items(), key=lambda kv: int(kv[0]))
+        ],
+        counts={k: int(v) for k, v in (result.get("counts") or {}).items()},
+        superseded={k: len(v) for k, v in superseded.items()},
+        field_values=op.field_values or {},
+        reason=op.reason,
+        initiated_by=op.initiated_by,
+        created_at=op.created_at,
+        undone_at=op.undone_at,
+        undone_by=op.undone_by,
+        undo_metadata=op.undo_metadata,
+    )
+
+
+@router.post(
+    "/applications/merge/preview", response_model=MergePreviewResponse, dependencies=_SENSITIVE
+)
+async def preview_merge(body: MergePreviewRequest, request: Request) -> MergePreviewResponse:
+    """Compare two or more applications and propose a merge. Never modifies data."""
+    db: DataStore = request.app.state.db
+    if len(set(body.application_ids)) != len(body.application_ids):
+        raise HTTPException(status_code=422, detail="Each application may appear only once")
+    state = db.load_merge_state(body.application_ids)
+    state["application_ids"] = sorted(body.application_ids)
+    if not state["applications"]:
+        raise HTTPException(status_code=404, detail="Applications not found")
+    return _plan_response(plan_merge(state, body.survivor_id))
+
+
+@router.post("/applications/merge", response_model=MergeOperationResponse, dependencies=_SENSITIVE)
+async def execute_merge(
+    body: MergeExecuteRequest,
+    request: Request,
+    user: AuthenticatedUser = Depends(require_user),
+) -> MergeOperationResponse:
+    """Merge the selected applications into the survivor atomically. Requires the preview
+    token (stale previews are refused with 409) and an idempotency key (a repeated request
+    returns the original operation)."""
+    db: DataStore = request.app.state.db
+    if len(set(body.application_ids)) != len(body.application_ids):
+        raise HTTPException(status_code=422, detail="Each application may appear only once")
+    existing = db.find_merge_by_idempotency_key(body.idempotency_key)
+    if existing is not None:
+        if existing.survivor_application_id == body.survivor_id and sorted(
+            [*existing.source_application_ids, existing.survivor_application_id]
+        ) == sorted(body.application_ids):
+            return _operation_response(existing)
+        raise HTTPException(
+            status_code=409, detail="Idempotency key was already used for another merge"
+        )
+    state = db.load_merge_state(body.application_ids)
+    state["application_ids"] = sorted(body.application_ids)
+    plan = plan_merge(state, body.survivor_id)
+    if plan.token != body.preview_token:
+        raise HTTPException(
+            status_code=409, detail="These applications changed since the preview; preview again"
+        )
+    if not plan.safe:
+        raise HTTPException(status_code=409, detail="; ".join(plan.blocking))
+    try:
+        values = resolve_field_values(plan, body.field_choices)
+        operation, _ = db.execute_merge(
+            application_ids=body.application_ids,
+            survivor_id=body.survivor_id,
+            field_values=values,
+            expected_token=body.preview_token,
+            idempotency_key=body.idempotency_key,
+            initiated_by=user.email,
+            reason=body.reason,
+        )
+    except MergePlanError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except MergeInvalidError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except MergeStaleError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    _invalidate_applications_cache()
+    return _operation_response(operation)
+
+
+@router.get("/applications/merges", response_model=MergeOperationListResponse)
+async def list_merges(
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+) -> MergeOperationListResponse:
+    db: DataStore = request.app.state.db
+    items, total = db.list_merge_operations(page, page_size)
+    return MergeOperationListResponse(
+        items=[_operation_response(op) for op in items], total=total, page=page, page_size=page_size
+    )
+
+
+@router.get("/applications/merges/{operation_id}", response_model=MergeOperationResponse)
+async def get_merge(operation_id: int, request: Request) -> MergeOperationResponse:
+    db: DataStore = request.app.state.db
+    op = db.get_merge_operation(operation_id)
+    if op is None:
+        raise HTTPException(status_code=404, detail="Merge operation not found")
+    return _operation_response(op)
+
+
+@router.post(
+    "/applications/merges/{operation_id}/undo",
+    response_model=MergeOperationResponse,
+    dependencies=_SENSITIVE,
+)
+async def undo_merge(
+    operation_id: int,
+    request: Request,
+    user: AuthenticatedUser = Depends(require_user),
+) -> MergeOperationResponse:
+    """Restore the merged applications and every relationship. Idempotent. Returns 409 with
+    the reasons when later changes would be overwritten."""
+    db: DataStore = request.app.state.db
+    try:
+        operation, _ = db.undo_merge(operation_id, undone_by=user.email)
+    except MergeNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except MergeUndoConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": (
+                    "This merge can't be undone automatically without overwriting newer changes."
+                ),
+                "conflicts": exc.conflicts,
+            },
+        ) from exc
+    except SnapshotError as exc:
+        raise HTTPException(status_code=409, detail=f"Merge snapshot is invalid: {exc}") from exc
+    _invalidate_applications_cache()
+    return _operation_response(operation)
 
 
 @router.post(
     "/applications/duplicates/merge", response_model=ApplicationResponse, dependencies=_SENSITIVE
 )
 async def merge_duplicate_applications(
-    body: DuplicateMergeRequest, request: Request
+    body: DuplicateMergeRequest,
+    request: Request,
+    user: AuthenticatedUser = Depends(require_user),
 ) -> ApplicationResponse:
+    """Legacy pairwise merge, kept for API compatibility: now a reversible soft merge into
+    `primary_id`, keeping primary's value wherever the two records conflict."""
     db: DataStore = request.app.state.db
+    ids = [body.primary_id, body.duplicate_id]
+    if body.primary_id == body.duplicate_id:
+        raise HTTPException(
+            status_code=404, detail="Primary and duplicate must be different applications"
+        )
+    state = db.load_merge_state(ids)
+    state["application_ids"] = sorted(ids)
+    if len(state["applications"]) != 2:
+        raise HTTPException(status_code=404, detail="One or both applications were not found")
+    plan = plan_merge(state, body.primary_id)
+    if not plan.safe:
+        raise HTTPException(status_code=409, detail="; ".join(plan.blocking))
+    choices: dict[str, int] = {}
+    for comparison in plan.fields:
+        if comparison.conflict:
+            primary_value = comparison.values.get(body.primary_id)
+            keep_primary = primary_value not in (None, "") or comparison.proposed_from is None
+            choices[comparison.name] = (
+                body.primary_id if keep_primary else int(comparison.proposed_from)  # type: ignore[arg-type]
+            )
     try:
-        merged = db.merge_applications(body.primary_id, body.duplicate_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        db.execute_merge(
+            application_ids=ids,
+            survivor_id=body.primary_id,
+            field_values=resolve_field_values(plan, choices),
+            expected_token=plan.token,
+            idempotency_key=f"legacy-{uuid.uuid4().hex}",
+            initiated_by=user.email,
+            reason="legacy pairwise merge",
+        )
+    except MergeStaleError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     _invalidate_applications_cache()
+    merged = db.get_application(body.primary_id)
+    assert merged is not None
     return _to_response(merged)
 
 
@@ -834,7 +1182,11 @@ async def bulk_delete_applications(body: BulkDeleteRequest, request: Request) ->
     deleted_ids: list[int] = []
     failed_ids: list[int] = []
     for app_id in body.application_ids:
-        if db.delete_application(app_id):
+        try:
+            deleted = db.delete_application(app_id)
+        except MergeError:
+            deleted = False
+        if deleted:
             deleted_ids.append(app_id)
         else:
             failed_ids.append(app_id)
@@ -1051,6 +1403,10 @@ def delete_application(id: int, request: Request) -> dict:
     application = db.get_application(id)
     if application is None:
         raise HTTPException(status_code=404, detail="Application not found")
+    if application.record_state != "active" or db.has_merged_sources(id):
+        raise HTTPException(
+            status_code=409, detail="Application is part of a merge; undo the merge first"
+        )
     _suppress_sender_on_delete(application, db, request)
     db.delete_application(id)
     _invalidate_applications_cache()

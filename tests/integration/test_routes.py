@@ -439,7 +439,11 @@ def test_duplicate_review_and_merge_endpoints(seeded_client):
     )
     assert merged.status_code == 200
     assert set(json.loads(merged.json()["thread_ids"])) == {"thread-one", "thread-two"}
-    assert db.get_application(second.id) is None
+    # The legacy endpoint is now a reversible soft merge: the duplicate is hidden, not deleted.
+    hidden = db.get_application(second.id)
+    assert hidden.record_state == "merged" and hidden.merged_into_application_id == first.id
+    listed = {a["id"] for a in client.get(f"{_BASE}/applications").json()["items"]}
+    assert second.id not in listed and first.id in listed
 
 
 def test_search_pulse_endpoint(seeded_client):

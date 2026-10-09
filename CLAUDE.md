@@ -14,7 +14,7 @@ Local Mac app. Python 3.11. FastAPI backend on jobtracker.localhost:8000. React 
 ## Architecture rules (NEVER violate)
 - All DB access goes through DataStore class only. No raw sqlite3 calls outside data_store.py.
 - All Gmail API calls go through GmailPoller only. No direct google-api calls elsewhere.
-- Status transitions only via StatusUpdater._advance_status(). No direct status field writes.
+- Status transitions only via StatusUpdater._advance_status(). No direct status field writes. One documented exception: `DataStore.execute_merge()`/`undo_merge()` set the survivor's `current_status` to the value the user explicitly chose among the merged records (or restore it from the snapshot on undo). This is audited in `mergeoperation` and reversible; see docs/phase-2-identity-resolution.md §12.
 - Config values (paths, ports, thresholds) only from config.py. No hardcoded values.
 - Schema changes only via Alembic revisions in `backend/db/alembic/versions/` (see `docs/database-operations.md`). Never `create_all()` or runtime `ALTER TABLE`. Revisions are frozen: they must not import `backend/db/models.py`.
 - Never copy the live SQLite file; backups go through `scripts/backup_database.py` (SQLite online backup API).

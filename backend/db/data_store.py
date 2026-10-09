@@ -22,7 +22,7 @@ from backend.config import (
     RESOLVER_PROCESSING_CLAIM_TTL_SECONDS,
     STALE_DAYS_THRESHOLD,
 )
-from backend.db import schema
+from backend.db import merge_snapshot, schema
 from backend.db.models import (
     Application,
     ApplicationEvent,
@@ -30,17 +30,21 @@ from backend.db.models import (
     ApplicationStatus,
     ApplicationThreadId,
     DecisionSource,
+    DuplicateDismissal,
     Evidence,
     EvidenceSource,
     EvidenceStatus,
     EvidenceType,
     LinkMethod,
+    MergeOperation,
     PollerState,
     ProcessedMessage,
     Prospect,
     ProspectStatus,
+    RecordState,
     StatusHistory,
     SuppressRule,
+    UTCDateTime,
     utc_now,
 )
 from backend.db.schema import SchemaPolicy, SchemaStatus
@@ -99,12 +103,47 @@ def _table(model: type[SQLModel]) -> Table:
     return model.__table__  # type: ignore[attr-defined]
 
 
+def _active_app() -> ColumnElement[bool]:
+    """Default visibility: merged records are hidden from lists, counts and analytics."""
+    return col(Application.record_state) == RecordState.ACTIVE.value
+
+
+def _live_history() -> ColumnElement[bool]:
+    return col(StatusHistory.superseded_by_merge_id).is_(None)
+
+
+def _live_event() -> ColumnElement[bool]:
+    return col(ApplicationEvent.superseded_by_merge_id).is_(None)
+
+
 class EvidenceNotFoundError(LookupError):
     pass
 
 
 class ApplicationNotFoundError(LookupError):
     pass
+
+
+class MergeError(RuntimeError):
+    """Base class for merge/undo failures that change nothing."""
+
+
+class MergeInvalidError(MergeError):
+    pass
+
+
+class MergeStaleError(MergeError):
+    """The involved records changed since the preview, or one is already merged."""
+
+
+class MergeNotFoundError(LookupError):
+    pass
+
+
+class MergeUndoConflictError(MergeError):
+    def __init__(self, conflicts: list[str]) -> None:
+        super().__init__("; ".join(conflicts))
+        self.conflicts = conflicts
 
 
 class EvidenceConflictError(RuntimeError):
@@ -144,6 +183,7 @@ class ApplicationFilter:
     is_stale: bool | None = None
     interviewed: bool | None = None
     outcome: str | None = None
+    include_merged: bool = False  # administrative: also return soft-merged records
     page: int = 1
     page_size: int = 50
 
@@ -369,20 +409,26 @@ class DataStore:
             session.refresh(event)
             return event
 
-    def get_application_events(self, application_id: int) -> list[ApplicationEvent]:
+    def get_application_events(
+        self, application_id: int, include_superseded: bool = False
+    ) -> list[ApplicationEvent]:
         with Session(self._engine, expire_on_commit=False) as session:
             stmt = (
                 select(ApplicationEvent)
                 .where(ApplicationEvent.application_id == application_id)
-                .order_by(col(ApplicationEvent.occurred_at))
+                .order_by(col(ApplicationEvent.occurred_at), col(ApplicationEvent.id))
             )
+            if not include_superseded:
+                stmt = stmt.where(_live_event())
             return list(session.exec(stmt).all())
 
     def get_application_events_for_apps(self, app_ids: set[int]) -> list[ApplicationEvent]:
         if not app_ids:
             return []
         with Session(self._engine, expire_on_commit=False) as session:
-            stmt = select(ApplicationEvent).where(col(ApplicationEvent.application_id).in_(app_ids))
+            stmt = select(ApplicationEvent).where(
+                col(ApplicationEvent.application_id).in_(app_ids), _live_event()
+            )
             return list(session.exec(stmt).all())
 
     def _sync_thread_ids(
@@ -413,6 +459,8 @@ class DataStore:
     def get_applications(self, filters: ApplicationFilter) -> tuple[list[Application], int]:
         with Session(self._engine, expire_on_commit=False) as session:
             conditions: list[ColumnElement[bool]] = []
+            if not filters.include_merged:
+                conditions.append(_active_app())
             if filters.status is not None:
                 conditions.append(col(Application.current_status) == filters.status)
             if filters.source_portal is not None:
@@ -485,14 +533,14 @@ class DataStore:
         """Return actual stored values so UI filters never drift from imported data."""
         with Session(self._engine) as session:
             sources = session.exec(
-                select(col(Application.source_portal).distinct()).order_by(
-                    col(Application.source_portal)
-                )
+                select(col(Application.source_portal).distinct())
+                .where(_active_app())
+                .order_by(col(Application.source_portal))
             ).all()
             methods = session.exec(
-                select(col(Application.application_method).distinct()).order_by(
-                    col(Application.application_method)
-                )
+                select(col(Application.application_method).distinct())
+                .where(_active_app())
+                .order_by(col(Application.application_method))
             ).all()
         return {
             "sources": [value for value in sources if value],
@@ -515,7 +563,20 @@ class DataStore:
             ).first()
             if link is None:
                 return None
-            return session.get(Application, link.application_id)
+            app = session.get(Application, link.application_id)
+            hops = 0
+            # Thread links move with a merge; follow any older pointer to the active survivor.
+            while (
+                app is not None
+                and app.record_state == RecordState.MERGED.value
+                and app.merged_into_application_id is not None
+                and hops < 10
+            ):
+                app = session.get(Application, app.merged_into_application_id)
+                hops += 1
+            if app is None or app.record_state != RecordState.ACTIVE.value:
+                return None
+            return app
 
     def get_applications_missing_fields(
         self, offset: int = 0, limit: int | None = None
@@ -528,7 +589,7 @@ class DataStore:
         with Session(self._engine, expire_on_commit=False) as session:
             stmt = (
                 select(Application)
-                .where(col(Application.is_false_positive).is_(False))
+                .where(col(Application.is_false_positive).is_(False), _active_app())
                 .where(
                     or_(
                         col(Application.company).is_(None),
@@ -547,7 +608,7 @@ class DataStore:
             stmt = (
                 select(func.count())
                 .select_from(Application)
-                .where(col(Application.is_false_positive).is_(False))
+                .where(col(Application.is_false_positive).is_(False), _active_app())
                 .where(
                     or_(
                         col(Application.company).is_(None),
@@ -563,7 +624,7 @@ class DataStore:
         with Session(self._engine, expire_on_commit=False) as session:
             stmt = (
                 select(Application)
-                .where(Application.is_false_positive == False)  # noqa: E712
+                .where(Application.is_false_positive == False, _active_app())  # noqa: E712
                 .where(func.lower(Application.company) == company.lower())
                 .where(func.lower(Application.role) == role.lower())
                 .order_by(col(Application.created_at).desc())
@@ -587,7 +648,7 @@ class DataStore:
                 return []
             stmt = (
                 select(Application)
-                .where(col(Application.is_false_positive).is_(False))
+                .where(col(Application.is_false_positive).is_(False), _active_app())
                 .where(col(Application.current_status).notin_([s.value for s in terminal]))
                 .where(or_(*conditions))
             )
@@ -598,6 +659,16 @@ class DataStore:
             app = session.get(Application, id)
             if app is None:
                 return False
+            if (
+                app.record_state == RecordState.MERGED.value
+                or session.exec(
+                    select(Application.id).where(Application.merged_into_application_id == id)
+                ).first()
+                is not None
+            ):
+                raise MergeError(
+                    f"Application {id} is part of a merge; undo the merge before deleting it"
+                )
             # Delete dependent rows first; the FKs are NOT NULL so SQLAlchemy cannot
             # null them out via its default orphan strategy.
             for history_row in session.exec(
@@ -627,82 +698,473 @@ class DataStore:
             session.commit()
             return True
 
-    def merge_applications(self, primary_id: int, duplicate_id: int) -> Application:
-        """Merge a duplicate into a primary while preserving threads and status history."""
-        if primary_id == duplicate_id:
-            raise ValueError("Primary and duplicate must be different applications")
-        status_rank = {
-            ApplicationStatus.APPLIED: 0,
-            ApplicationStatus.RESUME_SHORTLISTED: 1,
-            ApplicationStatus.INTERVIEW_SCHEDULED: 2,
-            ApplicationStatus.INTERVIEW_IN_PROGRESS: 3,
-            ApplicationStatus.OFFER_NEGOTIATION: 4,
-            ApplicationStatus.REJECTED: 4,
-            ApplicationStatus.WITHDRAWN: 4,
-            ApplicationStatus.OFFER: 5,
-            ApplicationStatus.JOINED: 6,
+    # ------------------------------------------------------------------ #
+    # Merges (revision 0004) — docs/phase-2-identity-resolution.md §12     #
+    # ------------------------------------------------------------------ #
+
+    _CHILD_MODELS: tuple[tuple[str, type[SQLModel]], ...] = (
+        ("evidence", Evidence),
+        ("status_history", StatusHistory),
+        ("events", ApplicationEvent),
+        ("thread_links", ApplicationThreadId),
+        ("prospects", Prospect),
+    )
+
+    def load_merge_state(self, application_ids: list[int]) -> dict[str, Any]:
+        """Read-only snapshot of everything a merge of these applications touches, plus its
+        state token. Used by the preview; never modifies data."""
+        with Session(self._engine) as session:
+            return self._load_merge_state(session, sorted(set(application_ids)))
+
+    @staticmethod
+    def _load_merge_state(session: Session, ids: list[int]) -> dict[str, Any]:
+        app_table = _table(Application)
+        rows = session.execute(core_select(app_table).where(app_table.c.id.in_(ids))).mappings()
+        applications = {
+            str(row["id"]): {k: merge_snapshot.serialize_value(v) for k, v in row.items()}
+            for row in rows
         }
-        with Session(self._engine, expire_on_commit=False) as session:
-            primary = session.get(Application, primary_id)
-            duplicate = session.get(Application, duplicate_id)
-            if primary is None or duplicate is None:
-                raise ValueError("One or both applications were not found")
+        ev = _table(Evidence).c
+        sh = _table(StatusHistory).c
+        ae = _table(ApplicationEvent).c
+        tl = _table(ApplicationThreadId).c
+        pr = _table(Prospect).c
 
-            threads = list(
-                dict.fromkeys(
-                    json.loads(primary.thread_ids or "[]")
-                    + json.loads(duplicate.thread_ids or "[]")
-                )
+        def fetch(columns: list[Any], app_column: Any, order: Any) -> list[dict[str, Any]]:
+            result = session.execute(
+                core_select(*columns).where(app_column.in_(ids)).order_by(order)
+            ).mappings()
+            return [{k: merge_snapshot.serialize_value(v) for k, v in r.items()} for r in result]
+
+        state: dict[str, Any] = {
+            "version": merge_snapshot.SNAPSHOT_VERSION,
+            "application_ids": ids,
+            "applications": applications,
+            "evidence": fetch(
+                [
+                    ev.id,
+                    ev.application_id,
+                    ev.link_method,
+                    ev.link_confidence,
+                    ev.processing_status,
+                    ev.decided_by,
+                    ev.occurred_at,
+                ],
+                ev.application_id,
+                ev.id,
+            ),
+            "status_history": fetch(
+                [
+                    sh.id,
+                    sh.application_id,
+                    sh.from_status,
+                    sh.to_status,
+                    sh.trigger,
+                    sh.changed_at,
+                    sh.superseded_by_merge_id,
+                ],
+                sh.application_id,
+                sh.id,
+            ),
+            "events": fetch(
+                [
+                    ae.id,
+                    ae.application_id,
+                    ae.event_type,
+                    ae.interview_round,
+                    ae.occurred_at,
+                    ae.status_history_id,
+                    ae.superseded_by_merge_id,
+                ],
+                ae.application_id,
+                ae.id,
+            ),
+            "thread_links": fetch(
+                [tl.id, tl.application_id, tl.thread_id], tl.application_id, tl.id
+            ),
+            "prospects": fetch([pr.id, pr.application_id], pr.application_id, pr.id),
+        }
+        state["token"] = merge_snapshot.state_token(state)
+        return state
+
+    @staticmethod
+    def _coerce_field(name: str, value: Any) -> Any:
+        if name == "applied_date":
+            return merge_snapshot.parse_datetime(value)
+        if name == "current_status":
+            return ApplicationStatus(value)
+        if name == "is_false_positive":
+            return bool(value)
+        return value
+
+    def execute_merge(
+        self,
+        *,
+        application_ids: list[int],
+        survivor_id: int,
+        field_values: dict[str, Any],
+        expected_token: str,
+        idempotency_key: str,
+        initiated_by: str | None = None,
+        reason: str | None = None,
+    ) -> tuple[MergeOperation, bool]:
+        """Merge applications into the survivor in one transaction. Returns (operation,
+        created). Nothing is deleted: source applications become `merged`, their evidence,
+        history, events, thread links and prospects move to the survivor, and duplicated
+        history/events are flagged superseded. Raises MergeStaleError when anything changed
+        since the preview, MergeInvalidError for bad input."""
+        ids = sorted(set(application_ids))
+        if len(ids) < 2 or survivor_id not in ids or len(ids) != len(application_ids):
+            raise MergeInvalidError(
+                "Provide two or more distinct applications, including the survivor"
             )
-            primary.thread_ids = json.dumps(threads)
-            primary.applied_date = min(primary.applied_date, duplicate.applied_date)
-            if status_rank[duplicate.current_status] > status_rank[primary.current_status]:
-                primary.current_status = duplicate.current_status
-            for field_name in ("company", "role", "job_url"):
-                if not getattr(primary, field_name) and getattr(duplicate, field_name):
-                    setattr(primary, field_name, getattr(duplicate, field_name))
-            if primary.source_portal in ("Direct/Unknown", "Unknown"):
-                primary.source_portal = duplicate.source_portal
-            if primary.application_method == "Unknown":
-                primary.application_method = duplicate.application_method
-            primary.updated_at = utc_now()
-
-            for history in session.exec(
-                select(StatusHistory).where(StatusHistory.application_id == duplicate_id)
-            ).all():
-                history.application_id = primary_id
-                session.add(history)
-            for application_event in session.exec(
-                select(ApplicationEvent).where(ApplicationEvent.application_id == duplicate_id)
-            ).all():
-                application_event.application_id = primary_id
-                session.add(application_event)
-            for prospect in session.exec(
-                select(Prospect).where(Prospect.application_id == duplicate_id)
-            ).all():
-                prospect.application_id = primary_id
-                session.add(prospect)
-            for thread_link in session.exec(
-                select(ApplicationThreadId).where(
-                    ApplicationThreadId.application_id == duplicate_id
+        unknown = set(field_values) - set(merge_snapshot.MERGEABLE_FIELDS)
+        if unknown:
+            raise MergeInvalidError(f"Fields cannot be merged: {sorted(unknown)}")
+        sources = [i for i in ids if i != survivor_id]
+        app_table = _table(Application)
+        with Session(self._engine, expire_on_commit=False) as session:
+            existing = session.exec(
+                select(MergeOperation).where(MergeOperation.idempotency_key == idempotency_key)
+            ).first()
+            if existing is not None:
+                same = (
+                    existing.survivor_application_id == survivor_id
+                    and sorted(existing.source_application_ids) == sources
                 )
-            ).all():
-                session.delete(thread_link)
-            for evidence in session.exec(
-                select(Evidence).where(Evidence.application_id == duplicate_id)
-            ).all():
-                evidence.application_id = primary_id
-                evidence.updated_at = utc_now()
-                session.add(evidence)
+                if not same:
+                    raise MergeInvalidError("Idempotency key was already used for another merge")
+                return existing, False
+
+            # Take SQLite's write lock before reading, so concurrent merges serialize and the
+            # second one validates against the first one's committed result.
+            session.execute(
+                update(app_table).where(app_table.c.id == survivor_id).values(id=app_table.c.id)
+            )
+            state = self._load_merge_state(session, ids)
+            if len(state["applications"]) != len(ids):
+                missing = sorted(set(ids) - {int(k) for k in state["applications"]})
+                raise MergeInvalidError(f"Applications not found: {missing}")
+            for app_id, row in state["applications"].items():
+                if row.get("record_state") != RecordState.ACTIVE.value:
+                    raise MergeStaleError(f"Application {app_id} is already merged")
+            if state["token"] != expected_token:
+                raise MergeStaleError("These applications changed since the preview")
+
+            snapshot = {k: v for k, v in state.items() if k != "token"}
+            operation = MergeOperation(
+                survivor_application_id=survivor_id,
+                source_application_ids=sources,
+                snapshot=snapshot,
+                snapshot_checksum=merge_snapshot.checksum(snapshot),
+                result={},
+                field_values={
+                    k: merge_snapshot.serialize_value(v) for k, v in field_values.items()
+                },
+                preview_token=expected_token,
+                idempotency_key=idempotency_key,
+                initiated_by=initiated_by,
+                reason=reason,
+            )
+            session.add(operation)
             session.flush()
-            session.delete(duplicate)
-            self._apply_identity_fields(primary)
-            primary.last_evidence_at = self._newest_evidence_at(session, primary_id)
-            session.add(primary)
+            assert operation.id is not None
+            now = utc_now()
+
+            moved: dict[str, list[dict[str, int]]] = {kind: [] for kind, _ in self._CHILD_MODELS}
+            for kind, model in self._CHILD_MODELS:
+                model_col = getattr(model, "application_id")
+                for child in session.exec(select(model).where(col(model_col).in_(sources))).all():
+                    moved[kind].append({"id": child.id, "from": child.application_id})  # type: ignore[attr-defined]
+                    child.application_id = survivor_id  # type: ignore[attr-defined]
+                    session.add(child)
+            session.flush()
+
+            history = [
+                {
+                    "id": h.id,
+                    "from_status": h.from_status,
+                    "to_status": h.to_status,
+                    "changed_at": merge_snapshot.serialize_value(h.changed_at),
+                }
+                for h in session.exec(
+                    select(StatusHistory).where(
+                        StatusHistory.application_id == survivor_id, _live_history()
+                    )
+                ).all()
+            ]
+            superseded_history = merge_snapshot.superseded_history_ids(history)
+            events = [
+                {
+                    "id": e.id,
+                    "event_type": merge_snapshot.serialize_value(e.event_type),
+                    "interview_round": merge_snapshot.serialize_value(e.interview_round),
+                    "occurred_at": merge_snapshot.serialize_value(e.occurred_at),
+                    "status_history_id": e.status_history_id,
+                }
+                for e in session.exec(
+                    select(ApplicationEvent).where(
+                        ApplicationEvent.application_id == survivor_id, _live_event()
+                    )
+                ).all()
+            ]
+            superseded_events = merge_snapshot.superseded_event_ids(events, set(superseded_history))
+            if superseded_history:
+                session.execute(
+                    update(_table(StatusHistory))
+                    .where(_table(StatusHistory).c.id.in_(superseded_history))
+                    .values(superseded_by_merge_id=operation.id)
+                )
+            if superseded_events:
+                session.execute(
+                    update(_table(ApplicationEvent))
+                    .where(_table(ApplicationEvent).c.id.in_(superseded_events))
+                    .values(superseded_by_merge_id=operation.id)
+                )
+
+            survivor = session.get(Application, survivor_id)
+            assert survivor is not None
+            for name, value in field_values.items():
+                setattr(survivor, name, self._coerce_field(name, value))
+            threads: list[str] = []
+            for app_id in [survivor_id, *sources]:
+                for thread in json.loads(
+                    state["applications"][str(app_id)].get("thread_ids") or "[]"
+                ):
+                    if thread not in threads:
+                        threads.append(thread)
+            survivor.thread_ids = json.dumps(threads)
+            survivor.external_job_id = field_values.get("external_job_id", survivor.external_job_id)
+            self._apply_identity_fields(survivor)
+            survivor.updated_at = now
+            session.add(survivor)
+            for source_id in sources:
+                source = session.get(Application, source_id)
+                assert source is not None
+                source.record_state = RecordState.MERGED.value
+                source.merged_into_application_id = survivor_id
+                source.merge_operation_id = operation.id
+                source.merged_at = now
+                source.updated_at = now
+                session.add(source)
+            session.flush()
+            for app_id in ids:
+                self._refresh_last_evidence_at(session, app_id)
+            session.flush()
+
+            after = self._load_merge_state(session, ids)
+            operation.result = {
+                "moved": moved,
+                "superseded": {"status_history": superseded_history, "events": superseded_events},
+                "after": {
+                    "survivor": {
+                        name: after["applications"][str(survivor_id)].get(name)
+                        for name in (*merge_snapshot.MERGEABLE_FIELDS, "thread_ids")
+                    },
+                    "sources": {
+                        str(i): after["applications"][str(i)].get("updated_at") for i in sources
+                    },
+                },
+                "counts": {kind: len(rows) for kind, rows in moved.items()},
+            }
+            session.add(operation)
             session.commit()
-            session.refresh(primary)
-            self._sync_thread_ids(session, primary.id, primary.thread_ids)
-            return primary
+            session.refresh(operation)
+            log.info(
+                "applications_merged",
+                operation_id=operation.id,
+                survivor_id=survivor_id,
+                sources=len(sources),
+            )
+            return operation, True
+
+    def undo_merge(
+        self, operation_id: int, *, undone_by: str | None = None
+    ) -> tuple[MergeOperation, bool]:
+        """Restore every involved application and relationship from the merge snapshot in
+        one transaction. Returns (operation, undone_now); repeating an undo is a no-op.
+        Raises MergeUndoConflictError, changing nothing, when later edits would be lost."""
+        app_table = _table(Application)
+        with Session(self._engine, expire_on_commit=False) as session:
+            operation = session.get(MergeOperation, operation_id)
+            if operation is None:
+                raise MergeNotFoundError(f"Merge operation {operation_id} not found")
+            if operation.undone_at is not None:
+                return operation, False
+            survivor_id = operation.survivor_application_id
+            session.execute(
+                update(app_table).where(app_table.c.id == survivor_id).values(id=app_table.c.id)
+            )
+            snapshot = merge_snapshot.validate_snapshot(
+                operation.snapshot, operation.snapshot_checksum
+            )
+            result = operation.result or {}
+            conflicts: list[str] = []
+
+            survivor = session.get(Application, survivor_id)
+            if survivor is None:
+                conflicts.append(f"Survivor application {survivor_id} no longer exists.")
+            elif survivor.record_state != RecordState.ACTIVE.value:
+                conflicts.append(
+                    f"Application {survivor_id} was merged again later (operation "
+                    f"{survivor.merge_operation_id}); undo that merge first."
+                )
+            else:
+                current = self._load_merge_state(session, [survivor_id])["applications"][
+                    str(survivor_id)
+                ]
+                for name, value in (result.get("after", {}).get("survivor") or {}).items():
+                    if current.get(name) != value:
+                        conflicts.append(
+                            f"Application {survivor_id} {name.replace('_', ' ')} was edited after "
+                            "the merge; undoing would overwrite that change."
+                        )
+            for source_id in operation.source_application_ids:
+                source = session.get(Application, source_id)
+                if (
+                    source is None
+                    or source.record_state != RecordState.MERGED.value
+                    or source.merge_operation_id != operation.id
+                ):
+                    conflicts.append(f"Application {source_id} is no longer part of this merge.")
+            for kind, model in self._CHILD_MODELS:
+                for item in (result.get("moved") or {}).get(kind, []):
+                    child = session.get(model, item["id"])
+                    label = kind.replace("_", " ")
+                    if child is None:
+                        conflicts.append(f"A moved {label} record ({item['id']}) no longer exists.")
+                    elif child.application_id != survivor_id:  # type: ignore[attr-defined]
+                        conflicts.append(
+                            f"A moved {label} record ({item['id']}) was re-linked to application "
+                            f"{child.application_id} after the merge."  # type: ignore[attr-defined]
+                        )
+            if conflicts:
+                raise MergeUndoConflictError(conflicts)
+
+            for kind, model in self._CHILD_MODELS:
+                for item in (result.get("moved") or {}).get(kind, []):
+                    child = session.get(model, item["id"])
+                    child.application_id = item["from"]  # type: ignore[union-attr]
+                    session.add(child)
+            for model in (StatusHistory, ApplicationEvent):
+                table = _table(model)
+                session.execute(
+                    update(table)
+                    .where(table.c.superseded_by_merge_id == operation.id)
+                    .values(superseded_by_merge_id=None)
+                )
+            session.flush()
+
+            for app_id, row in snapshot["applications"].items():
+                values = {
+                    column.name: self._restore_value(column, row.get(column.name))
+                    for column in app_table.columns
+                    if column.name != "id"
+                }
+                session.execute(
+                    update(app_table).where(app_table.c.id == int(app_id)).values(**values)
+                )
+            session.flush()
+            for app_id in snapshot["application_ids"]:
+                self._refresh_last_evidence_at(session, app_id)
+
+            snapshot_ids = {
+                kind: {r["id"] for r in snapshot[kind]} for kind, _ in self._CHILD_MODELS
+            }
+            kept: dict[str, list[int]] = {}
+            for kind, model in self._CHILD_MODELS:
+                model_col = getattr(model, "application_id")
+                later = [
+                    c.id  # type: ignore[attr-defined]
+                    for c in session.exec(select(model).where(model_col == survivor_id)).all()
+                    if c.id not in snapshot_ids[kind]  # type: ignore[attr-defined]
+                ]
+                if later:
+                    kept[kind] = later
+            operation.undone_at = utc_now()
+            operation.undone_by = undone_by
+            operation.undo_metadata = {
+                "restored_applications": snapshot["application_ids"],
+                "kept_with_survivor": kept,
+            }
+            session.add(operation)
+            session.commit()
+            session.refresh(operation)
+            log.info("merge_undone", operation_id=operation.id)
+            return operation, True
+
+    @staticmethod
+    def _restore_value(column: Any, value: Any) -> Any:
+        if value is None:
+            return None
+        if column.name == "current_status":
+            return ApplicationStatus(value)
+        if isinstance(column.type, UTCDateTime) or column.name.endswith(("_at", "_date")):
+            return merge_snapshot.parse_datetime(value)
+        return value
+
+    def list_merge_operations(
+        self, page: int = 1, page_size: int = 50
+    ) -> tuple[list[MergeOperation], int]:
+        with Session(self._engine, expire_on_commit=False) as session:
+            total = session.exec(select(func.count()).select_from(MergeOperation)).one()
+            items = session.exec(
+                select(MergeOperation)
+                .order_by(col(MergeOperation.created_at).desc(), col(MergeOperation.id).desc())
+                .offset((max(page, 1) - 1) * page_size)
+                .limit(page_size)
+            ).all()
+            return list(items), total
+
+    def find_merge_by_idempotency_key(self, key: str) -> MergeOperation | None:
+        with Session(self._engine, expire_on_commit=False) as session:
+            return session.exec(
+                select(MergeOperation).where(MergeOperation.idempotency_key == key)
+            ).first()
+
+    def has_merged_sources(self, application_id: int) -> bool:
+        with Session(self._engine) as session:
+            return (
+                session.exec(
+                    select(Application.id).where(
+                        Application.merged_into_application_id == application_id
+                    )
+                ).first()
+                is not None
+            )
+
+    def get_merge_operation(self, operation_id: int) -> MergeOperation | None:
+        with Session(self._engine, expire_on_commit=False) as session:
+            return session.get(MergeOperation, operation_id)
+
+    @staticmethod
+    def pair_key(first: int, second: int) -> str:
+        low, high = sorted((first, second))
+        return f"{low}:{high}"
+
+    def dismiss_duplicate(
+        self, first: int, second: int, *, dismissed_by: str | None = None
+    ) -> DuplicateDismissal:
+        """Record that two applications are not duplicates (advisory; idempotent)."""
+        if first == second:
+            raise ValueError("A duplicate pair needs two different applications")
+        key = self.pair_key(first, second)
+        statement = (
+            sqlite_insert(_table(DuplicateDismissal))
+            .values(pair_key=key, dismissed_by=dismissed_by, created_at=utc_now())
+            .on_conflict_do_nothing()
+        )
+        with Session(self._engine, expire_on_commit=False) as session:
+            session.execute(statement)
+            session.commit()
+            row = session.exec(
+                select(DuplicateDismissal).where(DuplicateDismissal.pair_key == key)
+            ).one()
+            return row
+
+    def dismissed_pair_keys(self) -> set[str]:
+        with Session(self._engine) as session:
+            return set(session.exec(select(DuplicateDismissal.pair_key)).all())
 
     # ------------------------------------------------------------------ #
     # Status history                                                       #
@@ -729,9 +1191,17 @@ class DataStore:
             session.refresh(entry)
             return entry
 
-    def get_status_history(self, application_id: int) -> list[StatusHistory]:
+    def get_status_history(
+        self, application_id: int, include_superseded: bool = False
+    ) -> list[StatusHistory]:
         with Session(self._engine, expire_on_commit=False) as session:
-            stmt = select(StatusHistory).where(StatusHistory.application_id == application_id)
+            stmt = (
+                select(StatusHistory)
+                .where(StatusHistory.application_id == application_id)
+                .order_by(col(StatusHistory.changed_at), col(StatusHistory.id))
+            )
+            if not include_superseded:
+                stmt = stmt.where(_live_history())
             return list(session.exec(stmt).all())
 
     # ------------------------------------------------------------------ #
@@ -1119,18 +1589,23 @@ class DataStore:
     # Identity resolution support (Phase 2, revision 0003)                 #
     # ------------------------------------------------------------------ #
 
-    def get_applications_by_ids(self, ids: list[int]) -> list[Application]:
+    def get_applications_by_ids(
+        self, ids: list[int], include_merged: bool = False
+    ) -> list[Application]:
         if not ids:
             return []
+        conditions: list[ColumnElement[bool]] = [col(Application.id).in_(ids)]
+        if not include_merged:
+            conditions.append(_active_app())
         with Session(self._engine, expire_on_commit=False) as session:
-            return list(session.exec(select(Application).where(col(Application.id).in_(ids))).all())
+            return list(session.exec(select(Application).where(*conditions)).all())
 
     def find_applications_by_external_job_id(self, job_id: str, limit: int) -> list[Application]:
         with Session(self._engine, expire_on_commit=False) as session:
             return list(
                 session.exec(
                     select(Application)
-                    .where(Application.external_job_id == job_id)
+                    .where(Application.external_job_id == job_id, _active_app())
                     .order_by(col(Application.id))
                     .limit(limit)
                 ).all()
@@ -1141,7 +1616,7 @@ class DataStore:
             return list(
                 session.exec(
                     select(Application)
-                    .where(Application.canonical_job_url == url)
+                    .where(Application.canonical_job_url == url, _active_app())
                     .order_by(col(Application.id))
                     .limit(limit)
                 ).all()
@@ -1151,7 +1626,7 @@ class DataStore:
         self, normalized_company: str, since: datetime | None, limit: int
     ) -> list[Application]:
         """Exact normalized company (indexed), most recent first."""
-        conditions = [col(Application.normalized_company) == normalized_company]
+        conditions = [col(Application.normalized_company) == normalized_company, _active_app()]
         if since is not None:
             conditions.append(col(Application.applied_date) >= since)
         with Session(self._engine, expire_on_commit=False) as session:
@@ -1170,6 +1645,7 @@ class DataStore:
         """Companies whose normalized name starts with the same first word — an index range
         scan, used to surface near-variants ("acme" / "acme india") for scoring."""
         conditions = [
+            _active_app(),
             col(Application.normalized_company) >= first_token,
             col(Application.normalized_company) < first_token + "\U0010ffff",
         ]
@@ -1546,6 +2022,15 @@ class DataStore:
                 session.delete(entry)
             for link in session.exec(select(ApplicationThreadId)).all():
                 session.delete(link)
+            # Milestone events and prospect links reference applications too (NOT NULL /
+            # nullable FKs respectively), exactly as delete_application handles them.
+            for event_row in session.exec(select(ApplicationEvent)).all():
+                session.delete(event_row)
+            for prospect in session.exec(
+                select(Prospect).where(col(Prospect.application_id).is_not(None))
+            ).all():
+                prospect.application_id = None
+                session.add(prospect)
             # Evidence survives a re-backfill (it is the record of what was received); it is
             # detached and returned to pending so re-polling re-links it.
             for evidence in session.exec(
@@ -1557,6 +2042,12 @@ class DataStore:
                 evidence.processing_status = EvidenceStatus.PENDING.value
                 evidence.updated_at = utc_now()
                 session.add(evidence)
+            # Merge audit rows and dismissed pairs describe applications that are about to
+            # be deleted; mergeoperation also holds a foreign key to the survivor.
+            for operation in session.exec(select(MergeOperation)).all():
+                session.delete(operation)
+            for dismissal in session.exec(select(DuplicateDismissal)).all():
+                session.delete(dismissal)
             session.flush()  # child deletes before parent — see delete_application for why
             for app in session.exec(select(Application)).all():
                 session.delete(app)
@@ -1710,14 +2201,16 @@ class DataStore:
 
     def get_all_status_history(self) -> list[StatusHistory]:
         with Session(self._engine, expire_on_commit=False) as session:
-            return list(session.exec(select(StatusHistory)).all())
+            return list(session.exec(select(StatusHistory).where(_live_history())).all())
 
     def get_status_history_for_apps(self, app_ids: set[int]) -> list[StatusHistory]:
         """Return status history rows for only the given application IDs."""
         if not app_ids:
             return []
         with Session(self._engine, expire_on_commit=False) as session:
-            stmt = select(StatusHistory).where(col(StatusHistory.application_id).in_(app_ids))
+            stmt = select(StatusHistory).where(
+                col(StatusHistory.application_id).in_(app_ids), _live_history()
+            )
             return list(session.exec(stmt).all())
 
     def get_stale_applications(
@@ -1728,5 +2221,6 @@ class DataStore:
             stmt = select(Application).where(
                 Application.current_status == ApplicationStatus.APPLIED,
                 col(Application.updated_at) < cutoff,
+                _active_app(),
             )
             return list(session.exec(stmt).all())

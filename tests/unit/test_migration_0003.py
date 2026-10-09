@@ -72,9 +72,19 @@ def _snapshot(path: Path) -> dict:
     return {
         "application": _sql(path, f"SELECT {APP_COLUMNS_BEFORE_0003} FROM application ORDER BY id"),
         "evidence": _sql(path, f"SELECT {EVIDENCE_COLUMNS_BEFORE_0003} FROM evidence ORDER BY id"),
+        "statushistory": _sql(
+            path,
+            'SELECT id, application_id, from_status, to_status, "trigger", changed_at, '
+            "message_id FROM statushistory ORDER BY 1",
+        ),
+        "applicationevent": _sql(
+            path,
+            "SELECT id, application_id, event_type, occurred_at, interview_round, source, "
+            "source_message_id, status_history_id FROM applicationevent ORDER BY 1",
+        ),
         **{
             t: _sql(path, f"SELECT * FROM {t} ORDER BY 1")
-            for t in ("statushistory", "applicationevent", "applicationthreadid", "prospect")
+            for t in ("applicationthreadid", "prospect")
         },
     }
 
@@ -84,7 +94,7 @@ def test_upgrade_records_decision_owners_and_changes_nothing_else(tmp_path: Path
     before = _snapshot(path)
     total_before = _sql(path, "SELECT COUNT(*) FROM application")[0][0]
     schema.upgrade(_engine(path))
-    assert schema.read_status(path).current_revision == "0003_resolver_audit"
+    assert schema.read_status(path).is_current
     assert _snapshot(path) == before
     assert _sql(path, "SELECT COUNT(*) FROM application")[0][0] == total_before
 

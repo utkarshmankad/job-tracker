@@ -318,16 +318,6 @@ def test_delete_application_detaches_evidence(store: DataStore) -> None:
     assert detached.review_reason == "application_deleted"
 
 
-def test_merge_moves_evidence_to_primary(store: DataStore) -> None:
-    primary = _app(store, "Acme")
-    duplicate = _app(store, "Acme Corp")
-    evidence, _ = store.insert_evidence(_email(when=T0 + timedelta(days=2)))
-    store.link_evidence(evidence.id, duplicate.id, "thread", 1.0)
-    merged = store.merge_applications(primary.id, duplicate.id)
-    assert store.get_evidence(evidence.id).application_id == primary.id
-    assert merged.last_evidence_at == T0 + timedelta(days=2)
-
-
 def test_reset_for_rebackfill_returns_evidence_to_pending(store: DataStore) -> None:
     app = _app(store)
     evidence, _ = store.insert_evidence(_email())

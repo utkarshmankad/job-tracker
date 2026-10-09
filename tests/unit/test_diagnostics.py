@@ -289,6 +289,8 @@ def test_required_tables_include_every_model_table():
         "processedmessage",
         "prospect",
         "evidence",
+        "mergeoperation",
+        "duplicatedismissal",
     }
 
 

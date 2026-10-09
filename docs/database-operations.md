@@ -82,6 +82,14 @@ you've stopped the API yourself (local development).
   `application.last_evidence_at`. It is additive and idempotent ("if missing" plus
   `ON CONFLICT DO NOTHING`), so it can be re-run after the rollback stamp below. Details:
   [`phase-2-identity-resolution.md`](phase-2-identity-resolution.md) §5.
+- `0003_resolver_audit` adds resolver audit columns and indexes; it is additive and idempotent.
+- `0004_merge_operations` adds soft-merge columns on `application`, `superseded_by_merge_id`
+  on `statushistory`/`applicationevent`, and the `mergeoperation` and `duplicatedismissal`
+  tables. It is additive and idempotent. Its downgrade **refuses while any application is
+  merged**: undo those merges first, or restore a pre-merge backup. Rolling back code only
+  (stamp `0003_resolver_audit`) is safe: an older release ignores the new columns. Merged
+  records would then reappear in its lists, though, so undo merges first if that matters.
+  Details: [`phase-2-identity-resolution.md`](phase-2-identity-resolution.md) §12.
 - Startup policy (`backend/db/schema.py`):
 
   | Database state | Development (`DB_AUTO_MIGRATE=true`, default) | Production (`APP_ENV=production`) |
