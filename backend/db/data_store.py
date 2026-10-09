@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import enum
+import hashlib
 import json
 import sqlite3
 from dataclasses import dataclass
@@ -61,11 +62,14 @@ from backend.engine.normalization import (
 )
 
 
-def is_application_stale(app: Application, threshold_days: int = STALE_DAYS_THRESHOLD) -> bool:
-    """Return True when an Applied-status application has had no update in threshold_days."""
+def is_application_stale(
+    app: Application, threshold_days: int = STALE_DAYS_THRESHOLD, now: datetime | None = None
+) -> bool:
+    """Return True when an Applied-status application has had no update in threshold_days
+    (as of `now`, default the current time)."""
     if app.current_status != ApplicationStatus.APPLIED:
         return False
-    cutoff = utc_now() - timedelta(days=threshold_days)
+    cutoff = (now or utc_now()) - timedelta(days=threshold_days)
     updated = (
         app.updated_at
         if isinstance(app.updated_at, datetime)
@@ -1924,20 +1928,25 @@ class DataStore:
     # ------------------------------------------------------------------ #
 
     @staticmethod
-    def online_backup(source: Path, destination: Path) -> None:
+    def online_backup(source: Path, destination: Path, *, source_read_only: bool = False) -> None:
         """Copy a database with SQLite's online backup API.
 
         Safe while the app is running: the backup API reads a consistent snapshot through
         SQLite itself (including pages still in the WAL), unlike copying the .db/-wal/-shm
         files. `destination` must not exist; the copy is converted to a standalone
-        rollback-journal file so it has no -wal/-shm companions.
+        rollback-journal file so it has no -wal/-shm companions. `source_read_only` opens the
+        source with mode=ro, so the copy cannot write to it (reconciliation dry-runs).
         """
         if not source.is_file():
             raise FileNotFoundError(f"Database not found: {source}")
         # Exclusive create: never overwrite an existing file, even in a race.
         with open(destination, "xb"):
             pass
-        src = sqlite3.connect(str(source))
+        src = (
+            sqlite3.connect(f"file:{source}?mode=ro", uri=True)
+            if source_read_only
+            else sqlite3.connect(str(source))
+        )
         try:
             dst = sqlite3.connect(str(destination))
             try:
@@ -1964,6 +1973,142 @@ class DataStore:
             return [f"not a valid SQLite database: {exc}"]
         finally:
             conn.close()
+
+    @staticmethod
+    def foreign_key_check(db_path: Path) -> list[tuple[Any, ...]]:
+        """Run PRAGMA foreign_key_check read-only. Returns the violating rows (empty when
+        every foreign key resolves)."""
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            return [tuple(row) for row in conn.execute("PRAGMA foreign_key_check").fetchall()]
+        finally:
+            conn.close()
+
+    @staticmethod
+    def table_columns(db_path: Path) -> dict[str, list[str]]:
+        """Column names per table, read-only (reflection)."""
+        engine = schema.readonly_engine(db_path)
+        try:
+            inspector = inspect(engine)
+            return {
+                name: [c["name"] for c in inspector.get_columns(name)]
+                for name in sorted(inspector.get_table_names())
+            }
+        finally:
+            engine.dispose()
+
+    @staticmethod
+    def table_digests(
+        db_path: Path, columns: dict[str, list[str]] | None = None
+    ) -> dict[str, dict[str, Any]]:
+        """Row count and a SHA-256 over every row (ordered by all columns) for each table,
+        read-only through SQLAlchemy Core reflection. Two databases with equal digests hold
+        logically identical data; used to prove dry-runs and undo leave data unchanged.
+        `columns` restricts the digest to those tables and columns (an additive migration
+        leaves the digest of the pre-existing columns unchanged)."""
+        engine = schema.readonly_engine(db_path)
+        try:
+            from sqlalchemy import MetaData
+
+            metadata = MetaData()
+            metadata.reflect(bind=engine)
+            digests: dict[str, dict[str, Any]] = {}
+            with engine.connect() as conn:
+                for name in sorted(metadata.tables):
+                    table = metadata.tables[name]
+                    if columns is not None and name not in columns:
+                        continue
+                    picked = (
+                        [table.c[c] for c in columns[name] if c in table.c]
+                        if columns is not None
+                        else list(table.columns)
+                    )
+                    rows = conn.execute(core_select(*picked).order_by(*picked)).all()
+                    payload = json.dumps(
+                        [list(r) for r in rows], default=str, separators=(",", ":")
+                    )
+                    digests[name] = {
+                        "rows": len(rows),
+                        "sha256": hashlib.sha256(payload.encode()).hexdigest(),
+                    }
+            return digests
+        finally:
+            engine.dispose()
+
+    @staticmethod
+    def core_aggregates(db_path: Path) -> dict[str, Any]:
+        """Schema-agnostic figures (every revision has these columns), read-only: all
+        applications by status and source, status-history rows, events by type. Used to
+        show a migration leaves the business data unchanged."""
+        engine = schema.readonly_engine(db_path)
+        try:
+            from sqlalchemy import MetaData
+
+            metadata = MetaData()
+            metadata.reflect(bind=engine, only=["application", "statushistory", "applicationevent"])
+            app = metadata.tables["application"]
+            history = metadata.tables["statushistory"]
+            events = metadata.tables["applicationevent"]
+            with engine.connect() as conn:
+
+                def grouped(column: Any) -> dict[str, int]:
+                    rows = conn.execute(
+                        core_select(column, func.count()).group_by(column).order_by(column)
+                    ).all()
+                    return {str(k): int(v) for k, v in rows}
+
+                return {
+                    "applications": conn.execute(
+                        core_select(func.count()).select_from(app)
+                    ).scalar_one(),
+                    "by_status": grouped(app.c.current_status),
+                    "by_source": grouped(app.c.source_portal),
+                    "by_method": grouped(app.c.application_method),
+                    "status_history": conn.execute(
+                        core_select(func.count()).select_from(history)
+                    ).scalar_one(),
+                    "events_by_type": grouped(events.c.event_type),
+                }
+        finally:
+            engine.dispose()
+
+    @staticmethod
+    def sensitive_terms(db_path: Path) -> set[str]:
+        """Distinct personal/company strings stored in a database (companies, roles, thread
+        IDs, message IDs, senders, subjects), read-only. Reconciliation scans its own output
+        for these and refuses to finish if any appears."""
+        engine = schema.readonly_engine(db_path)
+        try:
+            from sqlalchemy import MetaData
+
+            wanted = {
+                "application": ("company", "role", "job_url"),
+                "applicationthreadid": ("thread_id",),
+                "processedmessage": ("message_id",),
+                "statushistory": ("message_id",),
+                "evidence": ("sender", "subject", "snippet", "external_id", "thread_id"),
+                "prospect": ("company", "title", "sender", "gmail_message_id", "thread_id"),
+            }
+            metadata = MetaData()
+            metadata.reflect(bind=engine)
+            terms: set[str] = set()
+            with engine.connect() as conn:
+                for table_name, column_names in wanted.items():
+                    table = metadata.tables.get(table_name)
+                    if table is None:
+                        continue
+                    for column_name in column_names:
+                        if column_name not in table.c:
+                            continue
+                        values = conn.execute(core_select(table.c[column_name]).distinct()).all()
+                        terms.update(
+                            str(v[0]).strip()
+                            for v in values
+                            if v[0] and len(str(v[0]).strip()) >= 4
+                        )
+            return terms
+        finally:
+            engine.dispose()
 
     @staticmethod
     def count_rows_readonly(db_path: Path) -> dict[str, int]:

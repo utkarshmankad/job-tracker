@@ -23,6 +23,7 @@ All commands run from the repository root, or `/app` in the container. All of th
 | `python scripts/verify_backup.py <dir> \| --latest` | Restores into a temporary directory and opens the copy through DataStore |
 | `python scripts/restore_database.py <dir> --destination <file> [--force]` | Validates the backup and restores it. Refuses to overwrite unless `--force` is given, which moves the existing files aside |
 | `python -m backend.diagnostics` | Health report: schema revision, required tables, enum format, poller, Gmail credentials |
+| `python scripts/reconcile_database.py --db <backup copy> --output-dir <private dir>` | Dry-run Phase 2 reconciliation audit on copies: migration, resolver, duplicates, analytics, merge/undo simulation. Never touches the input; refuses the configured `DB_PATH`. See [`phase-2-reconciliation-report.md`](phase-2-reconciliation-report.md) |
 
 `--db` and `--backup-dir` default to `DB_PATH` and `<JOB_TRACKER_DIR>/backups`.
 
