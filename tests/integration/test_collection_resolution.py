@@ -144,7 +144,9 @@ def test_unverified_selectors_never_create_applications(env) -> None:
     assert (result.outcome, result.reason) == ("review", "unverified_extraction_new_application")
     assert _apps(env) == []
     queue = env.client.get(f"{_BASE}/collection/review").json()
-    assert len(queue) == 1 and queue[0]["review_reason"] == "unverified_extraction_new_application"
+    assert len(queue) == 1
+    assert queue[0]["evidence"]["review_reason"] == "unverified_extraction_new_application"
+    assert (queue[0]["company"], queue[0]["extraction"]) == ("Northwind Robotics", "unverified")
     assert env.client.get(f"{_BASE}/evidence/review").json()["total"] == 1
 
 

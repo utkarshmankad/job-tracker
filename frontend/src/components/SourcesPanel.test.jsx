@@ -1,0 +1,235 @@
+import { render, screen, within, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import SourcesPanel from "./SourcesPanel";
+import { api } from "../api/client";
+
+vi.mock("../api/client", () => ({
+  api: {
+    listCollectionSources: vi.fn(),
+    listCollectionRuns: vi.fn(),
+    getCollectionMetrics: vi.fn(),
+    listCollectors: vi.fn(),
+    listCollectionReview: vi.fn(),
+    getCollectionRun: vi.fn(),
+    createCollector: vi.fn(),
+    rotateCollector: vi.fn(),
+    revokeCollector: vi.fn(),
+    acceptEvidence: vi.fn(),
+    createApplicationFromEvidence: vi.fn(),
+    dismissEvidence: vi.fn(),
+  },
+}));
+
+const source = (id, key, status, extra = {}) => ({
+  id,
+  source_key: key,
+  account_label: "default",
+  collector_id: 1,
+  last_attempt_at: "2026-10-09T08:00:00Z",
+  last_success_at: status === "succeeded" ? "2026-10-09T08:00:00Z" : null,
+  last_status: status,
+  needs_attention: !["succeeded", null].includes(status),
+  attention_reason: status,
+  attention_message: status === "signed_out" ? "The browser is not signed in to this site." : "Check the site.",
+  items: 3,
+  ...extra,
+});
+
+const run = (id, status, extra = {}) => ({
+  id,
+  run_key: `run-${id}`,
+  source_key: "linkedin",
+  status,
+  started_at: "2026-10-09T08:00:00Z",
+  finished_at: "2026-10-09T08:01:00Z",
+  collector_version: "0.1.0",
+  adapter_version: "linkedin/0.1.0",
+  items_seen: 3,
+  observations_received: 3,
+  created_count: 1,
+  linked_count: 1,
+  review_count: 1,
+  unchanged_count: 0,
+  error_count: 0,
+  error_code: null,
+  error_message: null,
+  diagnostics: {},
+  ...extra,
+});
+
+const reviewItem = {
+  evidence: {
+    id: 55,
+    review_reason: "unverified_extraction_new_application",
+    resolution: {
+      candidates: [
+        { application_id: 9, score: 70, signals: {}, application: { id: 9, company: "Northwind Robotics", role: "Engineering Manager" } },
+      ],
+    },
+  },
+  source_key: "naukri",
+  company: "Northwind Robotics",
+  role: "Engineering Manager",
+  status: "applied",
+  raw_status: "Application Sent",
+  applied_on: "2026-09-12",
+  observed_at: "2026-10-09T08:00:00Z",
+  extraction: "unverified",
+};
+
+function mockData({ sources, runs, collectors, review } = {}) {
+  api.listCollectionSources.mockResolvedValue(
+    sources ?? [source(1, "linkedin", "succeeded"), source(2, "naukri", "signed_out"), source(3, "indeed", "challenged")],
+  );
+  api.listCollectionRuns.mockResolvedValue(runs ?? [run(7, "succeeded"), run(8, "failed", { error_message: "The page layout changed; this adapter needs maintenance." })]);
+  api.getCollectionMetrics.mockResolvedValue({
+    observation_totals: { observations: 12, created: 2, linked: 5, review: 1, unchanged: 4, errors: 0 },
+    runs_by_status: {},
+    items_by_decision: {},
+    items_by_source: {},
+  });
+  api.listCollectors.mockResolvedValue(
+    collectors ?? [
+      { id: 1, name: "My laptop", token_hint: "jtc_ab12…", scopes: ["linkedin", "naukri"], state: "active",
+        created_at: "2026-10-01T00:00:00Z", enrolled_at: "2026-10-01T00:00:00Z", last_used_at: "2026-10-09T08:00:00Z",
+        rotated_at: null, revoked_at: null },
+    ],
+  );
+  api.listCollectionReview.mockResolvedValue(review ?? [reviewItem]);
+}
+
+async function renderPanel() {
+  render(<SourcesPanel />);
+  await screen.findByRole("heading", { name: "Configured sources" });
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mockData();
+});
+
+describe("SourcesPanel", () => {
+  it("labels every state with words, not colour alone, and flags attention", async () => {
+    await renderPanel();
+    const sources = screen.getByRole("region", { name: "Configured sources" });
+    expect(within(sources).getByText("Collected")).toBeInTheDocument();
+    expect(within(sources).getByText("Signed out")).toBeInTheDocument();
+    expect(within(sources).getByText("Challenged")).toBeInTheDocument();
+    const alert = screen.getAllByRole("alert")[0];
+    expect(alert).toHaveTextContent("Needs your attention");
+    expect(alert).toHaveTextContent("Naukri (default): The browser is not signed in to this site.");
+  });
+
+  it("shows totals that distinguish imported, linked, review and failed", async () => {
+    await renderPanel();
+    const totals = screen.getByRole("region", { name: "Totals" });
+    for (const label of ["Observed", "Imported (new)", "Linked", "Needs review", "Already known", "Failed items"]) {
+      expect(within(totals).getByText(label)).toBeInTheDocument();
+    }
+  });
+
+  it("inspects a run in place", async () => {
+    const user = userEvent.setup();
+    api.getCollectionRun.mockResolvedValue({
+      run: run(7, "succeeded"),
+      observations: [
+        { id: 1, item_id: 1, observed_at: "2026-10-09T08:00:00Z", extraction: "unverified", decision: "review",
+          decision_reason: "unverified_extraction_new_application", confidence: null, evidence_id: 5,
+          company: "Contoso Analytics", role: "Staff Engineer", status: "applied", application_id: null },
+      ],
+    });
+    await renderPanel();
+    const runs = screen.getByRole("region", { name: "Recent runs" });
+    expect(within(runs).getByText(/layout changed/)).toBeInTheDocument();
+    const inspect = within(runs).getAllByRole("button", { name: "Inspect" })[0];
+    expect(inspect).toHaveAttribute("aria-expanded", "false");
+    await user.click(inspect);
+    expect(await screen.findByText("Contoso Analytics")).toBeInTheDocument();
+    expect(screen.getByText(/Needs review/, { selector: "span" })).toBeInTheDocument();
+    expect(within(runs).getByRole("button", { name: "Hide" })).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("creates a collector and shows the one-time setup command, never a credential", async () => {
+    const user = userEvent.setup();
+    api.createCollector.mockResolvedValue({
+      collector: { id: 2, name: "Desk", token_hint: "jtc_cd34…", scopes: ["indeed"], state: "pending_enrollment" },
+      setup_code: "one-time-code-abcdefghijklmnop",
+      expires_at: "2026-10-09T08:10:00Z",
+      command: "python scripts/collect.py enroll --api-url https://tracker.example.test --code one-time-code-abcdefghijklmnop",
+    });
+    await renderPanel();
+    await user.click(screen.getByRole("button", { name: "Set up a collector" }));
+    const form = screen.getByRole("form", { name: "Set up a collector" });
+    await user.clear(within(form).getByLabelText("Collector name"));
+    await user.type(within(form).getByLabelText("Collector name"), "Desk");
+    await user.click(within(form).getByLabelText("LinkedIn"));
+    await user.click(within(form).getByLabelText("Indeed"));
+    await user.click(within(form).getByRole("button", { name: "Create setup command" }));
+    expect(api.createCollector).toHaveBeenCalledWith("Desk", ["indeed"]);
+    const panel = await screen.findByRole("status");
+    expect(panel).toHaveTextContent("scripts/collect.py enroll");
+    expect(panel).toHaveTextContent("never shown here");
+    expect(document.body.textContent).not.toMatch(/jtc_[0-9a-f]{16}\./);
+  });
+
+  it("refuses a collector without sources", async () => {
+    const user = userEvent.setup();
+    await renderPanel();
+    await user.click(screen.getByRole("button", { name: "Set up a collector" }));
+    const form = screen.getByRole("form", { name: "Set up a collector" });
+    await user.click(within(form).getByLabelText("LinkedIn"));
+    await user.click(within(form).getByRole("button", { name: "Create setup command" }));
+    expect(within(form).getByRole("alert")).toHaveTextContent("Choose at least one source.");
+    expect(api.createCollector).not.toHaveBeenCalled();
+  });
+
+  it("asks before rotating or revoking", async () => {
+    const user = userEvent.setup();
+    api.revokeCollector.mockResolvedValue({});
+    await renderPanel();
+    const collectors = screen.getByRole("region", { name: "Collectors" });
+    await user.click(within(collectors).getByRole("button", { name: "Revoke" }));
+    expect(api.revokeCollector).not.toHaveBeenCalled();
+    expect(within(collectors).getByText(/Revoke permanently/)).toBeInTheDocument();
+    await user.click(within(collectors).getByRole("button", { name: "Yes, revoke" }));
+    await waitFor(() => expect(api.revokeCollector).toHaveBeenCalledWith(1));
+  });
+
+  it("decides review items with the existing evidence actions", async () => {
+    const user = userEvent.setup();
+    api.acceptEvidence.mockResolvedValue({});
+    api.createApplicationFromEvidence.mockResolvedValue({});
+    api.dismissEvidence.mockResolvedValue({});
+    await renderPanel();
+    const review = screen.getByRole("region", { name: /Needs review/ });
+    expect(review).toHaveTextContent("Naukri · site status Application Sent");
+    await user.click(within(review).getByRole("button", { name: /Same as #9/ }));
+    await waitFor(() => expect(api.acceptEvidence).toHaveBeenCalledWith(55, 9));
+    await user.click(within(review).getByRole("button", { name: "Create application" }));
+    await waitFor(() => expect(api.createApplicationFromEvidence).toHaveBeenCalledWith(55));
+    await user.click(within(review).getByRole("button", { name: "Not an application" }));
+    await waitFor(() => expect(api.dismissEvidence).toHaveBeenCalledWith(55));
+  });
+
+  it("has no control that acts on a job site", async () => {
+    await renderPanel();
+    const labels = screen.getAllByRole("button").map((b) => b.textContent.toLowerCase());
+    for (const forbidden of ["apply now", "easy apply", "withdraw", "send message", "accept interview", "submit application"]) {
+      expect(labels.some((l) => l.includes(forbidden))).toBe(false);
+    }
+  });
+
+  it("explains empty and failed loads", async () => {
+    mockData({ sources: [], runs: [], collectors: [], review: [] });
+    await renderPanel();
+    expect(screen.getByText("No collection has run yet. Set up a collector below.")).toBeInTheDocument();
+    expect(screen.getByText("Nothing waiting.")).toBeInTheDocument();
+  });
+
+  it("reports a load failure", async () => {
+    api.listCollectionSources.mockRejectedValue(new Error("down"));
+    render(<SourcesPanel />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Collection status could not be loaded.");
+  });
+});

@@ -109,6 +109,25 @@ export const api = {
   listMerges: (params = {}) => request(`/applications/merges?${new URLSearchParams(params)}`),
   getMerge: (id) => request(`/applications/merges/${id}`),
   undoMerge: (id) => request(`/applications/merges/${id}/undo`, { method: "POST" }),
+  // Phase 3 source collection (read-only collector; nothing here acts on job sites).
+  listCollectors: () => request("/collectors"),
+  createCollector: (name, scopes) =>
+    request("/collectors", { method: "POST", body: JSON.stringify({ name, scopes }) }),
+  rotateCollector: (id) => request(`/collectors/${id}/rotate`, { method: "POST" }),
+  revokeCollector: (id) => request(`/collectors/${id}/revoke`, { method: "POST" }),
+  listCollectionSources: () => request("/collection/sources"),
+  listCollectionRuns: (params = {}) => request(`/collection/runs?${new URLSearchParams(params)}`),
+  getCollectionRun: (id) => request(`/collection/runs/${id}`),
+  getCollectionMetrics: () => request("/collection/metrics"),
+  listCollectionReview: () => request("/collection/review"),
+  dismissEvidence: (id) => request(`/evidence/${id}/dismiss`, { method: "POST" }),
+  acceptEvidence: (id, applicationId) =>
+    request(`/evidence/${id}/accept`, {
+      method: "POST",
+      body: JSON.stringify({ application_id: applicationId }),
+    }),
+  createApplicationFromEvidence: (id) =>
+    request(`/evidence/${id}/create-application`, { method: "POST", body: JSON.stringify({}) }),
   getApplication: (id, signal) => request(`/applications/${id}`, { signal }),
   createApplication: (body) =>
     request("/applications", { method: "POST", body: JSON.stringify(body) }),

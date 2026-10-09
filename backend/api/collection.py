@@ -600,11 +600,40 @@ async def metrics(request: Request) -> dict[str, Any]:
     return _db(request).collection_metrics()
 
 
-@admin_router.get("/collection/review", response_model=list[EvidenceDetailResponse])
-async def collection_review(request: Request, limit: int = 100) -> list[EvidenceDetailResponse]:
-    """Collected observations waiting for a person (decide them with the /evidence/{id}
-    accept, create-application or dismiss endpoints)."""
+class CollectionReviewItem(BaseModel):
+    evidence: EvidenceDetailResponse
+    source_key: str
+    company: str | None
+    role: str | None
+    status: str | None
+    raw_status: str | None
+    applied_on: str | None
+    observed_at: datetime
+    extraction: str
+
+
+@admin_router.get("/collection/review", response_model=list[CollectionReviewItem])
+async def collection_review(request: Request, limit: int = 100) -> list[CollectionReviewItem]:
+    """Collected observations waiting for a person, with the minimal fields the collector
+    sent. Decide them with /evidence/{id}/accept, /create-application or /dismiss."""
     db = _db(request)
-    ids = db.collector_review_evidence_ids()[: max(1, min(limit, 200))]
-    items = [db.get_evidence(i) for i in ids]
-    return [_evidence_detail(db, e) for e in items if e is not None]
+    out = []
+    for obs in db.collector_review_observations(max(1, min(limit, 200))):
+        evidence = db.get_evidence(obs.evidence_id) if obs.evidence_id else None
+        if evidence is None:
+            continue
+        payload = obs.payload or {}
+        out.append(
+            CollectionReviewItem(
+                evidence=_evidence_detail(db, evidence),
+                source_key=obs.source_key,
+                company=payload.get("company"),
+                role=payload.get("role"),
+                status=payload.get("status"),
+                raw_status=payload.get("raw_status"),
+                applied_on=payload.get("applied_on"),
+                observed_at=obs.observed_at,
+                extraction=obs.extraction,
+            )
+        )
+    return out

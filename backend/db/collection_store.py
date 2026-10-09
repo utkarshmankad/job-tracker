@@ -577,16 +577,19 @@ class CollectionStoreMixin:
                 ).all()
             )
 
-    def collector_review_evidence_ids(self) -> list[int]:
-        """Evidence from collected observations that is waiting for a person."""
-        with Session(self._engine) as session:
-            return [
-                int(row)
-                for row in session.exec(
-                    select(SourceObservation.evidence_id)
+    def collector_review_observations(self, limit: int = 100) -> list[SourceObservation]:
+        """The newest observation behind each collected evidence row waiting for a person."""
+        with Session(self._engine, expire_on_commit=False) as session:
+            return list(
+                session.exec(
+                    select(SourceObservation)
                     .join(Evidence, col(Evidence.id) == col(SourceObservation.evidence_id))
                     .where(col(Evidence.processing_status) == "needs_review")
                     .order_by(col(SourceObservation.id).desc())
+                    .limit(limit)
                 ).all()
-                if row is not None
-            ]
+            )
+
+    def collector_review_evidence_ids(self) -> list[int]:
+        """Evidence from collected observations that is waiting for a person."""
+        return [o.evidence_id for o in self.collector_review_observations(1000) if o.evidence_id]
