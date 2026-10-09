@@ -24,6 +24,7 @@ from backend.config import (
     STALE_DAYS_THRESHOLD,
 )
 from backend.db import merge_snapshot, schema
+from backend.db.collection_store import CollectionStoreMixin
 from backend.db.models import (
     Application,
     ApplicationEvent,
@@ -192,7 +193,7 @@ class ApplicationFilter:
     page_size: int = 50
 
 
-class DataStore:
+class DataStore(CollectionStoreMixin):
     def __init__(self, db_path: Path = DB_PATH, schema_policy: SchemaPolicy | None = None) -> None:
         """Open the database and apply the schema policy (backend/db/schema.py).
 

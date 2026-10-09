@@ -291,6 +291,13 @@ def test_required_tables_include_every_model_table():
         "evidence",
         "mergeoperation",
         "duplicatedismissal",
+        "collector",
+        "collectorenrollment",
+        "collectionsource",
+        "collectionrun",
+        "collectionbatch",
+        "sourceitem",
+        "sourceobservation",
     }
 
 

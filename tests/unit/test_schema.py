@@ -42,12 +42,13 @@ def _ddl(path: Path) -> dict[str, str]:
 
 
 def test_revision_chain() -> None:
-    assert schema.head_revision() == "0004_merge_operations"
+    assert schema.head_revision() == "0005_source_collection"
     assert schema.known_revisions() == {
         "0001_baseline",
         "0002_evidence_model",
         "0003_resolver_audit",
         "0004_merge_operations",
+        "0005_source_collection",
     }
 
 
