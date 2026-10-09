@@ -39,6 +39,8 @@ _MONTHS = {
 _ABSOLUTE = re.compile(r"(\d{1,2})\s+([A-Za-z]{3})[A-Za-z]*,?\s+(\d{4})")
 _ABSOLUTE_US = re.compile(r"([A-Za-z]{3})[A-Za-z]*\s+(\d{1,2}),?\s+(\d{4})")
 _ISO = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
+_DAY_MONTH = re.compile(r"\b(\d{1,2})\s+([A-Za-z]{3})[A-Za-z]*\b")
+_MONTH_DAY = re.compile(r"\b([A-Za-z]{3})[A-Za-z]*\s+(\d{1,2})\b")
 
 
 def text_of(node: Tag | None) -> str | None:
@@ -72,22 +74,43 @@ def parse_applied_date(text: str | None, today: date) -> str | None:
                 except ValueError:
                     return None
     if m := _RELATIVE.search(text):
-        amount, unit = int(m[1]), m[2].lower()
-        days = {
-            "minute": 0,
-            "min": 0,
-            "hour": 0,
-            "hr": 0,
-            "day": 1,
-            "d": 1,
-            "week": 7,
-            "wk": 7,
-            "w": 7,
-            "month": 30,
-            "mo": 30,
-        }[unit] * amount
-        return (today - timedelta(days=days)).isoformat()
+        return _relative(m, today)
+    # Day and month without a year ("Applied on 2 Oct"): the most recent such date that is
+    # not in the future.
+    for pattern, order in ((_DAY_MONTH, "dm"), (_MONTH_DAY, "md")):
+        for m in pattern.finditer(text):
+            day, mon = (m[1], m[2]) if order == "dm" else (m[2], m[1])
+            month = _MONTHS.get(mon.lower()[:3])
+            if not month:
+                continue
+            for year in (today.year, today.year - 1):
+                try:
+                    candidate = date(year, month, int(day))
+                except ValueError:
+                    return None
+                if candidate <= today:
+                    return candidate.isoformat()
     return None
+
+
+_DAYS_PER_UNIT = {
+    "minute": 0,
+    "min": 0,
+    "hour": 0,
+    "hr": 0,
+    "day": 1,
+    "d": 1,
+    "week": 7,
+    "wk": 7,
+    "w": 7,
+    "month": 30,
+    "mo": 30,
+}
+
+
+def _relative(m: re.Match[str], today: date) -> str:
+    """ISO date for "<n> <unit> ago" text."""
+    return (today - timedelta(days=_DAYS_PER_UNIT[m[2].lower()] * int(m[1]))).isoformat()
 
 
 @dataclass(frozen=True)
@@ -148,6 +171,18 @@ class Adapter(ABC):
     # Rows on these history pages are, by definition, applications the user submitted.
     PROVES_SUBMISSION: ClassVar[bool] = True
     ITEM_ID_FROM_URL: ClassVar[re.Pattern[str] | None] = None
+    # False when real-session validation showed the adapter cannot safely collect (the
+    # page moved, has no application history, or needs new selectors). Such a source is
+    # reported "unsupported" and never scraped. UNSUPPORTED_REASON says why.
+    SUPPORTED: ClassVar[bool] = True
+    UNSUPPORTED_REASON: ClassVar[str] = ""
+    # Regexes removed from extracted roles (e.g. visually hidden screen-reader suffixes).
+    ROLE_NOISE: ClassVar[tuple[str, ...]] = ()
+    # The site's own count of applications (e.g. a tab label "4 Applied"). When present,
+    # a run that read fewer unique items ends "partial" (incomplete_history), and a list
+    # that is absent while the count is 0 is the site's verified empty state.
+    EXPECTED_COUNT_SELECTOR: ClassVar[str | None] = None
+    EXPECTED_COUNT_PATTERN: ClassVar[re.Pattern[str] | None] = None
 
     @property
     def adapter_version(self) -> str:
@@ -179,7 +214,16 @@ class Adapter(ABC):
             return PageState.EMPTY
         if self._list_present(soup):
             return PageState.AUTHENTICATED
+        if self.expected_count(soup) == 0:
+            return PageState.EMPTY
         return PageState.UNKNOWN
+
+    def expected_count(self, soup: BeautifulSoup) -> int | None:
+        if not (self.EXPECTED_COUNT_SELECTOR and self.EXPECTED_COUNT_PATTERN):
+            return None
+        label = text_of(soup.select_one(self.EXPECTED_COUNT_SELECTOR))
+        match = self.EXPECTED_COUNT_PATTERN.search(label or "")
+        return int(match.group(1)) if match else None
 
     def _list_present(self, soup: BeautifulSoup) -> bool:
         return any(soup.select_one(s) for s in self.MARKERS.list_container)
@@ -211,6 +255,7 @@ class Adapter(ABC):
                 usable,
                 selector_tier=selectors.tier,
                 has_more=self.has_more(soup),
+                expected_count=self.expected_count(soup),
             )
         # The history list container is present but no known row structure matched.
         raise AdapterError("selector_drift", "no_rows")
@@ -220,6 +265,8 @@ class Adapter(ABC):
         if not company:
             return None
         role = text_of(row.select_one(sel.role))
+        for noise in self.ROLE_NOISE:
+            role = re.sub(noise, "", role or "", flags=re.IGNORECASE).strip() or None
         raw_status = text_of(row.select_one(sel.status)) if sel.status else None
         applied_text = text_of(row.select_one(sel.applied)) if sel.applied else None
         link = row.select_one(sel.link) if sel.link else None

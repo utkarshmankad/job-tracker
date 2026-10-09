@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import random
 import re
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -44,10 +44,19 @@ EXPECTED = {
         "ids": [str(9100000000 + i) for i in range(5)],
         "applied": ["2026-09-12", "2026-09-05", "2026-08-28", "2026-08-20", "2026-08-10"],
     },
+    # Indeed's live page shows day and month only ("Applied on Indeed on 2 Oct").
     "indeed": {
-        "statuses": ["applied", "viewed", "rejected", "interview", "offer"],
-        "ids": [f"{0xA1B2C3D40000 + i:012x}" for i in range(5)],
-        "applied": ["2026-09-30", "2026-09-22", "2026-09-10", "2026-08-28", "2026-08-15"],
+        "statuses": ["applied", "viewed", "rejected", "interview"],
+        "ids": [f"{0xA1B2C3D40000 + i:012x}" for i in range(4)],
+        "applied": [
+            parse_applied_date(f"on {d}", TODAY) for d in ("2 Oct", "30 Sep", "22 Sep", "15 Sep")
+        ],
+        "roles": [
+            "Engineering Manager",
+            "Senior Backend Engineer",
+            "Data Platform Lead",
+            "Staff Engineer",
+        ],
     },
     "instahyre": {
         "statuses": ["applied", "viewed", "shortlisted", "rejected", "interview"],
@@ -73,6 +82,8 @@ def _page2_url(adapter) -> str:
 def _driver(source: str) -> FixtureDriver:
     adapter = ADAPTERS[source]()
     url, page2 = adapter.HISTORY_URL, _page2_url(adapter)
+    if adapter.PAGINATION == "none":
+        return FixtureDriver({url: _html(source, "page1")})
     pages = {url: _html(source, "page1"), page2: _html(source, "page2")}
     if adapter.PAGINATION == "scroll":
         return FixtureDriver({url: pages[url]}, scrolls={url: [pages[page2]]})
@@ -98,8 +109,10 @@ def test_full_history_collection(source: str) -> None:
     assert [o.applied_on.isoformat() for o in observations] == [
         d if isinstance(d, str) else d.isoformat() for d in expected["applied"]
     ]
-    assert len({o.item_identity()[0] for o in observations}) == 5
-    assert all(o.extraction == "unverified" for o in observations)
+    assert len({o.item_identity()[0] for o in observations}) == len(expected["statuses"])
+    if "roles" in expected:
+        assert [o.role for o in observations] == expected["roles"]
+    assert all(o.extraction == adapter.extraction_label("primary") for o in observations)
     assert all(o.proves_submission for o in observations)
     # Lazily loaded pages repeat earlier rows; they are de-duplicated, not double-counted.
     if adapter.PAGINATION in ("load_more", "scroll"):
@@ -150,12 +163,46 @@ def test_signed_out_redirect_is_detected_by_url(source: str) -> None:
     assert _run(adapter, driver).status == "signed_out"
 
 
-def test_no_adapter_claims_live_verification() -> None:
-    """Until a person verifies an adapter against the live site, it must say so."""
-    for cls in (LinkedInAdapter, NaukriAdapter, IndeedAdapter, InstahyreAdapter, CareerNetAdapter):
+def test_live_validation_status_is_honest() -> None:
+    """Real-session validation (2026-10-09): Indeed rewritten from the live page; Naukri
+    unverified (signed out); LinkedIn, Instahyre and CareerNet cannot be collected safely
+    and must refuse rather than scrape."""
+    for cls in (LinkedInAdapter, InstahyreAdapter, CareerNetAdapter):
+        assert cls.SUPPORTED is False and cls.UNSUPPORTED_REASON
         assert cls.LIVE_VERIFIED is None
-        assert cls().extraction_label("primary") == "unverified"
+        with pytest.raises(UnsupportedSource, match=cls.SOURCE_KEY):
+            adapter_for(cls.SOURCE_KEY)
+    assert NaukriAdapter.SUPPORTED and NaukriAdapter.LIVE_VERIFIED is None
+    assert NaukriAdapter().extraction_label("primary") == "unverified"
+    assert IndeedAdapter.SUPPORTED
     assert set(ADAPTERS) == {"linkedin", "naukri", "indeed", "instahyre", "careernet"}
+
+
+def test_indeed_reads_the_live_structure_and_strips_hidden_text() -> None:
+    adapter = IndeedAdapter()
+    result = adapter.parse_page(_html("indeed", "page1"), adapter.HISTORY_URL, TODAY)
+    assert result.expected_count == 4 and len(result.items) == 4
+    assert all("opens in a new window" not in (i.role or "") for i in result.items)
+    assert [i.company for i in result.items][:2] == ["Northwind Robotics", "Contoso Analytics"]
+
+
+def test_indeed_fewer_rows_than_the_site_reports_is_partial() -> None:
+    adapter = IndeedAdapter()
+    outcome = _run(adapter, FixtureDriver({adapter.HISTORY_URL: _html("indeed", "incomplete")}))
+    assert (outcome.status, outcome.error_code) == ("partial", "incomplete_history")
+    assert len(outcome.observations) == 4 and outcome.diagnostics.expected_count == 6
+
+
+def test_indeed_zero_count_is_the_verified_empty_state() -> None:
+    adapter = IndeedAdapter()
+    outcome = _run(adapter, FixtureDriver({adapter.HISTORY_URL: _html("indeed", "empty")}))
+    assert outcome.status == "succeeded" and outcome.observations == []
+
+
+def test_naukri_registration_page_means_signed_out() -> None:
+    adapter = NaukriAdapter()
+    driver = FixtureDriver({adapter.HISTORY_URL: _html("naukri", "register_page")})
+    assert _run(adapter, driver).status == "signed_out"
 
 
 def test_fixtures_are_sanitized() -> None:
@@ -197,6 +244,9 @@ def test_relative_and_absolute_dates() -> None:
     assert parse_applied_date("yesterday", today) == (today - timedelta(days=1)).isoformat()
     assert parse_applied_date("sometime last spring", today) is None
     assert parse_applied_date("31 Feb 2026", today) is None
+    # Day and month only: the most recent such date that is not in the future.
+    assert parse_applied_date("Applied on Indeed on 2 Oct", date(2026, 10, 9)) == "2026-10-02"
+    assert parse_applied_date("Applied on 15 Dec", date(2026, 10, 9)) == "2025-12-15"
 
 
 # ------------------------------------------------------------------ #

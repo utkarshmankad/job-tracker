@@ -61,6 +61,7 @@ class PageResult:
     items: list[ExtractedItem] = field(default_factory=list)
     selector_tier: str = "primary"  # which selector set matched: primary | fallback
     has_more: bool = False
+    expected_count: int | None = None  # the site's own count, when it shows one
 
 
 @dataclass
@@ -76,6 +77,7 @@ class Diagnostics:
     batches_sent: int = 0
     stopped_state: str | None = None
     stopped_detail: str | None = None
+    expected_count: int | None = None
 
     def to_payload(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -87,6 +89,8 @@ class Diagnostics:
             "fallback_pages": self.fallback_pages,
             "batches_sent": self.batches_sent,
         }
+        if self.expected_count is not None:
+            out["expected_count"] = self.expected_count
         if self.stopped_state:
             out["stopped_state"] = self.stopped_state
         if self.stopped_detail:

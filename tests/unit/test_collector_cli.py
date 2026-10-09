@@ -29,7 +29,7 @@ def home(tmp_path: Path, monkeypatch) -> Path:
     (tmp_path / "home" / "config.toml").write_text(
         'api_url = "https://tracker.example.test"\n'
         f'[browser]\nuser_data_dir = "{tmp_path / "profile"}"\n'
-        '[[sources]]\nsource_key = "linkedin"\n'
+        '[[sources]]\nsource_key = "indeed"\n'
         '[[sources]]\nsource_key = "employer-unknown"\n[sources.employer]\nhistory_url = "x"\n'
     )
     return tmp_path / "home"
@@ -109,7 +109,7 @@ def test_enroll_failure_reports_a_code_only(memory_keyring, fake_client) -> None
 def test_validate_config_reports_support_and_credential(home, memory_keyring) -> None:  # noqa: F811
     result = CliRunner().invoke(cli, ["validate-config"])
     assert result.exit_code == 0, result.output
-    assert "linkedin/default (enabled, supported)" in result.output
+    assert "indeed/default (enabled, supported)" in result.output
     assert "employer-unknown/default (enabled, UNSUPPORTED)" in result.output
     assert "Credential: missing" in result.output
 
@@ -124,7 +124,8 @@ def test_invalid_config_is_a_clean_error(tmp_path, monkeypatch) -> None:
 def test_adapters_are_honest_about_verification() -> None:
     result = CliRunner().invoke(cli, ["adapters"])
     assert result.exit_code == 0
-    assert result.output.count("not yet (fixture-tested only)") == 5
+    assert result.output.count("UNSUPPORTED:") == 3  # linkedin, instahyre, careernet
+    assert "naukri" in result.output and "not yet (fixture-tested only)" in result.output
     assert "employer-<slug>" in result.output
 
 
@@ -171,7 +172,7 @@ def test_run_refuses_while_another_run_holds_the_lock(home, memory_keyring) -> N
     state.mkdir(exist_ok=True)
     (home.parent / "profile").mkdir()
     with run_lock(state / "collector.lock"):
-        result = CliRunner().invoke(cli, ["run", "--source", "linkedin", "--dry-run"])
+        result = CliRunner().invoke(cli, ["run", "--source", "indeed", "--dry-run"])
     assert result.exit_code != 0 and "Another collection run is in progress" in result.output
 
 

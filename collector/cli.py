@@ -173,6 +173,11 @@ def validate_config(config_file: Path | None) -> None:
 def list_adapters() -> None:
     """List supported adapters and whether their selectors were verified live."""
     for key, adapter_cls in sorted(ADAPTERS.items()):
+        if not adapter_cls.SUPPORTED:
+            click.echo(
+                f"{key:10s} v{adapter_cls.VERSION}  UNSUPPORTED: {adapter_cls.UNSUPPORTED_REASON}"
+            )
+            continue
         verified = adapter_cls.LIVE_VERIFIED or "not yet (fixture-tested only)"
         click.echo(
             f"{key:10s} v{adapter_cls.VERSION}  pagination={adapter_cls.PAGINATION:9s}  "

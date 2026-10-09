@@ -16,7 +16,10 @@ class UnsupportedSource(LookupError):
 
 def adapter_for(source_key: str, employer: dict[str, object] | None = None) -> Adapter:
     if source_key in ADAPTERS:
-        return ADAPTERS[source_key]()
+        adapter = ADAPTERS[source_key]()
+        if not adapter.SUPPORTED:
+            raise UnsupportedSource(f"{source_key}: {adapter.UNSUPPORTED_REASON}")
+        return adapter
     if source_key.startswith("employer-") and employer:
         try:
             return build_employer_adapter(source_key, dict(employer))

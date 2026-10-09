@@ -1,6 +1,25 @@
 """Adapters for job sites' own application-history pages.
 
-STATUS OF EVERY ADAPTER IN THIS FILE: fixture-tested only. The history URLs and selectors
+REAL-SESSION VALIDATION (2026-10-09, read-only, user's own signed-in browser):
+
+- indeed: history page confirmed; selectors rewritten from the live structure (stable
+  ``data-testid`` and ARIA hooks, not generated class names); all rows read and
+  matched the site's own count. Verified end to end with the collector before
+  ``LIVE_VERIFIED`` is set.
+- linkedin: the history moved to a new "Job tracker" (``/jobs-tracker/?stage=applied``)
+  with generated class names, no row markers and job links outside their rows. No stable
+  selectors exist yet → ``SUPPORTED = False`` (the old page now redirects; the adapter
+  would have stopped with ``unexpected_page``, never a false empty result).
+- naukri: the profile was signed out; the signed-out page (a registration form with a
+  login link) is now recognised as ``signed_out``. Row selectors remain unverified.
+- instahyre: there is no application-history page; "Activity" lists recruiters who
+  viewed the résumé (with their names) — not proof of an application, and personal data
+  the collector must not take → ``SUPPORTED = False``.
+- careernet: the candidate platform is a separate site (mycareernet); the guessed
+  history URL does not exist and the profile was signed out there → ``SUPPORTED = False``
+  until its history page is located.
+
+STATUS OF ADAPTERS NOT LISTED AS VERIFIED ABOVE: fixture-tested only. The history URLs and selectors
 are a best structural reading of each site and have NOT been confirmed against the live
 sites (``LIVE_VERIFIED = None``). Consequences, by design:
 
@@ -27,8 +46,12 @@ class LinkedInAdapter(Adapter):
     """LinkedIn "My Jobs → Applied" (Easy Apply and external applications tracked there)."""
 
     SOURCE_KEY = "linkedin"
-    VERSION = "0.1.0"
-    HISTORY_URL = "https://www.linkedin.com/my-items/saved-jobs/?cardType=APPLIED"
+    VERSION = "0.2.0"
+    HISTORY_URL = "https://www.linkedin.com/jobs-tracker/?stage=applied"
+    SUPPORTED = False
+    UNSUPPORTED_REASON = (
+        "LinkedIn's new Job tracker has no stable row selectors yet (generated class names)"
+    )
     ALLOWED_HOSTS = ("linkedin.com",)
     PAGINATION = "next"
     NEXT_SELECTOR = "button.artdeco-pagination__button--next"
@@ -101,8 +124,9 @@ class NaukriAdapter(Adapter):
         ),
     )
     MARKERS = StateMarkers(
-        signed_out=("form#loginForm", "#usernameField"),
-        signed_out_urls=("/nlogin/login", "/login"),
+        # Signed out, the history URL shows a registration page with a "Login" link.
+        signed_out=("form#loginForm", "#usernameField", "a[href*='/nlogin/login']"),
+        signed_out_urls=("/nlogin/login", "/login", "/registration"),
         empty=(".apply-history-empty",),
         list_container=(".apply-history-list", "section.jobTupleList"),
     )
@@ -120,40 +144,34 @@ class NaukriAdapter(Adapter):
 
 
 class IndeedAdapter(Adapter):
-    """Indeed "My jobs → Applied"."""
+    """Indeed "My jobs → Applied". Selectors from the live page (2026-10-09): cards are
+    list items carrying ``data-testid="jobStatusDateShort"``; the title link sits in the
+    card header's ARIA heading; the site's own "<n> Applied" tab label gives the count."""
 
     SOURCE_KEY = "indeed"
-    VERSION = "0.1.0"
+    VERSION = "0.2.0"
     HISTORY_URL = "https://myjobs.indeed.com/applied"
     ALLOWED_HOSTS = ("indeed.com",)
-    PAGINATION = "load_more"
-    LOAD_MORE_SELECTOR = "button[data-testid='myjobs-load-more']"
+    PAGINATION = "none"
     ITEM_ID_FROM_URL = re.compile(r"[?&]jk=([0-9a-f]{12,})")
+    ROLE_NOISE = (r"\s*job description opens in a new window\s*$",)
+    EXPECTED_COUNT_SELECTOR = "[data-testid='APPLIED']"
+    EXPECTED_COUNT_PATTERN = re.compile(r"(\d+)\s+Applied", re.IGNORECASE)
     SELECTORS = (
         SelectorSet(
             "primary",
-            row="div[data-testid='myjobs-card']",
-            company="[data-testid='myjobs-company']",
-            role="[data-testid='myjobs-title']",
-            status="[data-testid='myjobs-status']",
-            applied="[data-testid='myjobs-applied-date']",
-            link="a[data-testid='myjobs-title']",
-        ),
-        SelectorSet(
-            "fallback",
-            row="li.atw-JobCard",
-            company=".atw-JobInfo-companyName",
-            role=".atw-JobInfo-jobTitle",
-            status=".atw-JobCard-status",
-            applied=".atw-JobInfo-appliedDate",
-            link="a.atw-JobInfo-jobTitle",
+            row="li:has([data-testid='jobStatusDateShort'])",
+            company="header [role='heading'] + div > span:first-child",
+            role="header [role='heading'] a",
+            status="header > div:first-child span",
+            applied="[data-testid='jobStatusDateShort']",
+            link="header [role='heading'] a",
         ),
     )
     MARKERS = StateMarkers(
         signed_out=("form#loginform", "[data-testid='auth-page']"),
         signed_out_urls=("secure.indeed.com/auth", "/account/login"),
-        empty=("[data-testid='myjobs-empty']",),
-        list_container=("[data-testid='myjobs-list']", "ul.atw-JobList"),
+        list_container=("[data-testid='jobStatusDateShort']",),
     )
     STATUS_MAP = {
         "applied": "applied",
@@ -172,7 +190,11 @@ class InstahyreAdapter(Adapter):
     """Instahyre candidate application activity."""
 
     SOURCE_KEY = "instahyre"
-    VERSION = "0.1.0"
+    VERSION = "0.2.0"
+    SUPPORTED = False
+    UNSUPPORTED_REASON = (
+        "Instahyre has no application-history page (its activity feed lists recruiter views)"
+    )
     HISTORY_URL = "https://www.instahyre.com/candidate/applications/"
     ALLOWED_HOSTS = ("instahyre.com",)
     PAGINATION = "scroll"
@@ -212,7 +234,9 @@ class CareerNetAdapter(Adapter):
     """CareerNet candidate applications (table layout)."""
 
     SOURCE_KEY = "careernet"
-    VERSION = "0.1.0"
+    VERSION = "0.2.0"
+    SUPPORTED = False
+    UNSUPPORTED_REASON = "CareerNet's candidate history page has not been located (mycareernet)"
     HISTORY_URL = "https://www.careernet.in/candidate/applications"
     ALLOWED_HOSTS = ("careernet.in",)
     PAGINATION = "next"

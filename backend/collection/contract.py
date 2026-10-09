@@ -316,6 +316,7 @@ ERROR_MESSAGES = {
     "interrupted": "The run was interrupted before it finished.",
     "page_limit": "Stopped at the configured page limit; older history was not read.",
     "invalid_items": "Some rows could not be validated and were not sent.",
+    "incomplete_history": "Fewer applications were read than the site reports.",
 }
 
 

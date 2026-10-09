@@ -109,6 +109,11 @@ class SourceRunner:
                 status, error_code = "failed", "submission_failed"
         if status == "succeeded" and outcome.diagnostics.items_invalid:
             status, error_code = "partial", "invalid_items"
+        expected = outcome.diagnostics.expected_count
+        if status == "succeeded" and expected is not None and len(outcome.observations) < expected:
+            # The site says there are more applications than were read: never call that
+            # a complete collection.
+            status, error_code = "partial", "incomplete_history"
         outcome.status, outcome.error_code = status, error_code
         if not dry_run:
             assert self._client is not None
@@ -152,6 +157,8 @@ class SourceRunner:
             if result.state is PageState.EMPTY:
                 # The site's explicit "no applications" state, not a guess.
                 return "succeeded", None
+            if diag.expected_count is None and result.expected_count is not None:
+                diag.expected_count = result.expected_count
             if result.selector_tier != "primary":
                 diag.fallback_pages += 1
             new_items = 0
