@@ -483,16 +483,18 @@ class DataStore:
                         col(Application.role).ilike(term),
                     )
                 )
+            # Same rule as is_application_stale (the row flag, dashboard and
+            # get_stale_applications): an Applied record with no update in the threshold.
             if filters.is_stale is True:
                 stale_cutoff = utc_now() - timedelta(days=STALE_DAYS_THRESHOLD)
                 conditions.append(col(Application.current_status) == ApplicationStatus.APPLIED)
-                conditions.append(col(Application.applied_date) < stale_cutoff)
+                conditions.append(col(Application.updated_at) < stale_cutoff)
             elif filters.is_stale is False:
                 stale_cutoff = utc_now() - timedelta(days=STALE_DAYS_THRESHOLD)
                 conditions.append(
                     ~(
                         (col(Application.current_status) == ApplicationStatus.APPLIED)
-                        & (col(Application.applied_date) < stale_cutoff)
+                        & (col(Application.updated_at) < stale_cutoff)
                     )
                 )
             if filters.interviewed is not None:

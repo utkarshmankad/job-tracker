@@ -72,7 +72,9 @@ jobs:
       # previously-ignored CVEs — no ignores needed. Keep this gate strict; if a real
       # ignore is ever needed, scope it to the specific PYSEC id with a comment and an
       # expiry/tracking link, not a blanket allowance.
-      - run: pip-audit -r requirements.txt
+      # Audit runtime AND development dependencies: test tooling runs on developer machines
+      # and CI runners, so a vulnerable dev package is still a real exposure.
+      - run: pip-audit -r requirements.txt -r requirements-dev.txt
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}

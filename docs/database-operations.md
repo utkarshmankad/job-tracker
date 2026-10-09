@@ -112,42 +112,135 @@ you've stopped the API yourself (local development).
 ## Production migration sequence (Fly.io)
 
 `APP` is `job-tracker-api-verdant-haze-8797`. Run each `fly ssh console` command from your
-own terminal.
+own terminal. Merging to `main` deploys automatically (`.github/workflows/fly-deploy.yml`).
 
-1. **Check the current revision.**
+First decide which case applies. A migration can only be run by an image that contains
+its Alembic revision:
+
+```bash
+fly ssh console --app $APP -C "python /app/scripts/migrate_database.py status"
+fly ssh console --app $APP -C "ls /app/backend/db/alembic/versions"
+```
+
+- **Case A — the revision is already in the deployed image.** `status` reports `outdated`
+  and the revision file is listed. This happens, for example, after a restore of an older
+  backup. Use [Case A](#case-a-migration-already-in-the-deployed-image).
+- **Case B — the revision arrives with the incoming image.** The new revision is not in
+  `versions/`, and `status` reports `current` against the old head. Running `upgrade` now
+  would do nothing. Use [Case B](#case-b-migration-introduced-by-the-incoming-image).
+  Every release that adds a file under `backend/db/alembic/versions/` is Case B. That
+  includes Phase 2 (`0001_baseline` → `0004_merge_operations`).
+
+### Case A: migration already in the deployed image
+
+1. Volume snapshot and maintenance mode: steps 3–4 of Case B.
+2. `fly ssh console --app $APP -C "python /app/scripts/migrate_database.py upgrade"`. This
+   takes a verified backup, migrates a trial copy, migrates, then checks integrity and runs
+   diagnostics.
+3. Verification and resume: steps 8–12 of Case B.
+
+### Case B: migration introduced by the incoming image
+
+In production, the new image refuses to serve on an outdated schema and starts in
+maintenance mode. So the order is **deploy, then migrate**, never the reverse.
+
+1. **CI passes on the pull request.** Every job, including `All Checks Passed`, the browser
+   E2E tests and the dependency audit. Do not merge with a failing or pending check.
+2. **Application-level backup, verified.**
    ```bash
-   fly ssh console --app $APP -C "python /app/scripts/migrate_database.py status"
+   fly ssh console --app $APP -C "python /app/scripts/backup_database.py --label pre-release"
+   fly ssh console --app $APP -C "python /app/scripts/verify_backup.py /data/backups/<name>"
    ```
-   The first deploy of Phase 1 shows `unversioned`. After a deploy that adds a revision, the
-   app is already in maintenance mode, because it refuses to start on an outdated schema.
-2. **Take an extra safety net (optional, recommended).**
+   Record the backup name and its SHA-256 (it is in `manifest.json`).
+3. **Fly volume snapshot, confirmed.**
    ```bash
-   fly volumes list --app $APP                  # note the volume ID
+   fly volumes list --app $APP                      # note the volume ID
    fly volumes snapshots create <volume-id>
+   fly volumes snapshots list <volume-id>           # wait until the new one is "created"
    ```
-3. **Stop or quiesce writers.**
+4. **Maintenance mode.** This stops Gmail polling and data writes. `/api/v1/health` stays OK.
    ```bash
    fly ssh console --app $APP -C "touch /data/MAINTENANCE"
-   fly machine restart <machine-id> --app $APP   # comes back in maintenance mode
+   fly machine restart <machine-id> --app $APP
+   fly logs --app $APP --no-tail | grep -E "app_started_in_maintenance_mode|poller_scheduler_stopped"
    ```
-4. **Create a verified backup and apply the migration.** These are one command: the upgrade
-   refuses to proceed if the backup or its verification fails.
+5. **Merge the pull request.** The deploy workflow builds and releases the new image. Do not
+   trigger a second deploy by hand while it runs.
+   ```bash
+   gh run list --branch main --limit 3              # watch "Fly Deploy" for the merge commit
+   ```
+6. **Confirm the new machine is healthy and in maintenance mode.**
+   ```bash
+   fly status --app $APP                            # new release, checks passing
+   fly ssh console --app $APP -C "ls /data/MAINTENANCE"
+   fly ssh console --app $APP -C "python /app/scripts/migrate_database.py status"
+   ```
+   `status` must now report `outdated`, with the head set to the new revision.
+7. **Run the documented migration.**
    ```bash
    fly ssh console --app $APP -C "python /app/scripts/migrate_database.py upgrade"
    ```
-   The output lists the backup directory, the verification, `Integrity: ok`, and every
-   diagnostic. Note the backup path for rollback.
-5. **Run integrity and application diagnostics again (read-only).**
+   The command takes and verifies its own `pre-migration` backup, migrates a trial copy,
+   then migrates. It finishes with `Integrity: ok` and the diagnostics. Note the
+   pre-migration backup name.
+8. **Verify schema, integrity, foreign keys, row counts and invariants.** These are
+   read-only.
    ```bash
-   fly ssh console --app $APP -C "sh -c 'cd /app && python -m backend.diagnostics'"
+   fly ssh console --app $APP -C "python /app/scripts/migrate_database.py status"
+   fly ssh console --app $APP -C "python -c \"import sqlite3; c=sqlite3.connect('file:/data/applications.db?mode=ro', uri=True); print(c.execute('pragma integrity_check').fetchall(), len(c.execute('pragma foreign_key_check').fetchall()))\""
    ```
-   `poller_state` may show stale while quiesced. That's expected.
-6. **Resume service.**
-   ```bash
-   fly ssh console --app $APP -C "rm /data/MAINTENANCE"
-   fly machine restart <machine-id> --app $APP
-   ```
-   Then sign in and check **Status**: Database Schema should show the head revision.
+   - Compare every pre-existing table count with the `table_counts` in the step 2 manifest.
+     They must be equal.
+   - Check the release's invariants. For Phase 2: every application `active`, no merge
+     operations, no evidence linked by the release.
+   - If anything fails, **stay in maintenance mode** and follow
+     [Rollback](#rollback). Do not continue.
+9. **Server-side smoke checks** (still in maintenance mode):
+   - `/api/v1/health` returns OK;
+   - an unauthenticated `/api/v1/applications` returns 401;
+   - local sign-in is refused (403);
+   - an unauthenticated mutation is refused;
+   - the diagnostics pass:
+     `fly ssh console --app $APP -C "sh -c 'cd /app && python -m backend.diagnostics'"`.
+
+   Authenticated data endpoints return 503 while the flag is present. That is by design.
+10. **Disable maintenance mode.**
+    ```bash
+    fly ssh console --app $APP -C "rm /data/MAINTENANCE"
+    fly machine restart <machine-id> --app $APP
+    ```
+    The logs must show `app_started poller_enabled=True`.
+11. **Authenticated browser acceptance.** Sign in to the production frontend, then confirm:
+    - the application count and dashboard figures match the step 2 aggregates;
+    - the release's new screens or endpoints load;
+    - the browser console and network show no errors.
+
+    Never use a destructive action to test (for example, cancel a merge preview).
+12. **Monitor and keep rollback references.**
+    - Watch `fly logs` through at least two poll cycles for authentication, migration,
+      polling, resolver and database errors.
+    - Record the release ID, the merge commit, the step 2 backup, the pre-migration backup
+      and the snapshot ID.
+    - Keep them until the release is accepted.
+
+### Rollback boundary
+
+A migrated database and the application image are a pair:
+
+- **Never restore a pre-migration backup under the new image.** In production the new
+  image refuses to serve an outdated schema, so it would start in maintenance mode.
+- **Never run the new schema under an old image without a stamp.** An old image refuses an
+  unknown revision.
+
+| Situation | Rollback |
+|---|---|
+| Before step 5 (nothing deployed) | Remove the flag and restart. Nothing changed. |
+| Migration failed or verification failed (step 7–8) | Stay in maintenance mode. Restore the pre-migration backup **and** redeploy the previous image (`fly releases --app $APP`, then `fly deploy --app $APP --image <previous image>`). Then remove the flag. |
+| Released, problem found, data written since | Prefer rolling forward. If the release must go, choose between: (a) restore a backup and redeploy the previous image, accepting the loss of writes made after the backup; or (b) roll back code only with `migrate_database.py stamp <old revision>` (expand-only schemas), keeping the data. |
+| Whole volume lost | Restore from the step 3 snapshot (see the restore runbook). Then match the image to the schema the snapshot holds. |
+
+Restoring the database without redeploying the matching image, or the reverse, leaves the
+app in maintenance mode or running against a schema it doesn't know.
 
 ## Rollback
 
