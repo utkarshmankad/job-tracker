@@ -393,3 +393,33 @@ def test_add_distinct_interview_rounds(tmp_path: Path) -> None:
         InterviewRound.RECRUITER_SCREEN,
         InterviewRound.TECHNICAL,
     ]
+
+
+def test_is_stale_filter_matches_the_row_flag_and_dashboard(tmp_path: Path) -> None:
+    """Regression: the Stale tab/badge filter used applied_date while the per-row flag,
+    the dashboard and get_stale_applications use updated_at ("no update in 14 days"),
+    so an old application with a recent update was listed as stale but not flagged."""
+    ds = DataStore(tmp_path / "test.db")
+    old = utc_now() - timedelta(days=30)
+    recently_updated = ds.upsert_application(_make_app(company="Revived", applied_date=old))
+    untouched = ds.upsert_application(_make_app(company="Quiet", applied_date=old))
+    fresh = ds.upsert_application(_make_app(company="New"))
+    with Session(ds._engine) as session:
+        for app_id, updated in (
+            (recently_updated.id, utc_now() - timedelta(days=2)),
+            (untouched.id, old),
+        ):
+            row = session.get(Application, app_id)
+            row.updated_at = updated
+            session.add(row)
+        session.commit()
+
+    stale, stale_total = ds.get_applications(ApplicationFilter(is_stale=True))
+    active, _ = ds.get_applications(ApplicationFilter(is_stale=False))
+    everything, total = ds.get_applications(ApplicationFilter())
+
+    assert {a.id for a in stale} == {untouched.id}
+    assert {a.id for a in active} == {recently_updated.id, fresh.id}
+    assert stale_total == sum(1 for a in everything if is_application_stale(a))
+    assert {a.id for a in ds.get_stale_applications()} == {a.id for a in stale}
+    assert stale_total + len(active) == total
