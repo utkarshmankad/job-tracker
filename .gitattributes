@@ -1,0 +1,4 @@
+# Verbatim SQLite schema dumps: SQLite stores DDL exactly as written, including trailing
+# spaces, and the migration tests rebuild databases from these files byte-for-byte.
+# Exempt only these fixtures from whitespace checks (git diff --check).
+tests/fixtures/schema/*.sql -whitespace
