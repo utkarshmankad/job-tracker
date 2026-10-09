@@ -504,10 +504,7 @@ async def rotate_collector(
     and create a new one for supported sources. Revocation is always available."""
     db = _db(request)
     existing = db.get_collector(collector_id)
-    if (
-        existing is not None
-        and existing.token_id == app_config.BROWSER_WORKFLOW_COLLECTOR_TOKEN_ID
-    ):
+    if existing is not None and existing.token_id == app_config.BROWSER_WORKFLOW_COLLECTOR_TOKEN_ID:
         raise HTTPException(
             status_code=409,
             detail="The signed-in browser workflow has no bearer credential to rotate.",
@@ -543,10 +540,7 @@ async def rotate_collector(
 async def revoke_collector(collector_id: int, request: Request) -> CollectorResponse:
     user = require_user(request)
     existing = _db(request).get_collector(collector_id)
-    if (
-        existing is not None
-        and existing.token_id == app_config.BROWSER_WORKFLOW_COLLECTOR_TOKEN_ID
-    ):
+    if existing is not None and existing.token_id == app_config.BROWSER_WORKFLOW_COLLECTOR_TOKEN_ID:
         raise HTTPException(
             status_code=409,
             detail="Disable the ChatGPT scheduled task instead of revoking this workflow.",

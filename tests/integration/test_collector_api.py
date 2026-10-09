@@ -201,15 +201,11 @@ def test_browser_import_previews_then_ingests_idempotently(env) -> None:
     assert workflow["state"] == "browser_workflow"
     assert workflow["token_hint"] == "signed-in browser"
     assert (
-        env.client.post(
-            f"{_BASE}/collectors/{workflow['id']}/rotate", headers=env.csrf
-        ).status_code
+        env.client.post(f"{_BASE}/collectors/{workflow['id']}/rotate", headers=env.csrf).status_code
         == 409
     )
     assert (
-        env.client.post(
-            f"{_BASE}/collectors/{workflow['id']}/revoke", headers=env.csrf
-        ).status_code
+        env.client.post(f"{_BASE}/collectors/{workflow['id']}/revoke", headers=env.csrf).status_code
         == 409
     )
 
