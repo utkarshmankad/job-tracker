@@ -21,6 +21,7 @@ from backend.db.models import (
     ApplicationEvent,
     ApplicationEventType,
     ApplicationStatus,
+    Evidence,
     InterviewRound,
     Prospect,
     utc_now,
@@ -41,6 +42,7 @@ _TABLES = (
     "processedmessage",
     "suppressrule",
     "pollerstate",
+    "evidence",
 )
 
 
@@ -107,6 +109,30 @@ def _populate(path: Path) -> None:
                 application_id=apps[2].id if j == 0 else None,
             )
         )
+    for k, application in enumerate(apps[:2]):
+        stored, _ = store.insert_evidence(
+            Evidence(
+                evidence_type="email",
+                source="gmail",
+                external_id=f"evidence-{k}",
+                thread_id=f"thread-{k}a",
+                sender="Recruiting <jobs@example.com>",
+                subject=f"Update {k}",
+                snippet="synthetic",
+                occurred_at=now - timedelta(days=k),
+                raw_metadata={"classification": "status_update"},
+            )
+        )
+        store.link_evidence(stored.id, application.id, "thread", 1.0)
+    review, _ = store.insert_evidence(
+        Evidence(
+            evidence_type="portal_import",
+            source="naukri",
+            subject="Unmatched",
+            occurred_at=now,
+        )
+    )
+    store.update_evidence_processing(review.id, "needs_review", review_reason="drill")
     store.add_suppress_rule("noreply@spam.example")
     store.mark_processed("msg-0", "applied")
     store.update_poller_state(status="RUNNING", last_history_id="12345")
@@ -119,6 +145,7 @@ def test_full_backup_and_restore_drill(tmp_path: Path) -> None:
     original = _dump(live)
     assert len(original["application"]) == 4
     assert len(original["applicationthreadid"]) == 8
+    assert len(original["evidence"]) == 3
     assert original["applicationevent"] and original["prospect"] and original["statushistory"]
 
     # 1. Back up the live database while a connection holds it open (as the API would).
@@ -158,6 +185,9 @@ def test_full_backup_and_restore_drill(tmp_path: Path) -> None:
         ApplicationEventType.INTERVIEW_ATTENDED
     ) == 1
     assert store.get_poller_state().last_history_id == "12345"
+    assert [e.external_id for e in store.get_evidence_for_application(acme.id)] == ["evidence-0"]
+    assert store.get_application(acme.id).last_evidence_at is not None
+    assert store.count_evidence()["needs_review"] == 1
     store.close()
 
 

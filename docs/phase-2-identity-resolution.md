@@ -1,0 +1,535 @@
+# Phase 2 — Evidence model and identity resolution
+
+Status: implemented on `feat/phase-2-identity-resolution` (base `origin/main` @ `a579969`).
+Builds on Phase 1 (auth, Alembic, verified backups). Plan context:
+[`phase-1-implementation.md`](phase-1-implementation.md) §4 Steps 4–5.
+
+## Goal
+
+Every observation the tracker receives — a Gmail message, a portal import, a future
+browser-agent observation, a manual note — is stored once as **evidence** and linked to an
+application when its identity is clear. A message that is not an application acknowledgement
+(scheduling, interview follow-up, rejection, any later-stage mail) never creates an
+application just because its Gmail message ID is new. Unclear cases stay visible for review.
+
+## 1. Data model (additive)
+
+### `evidence` (new table)
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | integer PK | |
+| `evidence_type` | varchar | `email` \| `portal_import` \| `browser_observation` \| `manual` |
+| `source` | varchar | `gmail` \| `linkedin` \| `naukri` \| `indeed` \| `instahyre` \| `careernet` \| `company_portal` \| `other` (the *channel*; for Gmail the matched job portal is in metadata) |
+| `external_id` | varchar, null | Gmail message ID, portal record ID, … |
+| `thread_id` | varchar, null, indexed | Gmail thread ID |
+| `sender`, `recipient` | varchar, null | `recipient` is not populated for Gmail (it is the owner's own address) |
+| `subject`, `normalized_subject` | varchar, null | normalized: `Re:`/`Fwd:` prefixes stripped, case-folded, whitespace collapsed |
+| `snippet` | varchar(≤500), null | Gmail's own preview snippet only — never the message body |
+| `occurred_at` | datetime (UTC), indexed | when it happened (email `Date`) |
+| `captured_at` | datetime (UTC) | when the tracker recorded it |
+| `raw_metadata` | JSON | structured, non-content metadata: parser classification, portal, extracted company/role/job URL, status signal, backfill provenance |
+| `content_fingerprint` | varchar(64), **unique** | SHA-256, see §3 |
+| `processing_status` | varchar, indexed | `pending` \| `linked` \| `created_application` \| `needs_review` \| `informational` \| `ignored` \| `error` |
+| `review_reason` | varchar, null | why it needs review (`ambiguous_company`, `follow_up_without_application`, `manually_unlinked`, …) |
+| `application_id` | FK → `application.id`, null, indexed | |
+| `link_method` | varchar, null | `thread` \| `job_url` \| `external_job_id` \| `company_role` \| `company_only` \| `created` \| `manual` \| `backfill` |
+| `link_confidence` | float, null | 0–1 |
+| `created_at`, `updated_at` | datetime (UTC) | |
+
+Enumerated columns are plain `VARCHAR` validated in Python (`StrEnum`), not `SAEnum`: a value
+added by a later release must not make older code raise `LookupError` when reading the row
+(the failure class the Phase 1 enum diagnostic exists for).
+
+### `application` (new nullable columns only)
+
+| Column | Why |
+|---|---|
+| `normalized_company` (indexed) | identity matching without re-normalizing every row per message |
+| `normalized_role` | company+role matching |
+| `canonical_job_url` (indexed) | exact job-URL identity (tracking parameters stripped) |
+| `external_job_id` (indexed) | portal job IDs (portal imports; Gmail does not extract them yet) |
+| `last_evidence_at` | newest linked evidence; recomputable from `evidence` |
+
+No column is removed or renamed. `thread_ids` JSON, `applicationthreadid`, `processedmessage`
+and `prospect` keep working exactly as before. `source_account` was considered and **not**
+added: there is one owner and one Gmail account, so it would carry no information yet.
+
+The three derived identity columns are computed by `DataStore` from `company`, `role` and
+`job_url` whenever an application is saved, and filled in for rows where they are NULL by
+idempotent runtime maintenance (the same pattern as the Phase 1 thread-index backfill). That
+keeps the normalization rules in one place (`backend/engine/normalization.py`) and repairs rows
+written by an older release.
+
+## 2. Data flow (Gmail)
+
+```
+Gmail list/history ──► message id ──► processedmessage? ──yes──► skip (unchanged ledger)
+                                         │ no
+                                         ▼
+                     fetch metadata (From/Subject/Date) ──► INSERT evidence (idempotent,
+                                         │                  minimal: ids, thread, date)
+                                         ▼
+                                   EmailParser.parse
+             ┌───────────────────────────┼──────────────────────────────┐
+             ▼                           ▼                              ▼
+     not job mail / suppressed     LinkedIn prospect            job-related (ParsedApplication)
+     status=ignored, no sender/    upsert prospect; evidence    add sender/subject/snippet +
+     subject/snippet stored        details; status=informational parser metadata; classify kind
+                                                                        │
+                                                         IdentityResolver.resolve
+                         ┌───────────────────┬──────────────────────────┼────────────────────┐
+                         ▼                   ▼                          ▼                    ▼
+                     match found        ambiguous                 no match, kind=        no match, kind=
+                     link + merge       needs_review              acknowledgement        follow_up/status
+                     thread + status    (reason)                  create app + link      needs_review
+                     transition                                    (created)              (reason)
+                                         └──────── mark processedmessage (unchanged ledger) ───────┘
+```
+
+* The processed-message ledger stays the first idempotency guard; evidence uniqueness is the
+  second. Re-running a message (crash between steps, `backfill_portal` clearing a marker)
+  finds the existing evidence row and re-classifies it instead of inserting a copy.
+* Status changes still go only through `StatusUpdater._advance_status()`.
+* Message bodies fetched for company/role refinement are used in memory only, as before.
+
+## 3. Identity and idempotency rules
+
+**Evidence fingerprint** (`backend/engine/normalization.evidence_fingerprint`, SHA-256 hex,
+versioned `evidence-v1`, fields joined with U+001F so no field can bleed into another):
+
+* with an external ID: `evidence_type`, `source`, `external_id` — so the same Gmail message
+  always yields the same fingerprint regardless of later detail updates;
+* without: `evidence_type`, `source`, `thread_id`, normalized sender address, normalized
+  recipient, `normalized_subject`, `occurred_at` truncated to the second in UTC, and the
+  whitespace-collapsed snippet.
+
+Never Python's `hash()` (randomized per process). Uniqueness is enforced by the database:
+unique `content_fingerprint` and unique `(source, external_id)` (SQLite treats NULLs as
+distinct, so rows without an external ID are governed by the fingerprint). Inserts use
+`INSERT … ON CONFLICT DO NOTHING` followed by a read, so concurrent writers cannot create two
+rows; the loser simply receives the winner's row.
+
+**Message kind** (`classify_message_kind`):
+
+1. a parsed status signal → `status_update`;
+2. subject starts with `Re:`/`Fwd:` or mentions follow-up vocabulary (interview, schedule,
+   availability, assessment, reminder, next steps, feedback, update on your application, …)
+   → `follow_up`;
+3. otherwise → `acknowledgement`.
+
+> **Superseded by resolver v2 (§11).** The first-rule-wins table below describes the
+> Prompt 4 rule set (recorded as resolver version `1` on evidence decided by it).
+
+**Application resolution** (`IdentityResolver` v1, first rule that decides wins):
+
+| # | Rule | Link method | Confidence |
+|---|---|---|---|
+| 1 | Gmail thread already mapped to an application | `thread` | 1.0 |
+| 2 | Canonical job URL equals exactly one application's | `job_url` | 0.95 (more than one → ambiguous) |
+| 3 | Status-bearing mail and exactly one application at that normalized company (180-day window) | `company_only` | 0.6 |
+| 4 | Fuzzy `company role` ≥ `DUPLICATE_FUZZY_THRESHOLD`, single best candidate | `company_role` | score / 100 (tie between different applications → ambiguous) |
+| 5 | Status-bearing mail, several applications at that company, none decided above | — | ambiguous `ambiguous_company` |
+
+Rules 2–4 keep the Phase 1 `DuplicateDetector.find_duplicate` priority so existing matching
+behaviour does not drift; rule 5 and the tie checks are new. Outcomes:
+
+* match → link evidence, merge thread, apply status transition;
+* ambiguous → evidence `needs_review` with the reason, no application touched;
+* no match and `acknowledgement` → create the application (`created`, 1.0);
+* no match and `follow_up`/`status_update` → evidence `needs_review`
+  (`follow_up_without_application` / `status_update_without_application`). **Behaviour change:**
+  Phase 1 created an `Applied` record and advanced it; that is exactly the duplicate source
+  Phase 2 removes.
+
+## 4. API (authenticated; CSRF and rate limits from Phase 1)
+
+| Method & path | Purpose |
+|---|---|
+| `GET /api/v1/evidence` | filters: `linked`, `source`, `evidence_type`, `processing_status`, `date_from`, `date_to`, `page`, `page_size` |
+| `GET /api/v1/evidence/counts` | `{unlinked, needs_review, total}` |
+| `GET /api/v1/applications/{id}/evidence` | evidence linked to one application |
+| `POST /api/v1/evidence/{id}/link` | body `{application_id}`; manual link, confidence 1.0 |
+| `POST /api/v1/evidence/{id}/unlink` | back to `needs_review` (`manually_unlinked`) |
+
+State-changing endpoints sit on the protected router (session + `X-CSRF-Token`) and use the
+shared sensitive-operation rate limit. Responses never include `recipient`, `raw_metadata`
+wholesale, OAuth material, or bodies — only a fixed summary (`classification`, `portal`,
+`status_signal`). Unlinking does **not** revert status changes the evidence caused; those stay
+in status history and can be corrected with the existing manual status update.
+
+## 5. Migration strategy
+
+Revision `0002_evidence_model` (after `0001_baseline`):
+
+* creates `evidence` and its indexes; adds the five nullable `application` columns and three
+  indexes — all "create if missing", so it is safe to re-run after the rollback stamp below;
+* **backfill — prospects only.** Each `prospect` row is an email with a real Gmail message ID,
+  thread, sender, subject (the prospect title), snippet and received date, so it becomes an
+  `email`/`gmail` evidence row (`informational`, linked with `link_method=backfill` and
+  confidence 1.0 when the prospect already points at an application). `raw_metadata.backfill`
+  records the origin. Idempotent via `ON CONFLICT DO NOTHING` on the fingerprint.
+* `last_evidence_at` is set from linked evidence where it is NULL.
+* **Deliberately not backfilled:** `processedmessage` rows (only a message ID, a processing
+  time and a result — no sender, subject or message date, so `occurred_at` would be invented),
+  `statushistory.message_id` and `applicationevent.source_message_id` (same: the stored time is
+  processing time, not message time), and `application.thread_ids` (thread-level, no message).
+  These stay where they are; new mail creates evidence from now on.
+* No existing row or column is modified (apart from the new columns being filled).
+* `downgrade()` drops only the Phase 2 objects (evidence data is lost); the recovery path is
+  still restore-from-backup, per `docs/database-operations.md`.
+
+**Old-release compatibility.** The schema change is expand-only, so the Phase 1 code works on
+it. Phase 1 deliberately refuses an unknown Alembic revision (maintenance mode), so rolling
+code back to Phase 1 without restoring data requires stamping the version row back:
+`python scripts/migrate_database.py stamp 0001_baseline` (guarded: maintenance flag + verified
+backup first). Phase 1 then runs normally; evidence is simply not written while it does.
+Re-deploying Phase 2 and upgrading again is safe because `0002` is idempotent, and runtime
+maintenance refills the derived identity columns.
+
+## 6. Rollback strategy
+
+1. **Code only, keep data:** maintenance flag → `migrate_database.py stamp 0001_baseline`
+   → deploy the Phase 1 image → remove flag. Evidence rows remain for when Phase 2 returns.
+2. **Code and data:** restore the `pre-migration` backup `migrate_database.py upgrade` printed,
+   then deploy Phase 1 (`docs/database-operations.md`, Rollback).
+3. **A bad link:** `POST /evidence/{id}/unlink`, then relink; status corrections via the
+   existing manual update.
+
+## 7. Privacy constraints
+
+* No message bodies are stored (unchanged). Snippets are Gmail's own preview, capped at 500.
+* Non-job mail the poller sees is recorded as minimal `ignored` evidence (message ID, thread
+  ID, date, fingerprint) — no sender, subject or snippet — so it is idempotent without keeping
+  personal content.
+* `recipient` is not stored for Gmail. API responses expose a fixed field set.
+* Evidence is personal data: it lives in the same SQLite database, is covered by the Phase 1
+  backups (0600) and is never logged (log lines carry IDs and statuses only).
+* Tests use only synthetic fixtures and temporary databases under the Phase 1 isolation guards.
+
+## 8. Acceptance criteria
+
+- [x] Migration from the Phase 1 schema succeeds; models and migrations agree; existing
+      application, status-history and event rows are byte-identical afterwards and analytics
+      results are unchanged.
+- [x] Importing/polling the same Gmail message twice yields one evidence row; fingerprints are
+      deterministic across processes; concurrent inserts of the same evidence yield one row.
+- [x] Several emails in one thread link to one application.
+- [x] A follow-up, scheduling or rejection email with no matching application creates no
+      application and is listed as `needs_review`; ambiguous evidence is listed too.
+- [x] Link/unlink are transactional and keep `last_evidence_at` correct.
+- [x] New endpoints require authentication; mutations require CSRF and are rate limited; no
+      secrets, bodies or recipients are exposed.
+- [x] Backup → verify → restore drill passes on the new schema; Phase 1 code runs on the
+      expanded schema after the documented stamp.
+- [x] No migration step is destructive; no production system is accessed.
+
+## 9. Verification record
+
+* Real Phase 1 code (`a579969`, exported with `git archive`) refuses the `0002` database
+  (unknown revision → maintenance), and after `migrate_database.py stamp 0001_baseline` opens
+  it, reads, writes and passes its diagnostics; re-upgrading with Phase 2 is a no-op for the
+  schema and fills the derived columns of the row Phase 1 wrote.
+* Backup → verify → restore drill on the Phase 2 schema restores all nine tables
+  row-for-row, including evidence.
+* Ingestion, migration, API and drill tests run under the Phase 1 isolation guards: no
+  keychain, Gmail, network or real database access.
+
+## 10. Open decisions
+
+* **Review UI.** The review queue is API-only in this change; a frontend panel is follow-up.
+* **Undoing status side effects.** Unlinking evidence does not roll back a status change it
+  triggered; Phase 2's merge/undo work (plan Step 6) is the natural place for that.
+* **Portal job IDs.** `external_job_id` exists and is matched by nothing yet; portal imports
+  and the browser agent will populate it.
+* **Lookback window.** Identity matching still considers only applications from the last
+  180 days (`IDENTITY_LOOKBACK_DAYS`), as in Phase 1; older applications receiving mail will
+  surface as `needs_review` rather than being linked.
+
+## 11. Resolver v2 — deterministic scoring with review
+
+Implemented in `backend/engine/identity_resolver.py` (`RESOLVER_VERSION = "2.0.0"`), weights
+and thresholds in `backend/config.py`. Precision over recall: when in doubt, a person decides.
+No LLM is involved; results depend only on the evidence and stored data, ties break on
+application ID, so the same input gives the same output in any process.
+
+### 11.1 Normalization (`backend/engine/normalization.py`, shared by everything)
+
+| Value | Rule |
+|---|---|
+| company | NFKC, case-fold, accents stripped, `&`→`and`, punctuation removed; **trailing** legal designators only (`pvt ltd`, `private limited`, `inc`, `llc`, `corp`, `gmbh`, `sa`, …), never emptying the name. "Technologies", "Labs", "Group" stay — they distinguish companies. |
+| role | Same folding; unambiguous abbreviations expanded (`sr`→senior, `jr`→junior, `mgr`→manager, `engg`→engineering). |
+| subject | `Re:`/`Fwd:`/`FW[2]:`/full-width colon/`[EXTERNAL]` prefixes stripped; forwarded detection. |
+| sender | Address folded; registrable domain (two-label suffixes like `co.in` respected); job-board/ATS/scheduler domains and free-mail domains never count as employer identity; shared mailboxes (`noreply`, `careers`, `talent`, …) never count as a personal sender. |
+| job URL | https, host without `www.`, no fragment/trailing slash, tracking parameters (`utm_*`, `trk`, `refId`, `gh_src`, …) removed, remaining parameters sorted. |
+| external job ID | Folded and trimmed; extracted from LinkedIn, Naukri, Indeed, Greenhouse (`/jobs/N`, `gh_jid`), Lever and Workday URLs together with its source. |
+| thread / source | Thread IDs trimmed and lower-cased; portal names mapped to one source key (`Instahire`→`instahyre`, Greenhouse/Lever/Workday/Direct→`company_portal`). |
+
+The evidence fingerprint keeps the frozen `evidence-v1` rules so stored fingerprints remain
+valid. Stored application identity columns are recomputed at startup when the rules change.
+
+### 11.2 Candidate generation (bounded, indexed)
+
+In order: same external job ID → same canonical URL → application owning the Gmail thread →
+applications this personal sender's evidence is linked to → applications evidence from this
+employer domain is linked to → same normalized company (index, 50 most recent) → same first
+company word (index range, 25). At most `RESOLVER_MAX_CANDIDATES` (25). No full-table scan;
+a test fails the resolver if it calls the unfiltered application listing.
+
+### 11.3 Signals and weights
+
+| Signal | Weight | Kind |
+|---|---:|---|
+| same Gmail thread | +100 | strong |
+| same external job ID, same source | +100 | strong |
+| same canonical job URL | +90 | strong |
+| sender previously linked by a person | +60 | strong |
+| sender previously linked by the resolver | +40 | |
+| same external job ID, different source | +25 | |
+| known employer domain | +25 | |
+| company exact / similar | +35 / +15 | |
+| role exact / similar | +35 / +20 | |
+| sole active application at the company (status or follow-up mail) | +30 | |
+| date within −14…+180 days of applied date | +10 | |
+| same source | +5 | |
+| external job ID conflict (same source) | −100 | strong conflict |
+| company conflict | −60 | |
+| role conflict | −45 | |
+| date outside window | −40 | |
+| acknowledgement for a closed application | −30 | |
+| job URL differs | −20 | |
+| company/role mismatch inside the same thread | −10 | thread beats extraction noise |
+
+### 11.4 Decision rules and thresholds
+
+1. Nothing identifying → **review** (`insufficient_identity`).
+2. Strong identifiers on two different applications → **review**
+   (`conflicting_strong_identifiers`).
+3. Best candidate's strong identifier contradicted by a job-ID conflict → **review**.
+4. Text favours one application while a strong identifier names another → **review**
+   (`strong_identifier_disagrees_with_text`).
+5. Best score ≥ **80** and lead ≥ **25** → **linked** (confidence = score/120, capped at 1).
+6. Best score ≥ **40** → **review** (`ambiguous_candidates` or `below_auto_link_threshold`).
+7. A strong identifier matched but scored lower → **review**.
+8. A *credible* acknowledgement (not forwarded, company known, not free-mail, and either a
+   confident portal classification or an employer domain) → **new application**, unless
+   some candidate has the same company and role (`possible_reapplication` → review).
+9. Otherwise → **review** (`follow_up_without_application`,
+   `status_update_without_application`, `not_a_credible_new_application`).
+
+Non-job mail and prospects are recorded with outcome **ignored**.
+
+### 11.5 Persistence, human precedence, idempotency, concurrency
+
+* Revision `0003_resolver_audit` stores `resolver_version`, `resolver_decision`,
+  `resolver_confidence`, `resolver_result` (JSON: outcome, reason, explanation, confidence,
+  selected application, message kind, top-5 candidates with per-signal weights, thresholds —
+  no addresses, subjects, snippets or extracted text), `decided_by`, `decided_at`,
+  `deferred_until`, plus derived evidence signals (`sender_address`, `sender_domain`,
+  `canonical_job_url`, `external_job_id`) and an `(normalized_company, normalized_role)` index.
+* `decided_by = human` is set by manual link/unlink, accept, create-from-review, dismiss and
+  defer. Automated processing never changes such evidence: `record_resolution` and
+  `claim_evidence` refuse it, and replays report `human_decision_retained`.
+* Workers claim evidence atomically (`processing`, expires after 600 s); the processed-message
+  ledger write is an upsert. Replaying messages leaves applications, status history,
+  milestones and evidence unchanged.
+* A linked follow-up may advance status (only through `StatusUpdater._advance_status`) or, for a
+  repeated interview stage, add one milestone event per message; it never creates an
+  application.
+
+### 11.6 Review API
+
+| Method & path | Purpose |
+|---|---|
+| `GET /evidence/review[?include_deferred=true]` | items needing review with resolution, candidates, signals and candidate application summaries |
+| `GET /evidence/{id}` | one item with its resolution |
+| `POST /evidence/{id}/accept` `{application_id}` | confirm one of the resolver's candidates (409 otherwise); applies its status signal |
+| `POST /evidence/{id}/create-application` `{company?, role?, source_portal?}` | new application from reviewed evidence |
+| `POST /evidence/{id}/dismiss` | irrelevant |
+| `POST /evidence/{id}/defer` `{until?}` | postpone; leaves the default queue |
+| `GET /evidence/metrics` | process counters + persistent totals by decision/status/owner |
+
+All actions are idempotent, authenticated, CSRF-protected and rate limited; dismiss/defer of
+linked evidence returns 409 (unlink first).
+
+### 11.7 Duplicate detector
+
+`DuplicateDetector.find_candidate_pairs` uses the resolver's `compare_applications` (same
+identifiers, normalization and weights; suggestion threshold 70) and never merges.
+`find_duplicate` was removed — it was unused since Prompt 4 and duplicated matching logic.
+
+### 11.8 Observability
+
+In-process counters (`backend/engine/resolver_metrics.py`): evidence_processed, auto_linked,
+new_application_created, sent_to_review, ignored, duplicate_skipped,
+human_decision_retained, concurrent_claim_skipped, resolver_errors. Logs carry evidence ID,
+outcome, reason, confidence, candidate count and version — never snippets, tokens, full
+sender addresses or raw evidence.
+
+### 11.9 Known limits
+
+* Company aliases that share no words (e.g. a brand vs. its legal entity) are not matched;
+  such mail goes to review.
+* Thread reuse by a recruiter for a different role would link to the thread's application;
+  text conflicts inside a thread only cost −10 by design.
+* Job-ID extraction covers the URL formats listed above; other portals rely on URL equality.
+* Accepting a candidate after an automated link moved elsewhere does not revert status
+  changes the earlier link caused.
+
+## 12. Reversible multi-application merge
+
+Duplicates are merged only by a person. Suggestions (§11.7) are advisory: nothing merges
+automatically, and "Not a duplicate" dismisses a pair permanently
+(`duplicatedismissal.pair_key`).
+
+### 12.1 Schema (`0004_merge_operations`, additive)
+
+* `application`: `record_state` (`active` | `merged`, server default `active`, so rows an
+  older release inserts are active), `merged_into_application_id`, `merge_operation_id`,
+  `merged_at`. `merged_into_application_id` has no database foreign key: adding one to an
+  existing SQLite table needs a table rebuild. `DataStore` maintains it.
+* `statushistory`, `applicationevent`: `superseded_by_merge_id`. A duplicate entry hidden by
+  a merge is flagged, never deleted.
+* `mergeoperation`: survivor ID, source IDs, a versioned snapshot plus its SHA-256 checksum,
+  the result (moved child IDs with their previous owner, superseded IDs, the survivor's
+  values after the merge), the applied field values, the preview token, a unique idempotency
+  key, initiating user, reason, `created_at`, and `undone_at` / `undone_by` / `undo_metadata`.
+* `duplicatedismissal`: one row per dismissed pair.
+
+The snapshot (`backend/db/merge_snapshot.py`, `SNAPSHOT_VERSION = 1`) holds every column of
+each involved application, and only identifiers and ownership columns of their evidence,
+status history, events, thread links and prospects. It contains no email bodies, snippets,
+subjects or secrets. `validate_snapshot` checks version, structure and checksum before any
+undo uses it.
+
+Downgrading 0004 refuses while any application is merged ("undo those merges first"). With
+no merges in effect, it drops exactly what 0004 added.
+
+### 12.2 Preview (`POST /applications/merge/preview`, never writes)
+
+Input: 2 to `MERGE_MAX_APPLICATIONS` (20) distinct IDs and an optional survivor.
+Output: proposed survivor, field-by-field comparison, conflicts, warnings, blocking reasons,
+`safe`, the child rows to be relinked, the history and event entries that will be
+superseded, counts, and a `preview_token`. The token is a hash of the involved
+applications and their child ownership rows.
+
+**Default survivor** (`merge_planner.default_survivor`), deterministic:
+1. A record with person-confirmed evidence.
+2. Then the most filled fields.
+3. Then the most evidence.
+4. Then the earliest applied date.
+5. Then the lowest ID.
+
+The user can choose any selected record instead.
+
+**Field rules:**
+* `applied_date` takes the earliest value.
+* Thread IDs are unioned.
+* Identity fields are recomputed.
+* `current_status` with differing values is a conflict. The suggestion is the most advanced
+  status.
+* Any other field with two or more different non-empty values is a conflict. The suggestion
+  is the survivor's value.
+* Values treated as empty: `None`, `""`, `Direct/Unknown`/`Unknown` source,
+  `Unknown` method.
+* A non-empty value is never dropped silently. Every conflict needs an explicit choice
+  (`field_choices: {field: application_id}`). The UI starts all conflicts unselected.
+
+**Warnings** (the merge is still allowed):
+* Different job IDs.
+* Company names that differ after normalization.
+* Different roles.
+* Applied dates more than 180 days apart.
+
+**Blocking** (`safe = false`):
+* A record is missing or already merged.
+* Fewer than 2 or more than 20 records.
+* The chosen survivor is not in the selection.
+
+### 12.3 Execute (`POST /applications/merge`)
+
+Takes IDs, survivor, field choices, optional reason, `preview_token`, and
+`idempotency_key`. Everything runs in one SQLite transaction, which first takes the write
+lock (a no-op `UPDATE` on the survivor). Steps:
+
+1. Check the key: the same key with the same parameters returns the existing operation;
+   the same key with different parameters returns 409.
+2. Reload the state. A token mismatch returns 409 "changed since the preview". A record no
+   longer active returns 409.
+3. Write the snapshot and checksum.
+4. Relink evidence, status history, events, thread links and prospects to the survivor,
+   recording each row's previous owner.
+5. Deduplicate history and events by flagging, not deleting:
+   * History keeps the earliest row per `(from, to)`.
+   * Events linked to a superseded history row are superseded.
+   * Once-only milestones (submitted, rejected, offer) keep the earliest row per type.
+   * Other milestones keep one row per type, round and UTC day.
+6. Apply the chosen field values and union the thread IDs. The status is set directly; this
+   is the one documented exception to `StatusUpdater._advance_status` (CLAUDE.md), because
+   it is a user choice between existing statuses, audited and reversible.
+7. Mark sources `merged`, pointing at the survivor and the operation.
+8. Recompute `last_evidence_at` and store the result.
+
+Any exception rolls back the whole transaction, including the operation row. Concurrent
+identical requests produce exactly one merge (tested with 4 threads). Merged records are
+excluded from:
+* lists, counts, taxonomy and stale lists;
+* all analytics (flow, pulse, conversions, rejection, insights);
+* resolver and duplicate candidates.
+
+Superseded history and events are excluded from timelines and analytics. Nothing is
+counted twice. `include_merged=true` on `GET /applications` and `include_superseded` in
+`DataStore` show them. Mail arriving later on a merged record's thread follows
+`merged_into_application_id` to the active survivor. A merged record, or a survivor with
+merged sources, cannot be deleted (409); undo first.
+
+### 12.4 Undo (`POST /applications/merges/{id}/undo`)
+
+Transactional and idempotent: undoing an undone operation returns it unchanged. Before
+touching anything it validates the snapshot checksum and checks for unsafe conflicts:
+* the survivor is missing or merged again;
+* any merge-chosen survivor field (or its thread IDs) differs from the stored after-merge
+  value, for example an edit or status change made after the merge;
+* a source is no longer merged under this operation;
+* a moved child row is missing or now belongs to another application.
+
+Any conflict returns **409** with
+`{message: "This merge can't be undone automatically without overwriting newer changes.", conflicts: [...]}`.
+Nothing is overwritten. Otherwise undo:
+* moves each moved row back to its previous owner;
+* clears the superseded flags this operation set;
+* restores every column of every involved application from the snapshot;
+* recomputes `last_evidence_at`;
+* sets `undone_at`/`undone_by`.
+
+Evidence, history or events attached to the survivor after the merge stay with the survivor
+and are listed in `undo_metadata.kept_with_survivor`. The operation row is kept as the audit
+trail. After undo the same records can be merged again.
+
+### 12.5 Failure recovery
+
+* **Failed merge:** the transaction rolls back. The preview is still valid unless data
+  changed; otherwise preview again.
+* **Stale preview (409):** the UI disables Confirm and offers "Refresh preview".
+* **Unsafe undo (409):** revert the post-merge change listed in `conflicts` (for example,
+  set the status back), then undo. Alternatively, keep the merge and edit the survivor by
+  hand.
+* **Tampered or corrupt snapshot:** undo refuses (409). Restore a backup made before the
+  merge (`docs/database-operations.md`). Backups include `mergeoperation`.
+
+### 12.6 UI
+
+* **Applications table:** select two or more rows, then "Merge duplicates". The dialog
+  (`MergeDialog.jsx`, focus-trapped, Escape closes) shows:
+  * the "nothing is permanently deleted" note;
+  * a survivor radio group with "Kept" / "Will be hidden (merged)" badges and per-record
+    counts of emails, status changes and milestones;
+  * warnings and blocking reasons;
+  * one radio group per conflict, which must all be answered;
+  * the automatically kept values and their rule;
+  * relink and dedupe counts.
+
+  Confirm is disabled while loading, unsafe, stale or unresolved. On success a status
+  message offers Undo. If undo is unsafe, the conflicts are listed inline.
+* **Data Quality:** suggestions offer "Review merge" (opens the dialog) and "Not a
+  duplicate". The "Merge history" section lists operations with Undo.

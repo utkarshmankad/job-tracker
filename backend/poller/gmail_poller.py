@@ -29,7 +29,17 @@ from backend.config import (
     GMAIL_TOKEN_ENV_VAR,
 )
 from backend.db.data_store import DataStore
-from backend.db.models import Prospect, utc_now
+from backend.db.models import (
+    Evidence,
+    EvidenceSource,
+    EvidenceStatus,
+    EvidenceType,
+    LinkMethod,
+    Prospect,
+    utc_now,
+)
+from backend.engine.identity_resolver import ResolutionResult, classify_message_kind
+from backend.engine.resolver_metrics import metrics
 from backend.engine.status_updater import StatusUpdater
 from backend.parser.email_parser import EmailParser, RawEmail, extract_sender_domain
 from backend.poller.error_retry import AuthError, StaleHistoryError, gmail_retry
@@ -270,6 +280,7 @@ class GmailPoller:
 
             for msg_id, thread_id in message_ids:
                 if self._db.is_processed(msg_id):
+                    metrics.increment("duplicate_skipped")
                     continue
 
                 outcome = self._process_message(msg_id, suppress_rules)
@@ -311,8 +322,13 @@ class GmailPoller:
             raise
 
     def _process_message(self, msg_id: str, suppress_rules: list["SuppressRule"]) -> str:
-        """Fetch, parse, and persist a single message. Returns "new", "update",
-        "suppressed", "not_found", or "error"."""
+        """Fetch, record as evidence, classify and resolve a single message.
+
+        Returns "new", "update", "review", "prospect", "suppressed", "not_found" or
+        "error". Every fetched message first becomes (or re-finds) one evidence row;
+        non-job mail is kept minimal — IDs and date only, no sender/subject/snippet.
+        """
+        evidence_id: int | None = None
         try:
             msg = (
                 self._require_service()
@@ -328,12 +344,25 @@ class GmailPoller:
             )
 
             raw_email = self._build_raw_email(msg)
+            evidence, _ = self._db.insert_evidence(
+                Evidence(
+                    evidence_type=EvidenceType.EMAIL.value,
+                    source=EvidenceSource.GMAIL.value,
+                    external_id=raw_email.message_id,
+                    thread_id=raw_email.thread_id,
+                    occurred_at=raw_email.date,
+                    captured_at=utc_now(),
+                    processing_status=EvidenceStatus.PENDING.value,
+                )
+            )
+            evidence_id = evidence.id
+            assert evidence_id is not None
             parsed = self._parser.parse(raw_email, suppress_rules)
 
             if parsed is None:
                 prospect = self._parser.parse_prospect(raw_email, suppress_rules)
                 if prospect is not None:
-                    _, created = self._db.upsert_prospect(
+                    stored, created = self._db.upsert_prospect(
                         Prospect(
                             source_portal="LinkedIn",
                             category=prospect.category,
@@ -346,12 +375,39 @@ class GmailPoller:
                             classification_reason=prospect.classification_reason,
                         )
                     )
+                    self._db.update_evidence_details(
+                        evidence_id,
+                        sender=raw_email.sender,
+                        subject=raw_email.subject,
+                        snippet=raw_email.snippet,
+                        metadata={
+                            "classification": "prospect",
+                            "prospect_category": prospect.category,
+                        },
+                    )
+                    linked = stored.application_id is not None
+                    self._db.record_resolution(
+                        evidence_id,
+                        resolution=ResolutionResult.ignored("recruiting_prospect").to_json(),
+                        status=EvidenceStatus.INFORMATIONAL.value,
+                        application_id=stored.application_id,
+                        link_method=LinkMethod.MANUAL.value if linked else None,
+                        link_confidence=1.0 if linked else None,
+                    )
+                    metrics.increment("ignored")
                     self._db.mark_processed(msg_id, "prospect")
                     return "prospect" if created else "suppressed"
+                self._db.record_resolution(
+                    evidence_id,
+                    resolution=ResolutionResult.ignored("not_job_related").to_json(),
+                    status=EvidenceStatus.IGNORED.value,
+                )
+                metrics.increment("ignored")
                 self._db.mark_processed(msg_id, "suppressed")
                 return "suppressed"
 
             if parsed.company is None or parsed.role is None:
+                # The body is used in memory for field refinement only; never stored.
                 body = self._fetch_body_text(msg_id)
                 if body:
                     if parsed.company is None:
@@ -367,8 +423,29 @@ class GmailPoller:
                         if refined_role:
                             parsed = dataclass_replace(parsed, role=refined_role)
 
-            _, is_new = self._updater.process(parsed)
-            return "new" if is_new else "update"
+            self._db.update_evidence_details(
+                evidence_id,
+                sender=raw_email.sender,
+                subject=raw_email.subject,
+                snippet=raw_email.snippet,
+                metadata={
+                    "classification": classify_message_kind(parsed).value,
+                    "parser": {
+                        "portal": parsed.source_portal,
+                        "company": parsed.company,
+                        "role": parsed.role,
+                        "job_url": parsed.job_url,
+                        "status_signal": parsed.status_signal.value
+                        if parsed.status_signal
+                        else None,
+                        "confident": parsed.is_classification_confident,
+                    },
+                },
+            )
+            outcome = self._updater.process_evidence(parsed, evidence_id)
+            if outcome.is_new:
+                return "new"
+            return "review" if outcome.result == "needs_review" else "update"
         except HttpError as e:
             if e.resp.status == 404:
                 # Message deleted/inaccessible on Gmail's side since it was listed;
@@ -378,7 +455,21 @@ class GmailPoller:
                 return "not_found"
             raise  # let the outer handler deal with auth/rate errors
         except Exception as exc:
-            log.error("email_processing_error_skipping", message_id=msg_id, error=str(exc))
+            log.error(
+                "email_processing_error_skipping",
+                evidence_id=evidence_id,
+                error_type=type(exc).__name__,
+            )
+            metrics.increment("resolver_errors")
+            if evidence_id is not None:
+                try:
+                    self._db.update_evidence_processing(
+                        evidence_id,
+                        EvidenceStatus.ERROR.value,
+                        review_reason=type(exc).__name__,
+                    )
+                except Exception as nested:  # never mask the original failure
+                    log.error("evidence_error_status_failed", error=str(nested))
             return "error"
 
     def get_thread_sender_domain(self, thread_id: str, timeout: int = 10) -> str | None:

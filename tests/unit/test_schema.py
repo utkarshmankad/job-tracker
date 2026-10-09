@@ -41,17 +41,44 @@ def _ddl(path: Path) -> dict[str, str]:
 # ------------------------------------------------------------------ #
 
 
-def test_single_baseline_head() -> None:
-    assert schema.head_revision() == "0001_baseline"
-    assert schema.known_revisions() == {"0001_baseline"}
+def test_revision_chain() -> None:
+    assert schema.head_revision() == "0004_merge_operations"
+    assert schema.known_revisions() == {
+        "0001_baseline",
+        "0002_evidence_model",
+        "0003_resolver_audit",
+        "0004_merge_operations",
+    }
 
 
-def test_fresh_database_matches_pre_phase1_schema_exactly(tmp_path: Path) -> None:
-    """A database created by the baseline is byte-for-byte the schema origin/main created."""
+def test_baseline_revision_matches_pre_phase1_schema_exactly(tmp_path: Path) -> None:
+    """Upgrading only to 0001 produces byte-for-byte the schema origin/main created."""
     fresh = tmp_path / "fresh.db"
-    DataStore(fresh).close()
+    sqlite3.connect(fresh).close()
+    schema.upgrade(_engine(fresh), "0001_baseline")
     legacy = build_legacy_database(tmp_path / "legacy.db")
     assert _ddl(fresh) == _ddl(legacy)
+
+
+def test_head_schema_only_adds_to_the_baseline(tmp_path: Path) -> None:
+    """Expand-only: every pre-Phase-2 object survives unchanged except the application
+    table, which only gains columns."""
+    head = tmp_path / "head.db"
+    DataStore(head).close()
+    baseline = _ddl(build_legacy_database(tmp_path / "legacy.db"))
+    current = _ddl(head)
+    grown = {"application", "statushistory", "applicationevent"}  # columns added, none changed
+    for name, sql in baseline.items():
+        if name in grown:
+            continue
+        assert current[name] == sql, name
+    for table in grown:
+        legacy_cols = {
+            c["name"] for c in inspect(_engine(tmp_path / "legacy.db")).get_columns(table)
+        }
+        head_cols = {c["name"] for c in inspect(_engine(head)).get_columns(table)}
+        assert legacy_cols < head_cols, table
+    assert "evidence" in current
 
 
 def test_models_and_migrations_agree(tmp_path: Path) -> None:
@@ -84,7 +111,7 @@ def test_status_states(tmp_path: Path) -> None:
     DataStore(current).close()
     status = schema.read_status(current)
     assert status.is_current
-    assert status.current_revision == "0001_baseline"
+    assert status.current_revision == schema.head_revision()
 
 
 def test_unknown_revision_is_detected_and_refused(tmp_path: Path) -> None:
@@ -121,8 +148,16 @@ def test_upgrade_pre_phase1_database_preserves_data(tmp_path: Path) -> None:
     store.close()
 
     assert status.is_current
-    assert _ddl(legacy) == before_ddl  # adoption: no schema object changed
-    assert DataStore.count_rows_readonly(legacy) == {**counts, "processedmessage": 1}
+    after_ddl = _ddl(legacy)
+    for name, sql in before_ddl.items():  # adoption + expand-only: nothing pre-existing changed
+        if name not in {"application", "statushistory", "applicationevent"}:
+            assert after_ddl[name] == sql, name
+    # The one prospect is backfilled as evidence; every other table keeps its row count.
+    assert DataStore.count_rows_readonly(legacy) == {
+        **counts,
+        "processedmessage": 1,
+        "evidence": 1,
+    }
 
     store = DataStore(legacy, schema_policy=SchemaPolicy.VERIFY)
     items, total = store.get_applications(ApplicationFilter())
@@ -194,14 +229,15 @@ def test_baseline_cannot_be_downgraded(tmp_path: Path) -> None:
     from alembic import command
 
     path = tmp_path / "db.db"
-    DataStore(path).close()
+    sqlite3.connect(path).close()
+    schema.upgrade(_engine(path), "0001_baseline")
     cfg = schema.alembic_config()
     engine = _engine(path)
     with engine.begin() as conn:
         cfg.attributes["connection"] = conn
         with pytest.raises(RuntimeError, match="Restore a pre-migration backup"):
             command.downgrade(cfg, "base")
-    assert schema.read_status(path).is_current
+    assert schema.read_status(path).current_revision == "0001_baseline"
 
 
 # ------------------------------------------------------------------ #

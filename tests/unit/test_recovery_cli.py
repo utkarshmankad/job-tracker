@@ -167,7 +167,7 @@ def test_migrate_upgrade_full_sequence(env, runner) -> None:
     result = runner.invoke(migrate_group, ["upgrade"])
     assert result.exit_code == 0, result.output
     assert "Verified:" in result.output
-    assert "migrates cleanly to 0001_baseline" in result.output
+    assert f"migrates cleanly to {head_revision()}" in result.output
     assert "Integrity:     ok" in result.output
     assert "Migration complete" in result.output
     assert read_status(env["db"]).is_current

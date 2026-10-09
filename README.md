@@ -196,6 +196,14 @@ The test suite always runs this way: `tests/isolation.py` also uses a temporary
 touches the keychain or a non-loopback network address. Tests never see your real database
 or Gmail account.
 
+## Evidence and identity
+
+Every Gmail message the poller sees is stored once as evidence and linked to an application
+when its identity is clear (same thread, same job URL, or a confident company/role match).
+Only an application acknowledgement creates a new application; scheduling, follow-up and
+status emails that match nothing wait in the review list (`GET /api/v1/evidence?linked=false`)
+instead of becoming duplicates. Design: [docs/phase-2-identity-resolution.md](docs/phase-2-identity-resolution.md).
+
 ## Database migrations and backups
 
 The schema is versioned with Alembic. Locally an older database is backed up and upgraded

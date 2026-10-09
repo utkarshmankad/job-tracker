@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import csv
+import enum
 import io
 import re
 import secrets
+import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -35,19 +38,42 @@ from backend.config import (
     REAUTH_STATE_TTL_SECONDS,
     REEXTRACT_BATCH_LIMIT,
 )
-from backend.db.data_store import ApplicationFilter, DataStore, is_application_stale
+from backend.db.data_store import (
+    ApplicationFilter,
+    ApplicationNotFoundError,
+    DataStore,
+    EvidenceConflictError,
+    EvidenceFilter,
+    EvidenceNotFoundError,
+    MergeError,
+    MergeInvalidError,
+    MergeNotFoundError,
+    MergeStaleError,
+    MergeUndoConflictError,
+    is_application_stale,
+)
+from backend.db.merge_snapshot import SnapshotError
 from backend.db.models import (
     Application,
     ApplicationEvent,
     ApplicationEventType,
     ApplicationStatus,
+    DecisionSource,
+    Evidence,
+    EvidenceSource,
+    EvidenceStatus,
+    EvidenceType,
     InterviewRound,
+    LinkMethod,
+    MergeOperation,
     ProspectStatus,
     utc_now,
 )
 from backend.diagnostics import DiagnosticRunner
 from backend.engine.duplicate_detector import DuplicateDetector
 from backend.engine.insights_engine import InsightsEngine
+from backend.engine.merge_planner import MergePlan, MergePlanError, plan_merge, resolve_field_values
+from backend.engine.resolver_metrics import metrics as resolver_metrics
 from backend.engine.status_updater import StatusUpdater
 
 log = structlog.get_logger(__name__)
@@ -119,6 +145,9 @@ class ApplicationResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     is_stale: bool
+    last_evidence_at: datetime | None = None
+    record_state: str = "active"
+    merged_into_application_id: int | None = None
 
 
 class ApplicationDetailResponse(ApplicationResponse):
@@ -394,6 +423,9 @@ def _to_response(app: Application) -> ApplicationResponse:
         created_at=app.created_at,
         updated_at=app.updated_at,
         is_stale=is_application_stale(app),
+        last_evidence_at=app.last_evidence_at,
+        record_state=app.record_state,
+        merged_into_application_id=app.merged_into_application_id,
     )
 
 
@@ -528,6 +560,7 @@ async def list_applications(
     is_stale: bool | None = None,
     interviewed: bool | None = None,
     outcome: str | None = Query(default=None, pattern="^(active|offer|rejected|withdrawn)$"),
+    include_merged: bool = False,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=500),
 ) -> ApplicationListResponse:
@@ -550,12 +583,13 @@ async def list_applications(
         is_stale=is_stale,
         interviewed=interviewed,
         outcome=outcome,
+        include_merged=include_merged,
         page=page,
         page_size=page_size,
     )
     cache_key = (
         f"{_APPLICATIONS_CACHE_PREFIX}{status}:{source_portal}:{application_method}:{date_from}:{date_to}:"
-        f"{search}:{is_stale}:{interviewed}:{outcome}:{page}:{page_size}"
+        f"{search}:{is_stale}:{interviewed}:{outcome}:{include_merged}:{page}:{page_size}"
     )
     cached = cache.get_json(cache_key)
     if cached is not None:
@@ -598,31 +632,363 @@ async def get_application_taxonomy(request: Request) -> dict[str, list[str]]:
 
 @router.get("/applications/duplicates", dependencies=_SENSITIVE)
 async def list_duplicate_candidates(request: Request) -> list[dict]:
+    """Advisory duplicate suggestions among active applications, minus dismissed pairs.
+    Nothing is ever merged automatically."""
     db: DataStore = request.app.state.db
-    detector = DuplicateDetector(db)
-    return [
-        {
-            "primary": _to_response(pair["primary"]).model_dump(mode="json"),
-            "duplicate": _to_response(pair["duplicate"]).model_dump(mode="json"),
-            "score": pair["score"],
-            "reasons": pair["reasons"],
-        }
-        for pair in detector.find_candidate_pairs()
-    ]
+    dismissed = db.dismissed_pair_keys()
+    out = []
+    for pair in DuplicateDetector(db).find_candidate_pairs():
+        key = db.pair_key(pair["primary"].id, pair["duplicate"].id)
+        if key in dismissed:
+            continue
+        out.append(
+            {
+                "pair_key": key,
+                "primary": _to_response(pair["primary"]).model_dump(mode="json"),
+                "duplicate": _to_response(pair["duplicate"]).model_dump(mode="json"),
+                "score": pair["score"],
+                "reasons": pair["reasons"],
+            }
+        )
+    return out
+
+
+class DuplicateDismissRequest(BaseModel):
+    application_ids: list[int] = Field(min_length=2, max_length=2)
+
+
+@router.post("/applications/duplicates/dismiss", dependencies=_SENSITIVE)
+async def dismiss_duplicate_suggestion(
+    body: DuplicateDismissRequest,
+    request: Request,
+    user: AuthenticatedUser = Depends(require_user),
+) -> dict:
+    """Hide a suggested pair; both applications stay untouched. Idempotent."""
+    db: DataStore = request.app.state.db
+    first, second = body.application_ids
+    try:
+        row = db.dismiss_duplicate(first, second, dismissed_by=user.email)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"pair_key": row.pair_key, "dismissed": True}
+
+
+_MERGE_NOTE = (
+    "Nothing is permanently deleted: merged records are hidden, every email, status change "
+    "and milestone moves to the survivor, and the merge can be undone."
+)
+
+
+class MergePreviewRequest(BaseModel):
+    application_ids: list[int] = Field(min_length=2, max_length=50)
+    survivor_id: int | None = None
+
+
+class MergeFieldResponse(BaseModel):
+    name: str
+    values: dict[str, Any]
+    proposed: Any
+    proposed_from: int | None
+    rule: str
+    conflict: bool
+
+
+class MergeApplicationSummary(BaseModel):
+    id: int
+    company: str | None
+    role: str | None
+    source_portal: str | None
+    application_method: str | None
+    current_status: str | None
+    applied_date: str | None
+    record_state: str | None
+    external_job_id: str | None
+    evidence_count: int
+    status_history_count: int
+    event_count: int
+    human_confirmed: bool
+    filled_fields: int
+
+
+class MergePreviewResponse(BaseModel):
+    application_ids: list[int]
+    survivor_id: int
+    default_survivor_id: int
+    preview_token: str
+    safe: bool
+    blocking: list[str]
+    conflicts: list[str]
+    warnings: list[str]
+    applications: list[MergeApplicationSummary]
+    fields: list[MergeFieldResponse]
+    relink: dict[str, list[int]]
+    superseded: dict[str, list[int]]
+    counts: dict[str, int]
+    note: str
+
+
+class MergeExecuteRequest(BaseModel):
+    application_ids: list[int] = Field(min_length=2, max_length=50)
+    survivor_id: int
+    field_choices: dict[str, int] = Field(default_factory=dict)
+    reason: str | None = Field(default=None, max_length=500)
+    preview_token: str = Field(min_length=8, max_length=128)
+    idempotency_key: str = Field(min_length=8, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+class MergeOperationResponse(BaseModel):
+    id: int
+    status: str  # applied | undone
+    survivor_application_id: int
+    source_application_ids: list[int]
+    applications: list[dict[str, Any]]
+    counts: dict[str, int]
+    superseded: dict[str, int]
+    field_values: dict[str, Any]
+    reason: str | None
+    initiated_by: str | None
+    created_at: datetime
+    undone_at: datetime | None
+    undone_by: str | None
+    undo_metadata: dict[str, Any] | None
+
+
+class MergeOperationListResponse(BaseModel):
+    items: list[MergeOperationResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+def _plan_response(plan: MergePlan) -> MergePreviewResponse:
+    return MergePreviewResponse(
+        application_ids=plan.application_ids,
+        survivor_id=plan.survivor_id,
+        default_survivor_id=plan.default_survivor_id,
+        preview_token=plan.token,
+        safe=plan.safe,
+        blocking=plan.blocking,
+        conflicts=plan.conflicts,
+        warnings=plan.warnings,
+        applications=[MergeApplicationSummary(**a) for a in plan.applications],
+        fields=[
+            MergeFieldResponse(
+                name=f.name,
+                values={str(k): v for k, v in f.values.items()},
+                proposed=f.proposed,
+                proposed_from=f.proposed_from,
+                rule=f.rule,
+                conflict=f.conflict,
+            )
+            for f in plan.fields
+        ],
+        relink=plan.relink,
+        superseded=plan.superseded,
+        counts=plan.counts,
+        note=_MERGE_NOTE,
+    )
+
+
+def _operation_response(op: MergeOperation) -> MergeOperationResponse:
+    assert op.id is not None
+    snapshot_apps = (op.snapshot or {}).get("applications") or {}
+    result = op.result or {}
+    superseded = result.get("superseded") or {}
+    return MergeOperationResponse(
+        id=op.id,
+        status="undone" if op.undone_at else "applied",
+        survivor_application_id=op.survivor_application_id,
+        source_application_ids=list(op.source_application_ids),
+        applications=[
+            {
+                "id": row.get("id"),
+                "company": row.get("company"),
+                "role": row.get("role"),
+                "source_portal": row.get("source_portal"),
+                "current_status": row.get("current_status"),
+                "survivor": row.get("id") == op.survivor_application_id,
+            }
+            for _, row in sorted(snapshot_apps.items(), key=lambda kv: int(kv[0]))
+        ],
+        counts={k: int(v) for k, v in (result.get("counts") or {}).items()},
+        superseded={k: len(v) for k, v in superseded.items()},
+        field_values=op.field_values or {},
+        reason=op.reason,
+        initiated_by=op.initiated_by,
+        created_at=op.created_at,
+        undone_at=op.undone_at,
+        undone_by=op.undone_by,
+        undo_metadata=op.undo_metadata,
+    )
+
+
+@router.post(
+    "/applications/merge/preview", response_model=MergePreviewResponse, dependencies=_SENSITIVE
+)
+async def preview_merge(body: MergePreviewRequest, request: Request) -> MergePreviewResponse:
+    """Compare two or more applications and propose a merge. Never modifies data."""
+    db: DataStore = request.app.state.db
+    if len(set(body.application_ids)) != len(body.application_ids):
+        raise HTTPException(status_code=422, detail="Each application may appear only once")
+    state = db.load_merge_state(body.application_ids)
+    state["application_ids"] = sorted(body.application_ids)
+    if not state["applications"]:
+        raise HTTPException(status_code=404, detail="Applications not found")
+    return _plan_response(plan_merge(state, body.survivor_id))
+
+
+@router.post("/applications/merge", response_model=MergeOperationResponse, dependencies=_SENSITIVE)
+async def execute_merge(
+    body: MergeExecuteRequest,
+    request: Request,
+    user: AuthenticatedUser = Depends(require_user),
+) -> MergeOperationResponse:
+    """Merge the selected applications into the survivor atomically. Requires the preview
+    token (stale previews are refused with 409) and an idempotency key (a repeated request
+    returns the original operation)."""
+    db: DataStore = request.app.state.db
+    if len(set(body.application_ids)) != len(body.application_ids):
+        raise HTTPException(status_code=422, detail="Each application may appear only once")
+    existing = db.find_merge_by_idempotency_key(body.idempotency_key)
+    if existing is not None:
+        if existing.survivor_application_id == body.survivor_id and sorted(
+            [*existing.source_application_ids, existing.survivor_application_id]
+        ) == sorted(body.application_ids):
+            return _operation_response(existing)
+        raise HTTPException(
+            status_code=409, detail="Idempotency key was already used for another merge"
+        )
+    state = db.load_merge_state(body.application_ids)
+    state["application_ids"] = sorted(body.application_ids)
+    plan = plan_merge(state, body.survivor_id)
+    if plan.token != body.preview_token:
+        raise HTTPException(
+            status_code=409, detail="These applications changed since the preview; preview again"
+        )
+    if not plan.safe:
+        raise HTTPException(status_code=409, detail="; ".join(plan.blocking))
+    try:
+        values = resolve_field_values(plan, body.field_choices)
+        operation, _ = db.execute_merge(
+            application_ids=body.application_ids,
+            survivor_id=body.survivor_id,
+            field_values=values,
+            expected_token=body.preview_token,
+            idempotency_key=body.idempotency_key,
+            initiated_by=user.email,
+            reason=body.reason,
+        )
+    except MergePlanError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except MergeInvalidError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except MergeStaleError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    _invalidate_applications_cache()
+    return _operation_response(operation)
+
+
+@router.get("/applications/merges", response_model=MergeOperationListResponse)
+async def list_merges(
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+) -> MergeOperationListResponse:
+    db: DataStore = request.app.state.db
+    items, total = db.list_merge_operations(page, page_size)
+    return MergeOperationListResponse(
+        items=[_operation_response(op) for op in items], total=total, page=page, page_size=page_size
+    )
+
+
+@router.get("/applications/merges/{operation_id}", response_model=MergeOperationResponse)
+async def get_merge(operation_id: int, request: Request) -> MergeOperationResponse:
+    db: DataStore = request.app.state.db
+    op = db.get_merge_operation(operation_id)
+    if op is None:
+        raise HTTPException(status_code=404, detail="Merge operation not found")
+    return _operation_response(op)
+
+
+@router.post(
+    "/applications/merges/{operation_id}/undo",
+    response_model=MergeOperationResponse,
+    dependencies=_SENSITIVE,
+)
+async def undo_merge(
+    operation_id: int,
+    request: Request,
+    user: AuthenticatedUser = Depends(require_user),
+) -> MergeOperationResponse:
+    """Restore the merged applications and every relationship. Idempotent. Returns 409 with
+    the reasons when later changes would be overwritten."""
+    db: DataStore = request.app.state.db
+    try:
+        operation, _ = db.undo_merge(operation_id, undone_by=user.email)
+    except MergeNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except MergeUndoConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": (
+                    "This merge can't be undone automatically without overwriting newer changes."
+                ),
+                "conflicts": exc.conflicts,
+            },
+        ) from exc
+    except SnapshotError as exc:
+        raise HTTPException(status_code=409, detail=f"Merge snapshot is invalid: {exc}") from exc
+    _invalidate_applications_cache()
+    return _operation_response(operation)
 
 
 @router.post(
     "/applications/duplicates/merge", response_model=ApplicationResponse, dependencies=_SENSITIVE
 )
 async def merge_duplicate_applications(
-    body: DuplicateMergeRequest, request: Request
+    body: DuplicateMergeRequest,
+    request: Request,
+    user: AuthenticatedUser = Depends(require_user),
 ) -> ApplicationResponse:
+    """Legacy pairwise merge, kept for API compatibility: now a reversible soft merge into
+    `primary_id`, keeping primary's value wherever the two records conflict."""
     db: DataStore = request.app.state.db
+    ids = [body.primary_id, body.duplicate_id]
+    if body.primary_id == body.duplicate_id:
+        raise HTTPException(
+            status_code=404, detail="Primary and duplicate must be different applications"
+        )
+    state = db.load_merge_state(ids)
+    state["application_ids"] = sorted(ids)
+    if len(state["applications"]) != 2:
+        raise HTTPException(status_code=404, detail="One or both applications were not found")
+    plan = plan_merge(state, body.primary_id)
+    if not plan.safe:
+        raise HTTPException(status_code=409, detail="; ".join(plan.blocking))
+    choices: dict[str, int] = {}
+    for comparison in plan.fields:
+        if comparison.conflict:
+            primary_value = comparison.values.get(body.primary_id)
+            keep_primary = primary_value not in (None, "") or comparison.proposed_from is None
+            choices[comparison.name] = (
+                body.primary_id if keep_primary else int(comparison.proposed_from)  # type: ignore[arg-type]
+            )
     try:
-        merged = db.merge_applications(body.primary_id, body.duplicate_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        db.execute_merge(
+            application_ids=ids,
+            survivor_id=body.primary_id,
+            field_values=resolve_field_values(plan, choices),
+            expected_token=plan.token,
+            idempotency_key=f"legacy-{uuid.uuid4().hex}",
+            initiated_by=user.email,
+            reason="legacy pairwise merge",
+        )
+    except MergeStaleError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     _invalidate_applications_cache()
+    merged = db.get_application(body.primary_id)
+    assert merged is not None
     return _to_response(merged)
 
 
@@ -816,7 +1182,11 @@ async def bulk_delete_applications(body: BulkDeleteRequest, request: Request) ->
     deleted_ids: list[int] = []
     failed_ids: list[int] = []
     for app_id in body.application_ids:
-        if db.delete_application(app_id):
+        try:
+            deleted = db.delete_application(app_id)
+        except MergeError:
+            deleted = False
+        if deleted:
             deleted_ids.append(app_id)
         else:
             failed_ids.append(app_id)
@@ -1033,6 +1403,10 @@ def delete_application(id: int, request: Request) -> dict:
     application = db.get_application(id)
     if application is None:
         raise HTTPException(status_code=404, detail="Application not found")
+    if application.record_state != "active" or db.has_merged_sources(id):
+        raise HTTPException(
+            status_code=409, detail="Application is part of a merge; undo the merge first"
+        )
     _suppress_sender_on_delete(application, db, request)
     db.delete_application(id)
     _invalidate_applications_cache()
@@ -1512,6 +1886,437 @@ async def get_system_status(request: Request) -> SystemStatusResponse:
         },
         checked_at=now,
     )
+
+
+# ------------------------------------------------------------------ #
+# Evidence (Phase 2)                                                   #
+# ------------------------------------------------------------------ #
+
+
+class EvidenceSummary(BaseModel):
+    """Fixed, non-content subset of raw_metadata — never the whole blob."""
+
+    classification: str | None = None
+    portal: str | None = None
+    status_signal: str | None = None
+
+
+class EvidenceResponse(BaseModel):
+    """Deliberately excludes recipient (the owner's own address), raw_metadata, the
+    fingerprint, and anything resembling a message body."""
+
+    id: int
+    evidence_type: str
+    source: str
+    external_id: str | None
+    thread_id: str | None
+    sender: str | None
+    subject: str | None
+    snippet: str | None
+    occurred_at: datetime
+    captured_at: datetime
+    processing_status: str
+    review_reason: str | None
+    application_id: int | None
+    link_method: str | None
+    link_confidence: float | None
+    summary: EvidenceSummary
+    updated_at: datetime
+    decided_by: str | None = None
+    resolver_decision: str | None = None
+    resolver_confidence: float | None = None
+    deferred_until: datetime | None = None
+
+
+class EvidenceListResponse(BaseModel):
+    items: list[EvidenceResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+class EvidenceCountsResponse(BaseModel):
+    total: int
+    unlinked: int
+    needs_review: int
+
+
+class EvidenceLinkRequest(BaseModel):
+    application_id: int = Field(gt=0)
+
+
+def _evidence_response(evidence: Evidence) -> EvidenceResponse:
+    assert evidence.id is not None
+    metadata = evidence.raw_metadata or {}
+    raw_parser = metadata.get("parser")
+    parser: dict[str, object] = raw_parser if isinstance(raw_parser, dict) else {}
+    return EvidenceResponse(
+        id=evidence.id,
+        evidence_type=evidence.evidence_type,
+        source=evidence.source,
+        external_id=evidence.external_id,
+        thread_id=evidence.thread_id,
+        sender=evidence.sender,
+        subject=evidence.subject,
+        snippet=evidence.snippet,
+        occurred_at=evidence.occurred_at,
+        captured_at=evidence.captured_at,
+        processing_status=evidence.processing_status,
+        review_reason=evidence.review_reason,
+        application_id=evidence.application_id,
+        link_method=evidence.link_method,
+        link_confidence=evidence.link_confidence,
+        summary=EvidenceSummary(
+            classification=_str_or_none(metadata.get("classification")),
+            portal=_str_or_none(parser.get("portal")),
+            status_signal=_str_or_none(parser.get("status_signal")),
+        ),
+        updated_at=evidence.updated_at,
+        decided_by=evidence.decided_by,
+        resolver_decision=evidence.resolver_decision,
+        resolver_confidence=evidence.resolver_confidence,
+        deferred_until=evidence.deferred_until,
+    )
+
+
+def _str_or_none(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _choice(value: str | None, allowed: type[enum.StrEnum], name: str) -> str | None:
+    if value is not None and value not in {m.value for m in allowed}:
+        raise HTTPException(status_code=422, detail=f"Unknown {name}: {value}")
+    return value
+
+
+@router.get("/evidence", response_model=EvidenceListResponse)
+async def list_evidence(
+    request: Request,
+    linked: bool | None = None,
+    source: str | None = None,
+    evidence_type: str | None = None,
+    processing_status: str | None = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+) -> EvidenceListResponse:
+    db: DataStore = request.app.state.db
+    items, total = db.list_evidence(
+        EvidenceFilter(
+            linked=linked,
+            source=_choice(source, EvidenceSource, "source"),
+            evidence_type=_choice(evidence_type, EvidenceType, "evidence_type"),
+            processing_status=_choice(processing_status, EvidenceStatus, "processing_status"),
+            date_from=date_from,
+            date_to=date_to,
+            page=page,
+            page_size=page_size,
+        )
+    )
+    return EvidenceListResponse(
+        items=[_evidence_response(e) for e in items], total=total, page=page, page_size=page_size
+    )
+
+
+@router.get("/evidence/counts", response_model=EvidenceCountsResponse)
+async def evidence_counts(request: Request) -> EvidenceCountsResponse:
+    db: DataStore = request.app.state.db
+    return EvidenceCountsResponse(**db.count_evidence())
+
+
+class CandidateApplicationSummary(BaseModel):
+    id: int
+    company: str | None
+    role: str | None
+    current_status: ApplicationStatus
+    source_portal: str
+    applied_date: datetime
+
+
+class ResolutionCandidate(BaseModel):
+    application_id: int
+    score: int
+    signals: dict[str, int]
+    application: CandidateApplicationSummary | None
+
+
+class ResolutionResponse(BaseModel):
+    version: str | None
+    outcome: str | None
+    reason: str | None
+    explanation: str | None
+    confidence: float | None
+    selected_application_id: int | None
+    message_kind: str | None
+    candidates: list[ResolutionCandidate]
+
+
+class EvidenceDetailResponse(EvidenceResponse):
+    resolution: ResolutionResponse | None
+
+
+class ReviewListResponse(BaseModel):
+    items: list[EvidenceDetailResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+def _evidence_detail(db: DataStore, evidence: Evidence) -> EvidenceDetailResponse:
+    base = _evidence_response(evidence).model_dump()
+    result = evidence.resolver_result if isinstance(evidence.resolver_result, dict) else None
+    if result is None:
+        return EvidenceDetailResponse(**base, resolution=None)
+    raw_candidates = [c for c in result.get("candidates") or [] if isinstance(c, dict)]
+    apps = {
+        a.id: a
+        for a in db.get_applications_by_ids(
+            [int(c["application_id"]) for c in raw_candidates if "application_id" in c]
+        )
+    }
+    candidates = []
+    for c in raw_candidates:
+        app = apps.get(int(c.get("application_id", 0)))
+        candidates.append(
+            ResolutionCandidate(
+                application_id=int(c.get("application_id", 0)),
+                score=int(c.get("score", 0)),
+                signals={str(k): int(v) for k, v in (c.get("signals") or {}).items()},
+                application=CandidateApplicationSummary(
+                    id=app.id,
+                    company=app.company,
+                    role=app.role,
+                    current_status=app.current_status,
+                    source_portal=app.source_portal,
+                    applied_date=app.applied_date,
+                )
+                if app is not None and app.id is not None
+                else None,
+            )
+        )
+    return EvidenceDetailResponse(
+        **base,
+        resolution=ResolutionResponse(
+            version=_str_or_none(result.get("version")),
+            outcome=_str_or_none(result.get("outcome")),
+            reason=_str_or_none(result.get("reason")),
+            explanation=_str_or_none(result.get("explanation")),
+            confidence=result.get("confidence")
+            if isinstance(result.get("confidence"), int | float)
+            else None,
+            selected_application_id=result.get("selected_application_id")
+            if isinstance(result.get("selected_application_id"), int)
+            else None,
+            message_kind=_str_or_none(result.get("message_kind")),
+            candidates=candidates,
+        ),
+    )
+
+
+@router.get("/evidence/review", response_model=ReviewListResponse)
+async def evidence_review_queue(
+    request: Request,
+    include_deferred: bool = False,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+) -> ReviewListResponse:
+    """Evidence waiting for a person, with the resolver's candidates and explanation."""
+    db: DataStore = request.app.state.db
+    statuses = [EvidenceStatus.NEEDS_REVIEW.value]
+    if include_deferred:
+        statuses.append(EvidenceStatus.DEFERRED.value)
+    items, total = db.list_evidence(
+        EvidenceFilter(statuses=tuple(statuses), page=page, page_size=page_size)
+    )
+    return ReviewListResponse(
+        items=[_evidence_detail(db, e) for e in items], total=total, page=page, page_size=page_size
+    )
+
+
+@router.get("/evidence/metrics")
+async def evidence_metrics(request: Request) -> dict:
+    """Counters since process start plus persistent totals — counts only, no content."""
+    db: DataStore = request.app.state.db
+    return {"process": resolver_metrics.snapshot(), "totals": db.evidence_decision_counts()}
+
+
+@router.get("/applications/{id}/evidence", response_model=list[EvidenceResponse])
+async def application_evidence(id: int, request: Request) -> list[EvidenceResponse]:
+    db: DataStore = request.app.state.db
+    if db.get_application(id) is None:
+        raise HTTPException(status_code=404, detail="Application not found")
+    return [_evidence_response(e) for e in db.get_evidence_for_application(id)]
+
+
+@router.post(
+    "/evidence/{evidence_id}/link", response_model=EvidenceResponse, dependencies=_SENSITIVE
+)
+async def link_evidence(
+    evidence_id: int, body: EvidenceLinkRequest, request: Request
+) -> EvidenceResponse:
+    """Manually attach evidence to an application (confidence 1.0). Does not apply any
+    status change; use the application status update for that."""
+    db: DataStore = request.app.state.db
+    try:
+        evidence = db.link_evidence(
+            evidence_id,
+            body.application_id,
+            LinkMethod.MANUAL.value,
+            1.0,
+            decided_by=DecisionSource.HUMAN.value,
+        )
+    except (EvidenceNotFoundError, ApplicationNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _invalidate_applications_cache()
+    log.info(
+        "evidence_linked_manually", evidence_id=evidence_id, application_id=body.application_id
+    )
+    return _evidence_response(evidence)
+
+
+@router.post(
+    "/evidence/{evidence_id}/unlink", response_model=EvidenceResponse, dependencies=_SENSITIVE
+)
+async def unlink_evidence(evidence_id: int, request: Request) -> EvidenceResponse:
+    """Detach evidence; it returns to needs_review. Status history is not rewritten."""
+    db: DataStore = request.app.state.db
+    try:
+        evidence = db.unlink_evidence(evidence_id)
+    except EvidenceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _invalidate_applications_cache()
+    log.info("evidence_unlinked_manually", evidence_id=evidence_id)
+    return _evidence_response(evidence)
+
+
+class EvidenceAcceptRequest(BaseModel):
+    application_id: int = Field(gt=0)
+
+
+class EvidenceCreateApplicationRequest(BaseModel):
+    company: str | None = Field(default=None, max_length=200)
+    role: str | None = Field(default=None, max_length=200)
+    source_portal: str | None = Field(default=None, max_length=100)
+
+
+class EvidenceDeferRequest(BaseModel):
+    until: datetime | None = None
+
+
+def _get_evidence_or_404(db: DataStore, evidence_id: int) -> Evidence:
+    evidence = db.get_evidence(evidence_id)
+    if evidence is None:
+        raise HTTPException(status_code=404, detail=f"Evidence {evidence_id} not found")
+    return evidence
+
+
+@router.get("/evidence/{evidence_id}", response_model=EvidenceDetailResponse)
+async def evidence_detail(evidence_id: int, request: Request) -> EvidenceDetailResponse:
+    db: DataStore = request.app.state.db
+    return _evidence_detail(db, _get_evidence_or_404(db, evidence_id))
+
+
+@router.post(
+    "/evidence/{evidence_id}/accept", response_model=EvidenceDetailResponse, dependencies=_SENSITIVE
+)
+async def accept_evidence_candidate(
+    evidence_id: int, body: EvidenceAcceptRequest, request: Request
+) -> EvidenceDetailResponse:
+    """Confirm one of the resolver's candidates. A human decision: later automated runs
+    never change it. Applies the evidence's status signal, if any. Idempotent."""
+    db: DataStore = request.app.state.db
+    updater: StatusUpdater = request.app.state.updater
+    evidence = _get_evidence_or_404(db, evidence_id)
+    result = evidence.resolver_result if isinstance(evidence.resolver_result, dict) else {}
+    candidate_ids = {
+        c.get("application_id") for c in result.get("candidates") or [] if isinstance(c, dict)
+    }
+    already = evidence.application_id == body.application_id
+    if body.application_id not in candidate_ids and not already:
+        raise HTTPException(
+            status_code=409,
+            detail="Application is not one of the resolver's candidates; use /link instead",
+        )
+    try:
+        updater.accept_candidate(evidence_id, body.application_id)
+    except (EvidenceNotFoundError, ApplicationNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _invalidate_applications_cache()
+    log.info("evidence_review_accepted", evidence_id=evidence_id)
+    return _evidence_detail(db, _get_evidence_or_404(db, evidence_id))
+
+
+@router.post(
+    "/evidence/{evidence_id}/create-application",
+    response_model=ApplicationResponse,
+    dependencies=_SENSITIVE,
+)
+async def create_application_from_evidence(
+    evidence_id: int, body: EvidenceCreateApplicationRequest, request: Request
+) -> ApplicationResponse:
+    """A person decides the evidence is a new application. Idempotent."""
+    db: DataStore = request.app.state.db
+    updater: StatusUpdater = request.app.state.updater
+    _get_evidence_or_404(db, evidence_id)
+    try:
+        created = updater.create_from_review(
+            evidence_id, company=body.company, role=body.role, source_portal=body.source_portal
+        )
+    except EvidenceConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _invalidate_applications_cache()
+    log.info("evidence_review_created_application", evidence_id=evidence_id)
+    return _to_response(created)
+
+
+@router.post(
+    "/evidence/{evidence_id}/dismiss",
+    response_model=EvidenceDetailResponse,
+    dependencies=_SENSITIVE,
+)
+async def dismiss_evidence(evidence_id: int, request: Request) -> EvidenceDetailResponse:
+    """Mark evidence irrelevant (a human decision). Idempotent; linked evidence must be
+    unlinked first."""
+    db: DataStore = request.app.state.db
+    evidence = _get_evidence_or_404(db, evidence_id)
+    if evidence.processing_status != EvidenceStatus.DISMISSED.value:
+        try:
+            db.apply_human_review(
+                evidence_id,
+                status=EvidenceStatus.DISMISSED.value,
+                review_reason="dismissed_by_reviewer",
+            )
+        except EvidenceConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _evidence_detail(db, _get_evidence_or_404(db, evidence_id))
+
+
+@router.post(
+    "/evidence/{evidence_id}/defer", response_model=EvidenceDetailResponse, dependencies=_SENSITIVE
+)
+async def defer_evidence(
+    evidence_id: int, body: EvidenceDeferRequest, request: Request
+) -> EvidenceDetailResponse:
+    """Postpone the decision (a human decision; stays out of the default review queue)."""
+    db: DataStore = request.app.state.db
+    evidence = _get_evidence_or_404(db, evidence_id)
+    if not (
+        evidence.processing_status == EvidenceStatus.DEFERRED.value
+        and evidence.deferred_until == body.until
+    ):
+        try:
+            db.apply_human_review(
+                evidence_id,
+                status=EvidenceStatus.DEFERRED.value,
+                review_reason=evidence.review_reason,
+                deferred_until=body.until,
+            )
+        except EvidenceConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _evidence_detail(db, _get_evidence_or_404(db, evidence_id))
 
 
 # ------------------------------------------------------------------ #

@@ -14,11 +14,12 @@ Local Mac app. Python 3.11. FastAPI backend on jobtracker.localhost:8000. React 
 ## Architecture rules (NEVER violate)
 - All DB access goes through DataStore class only. No raw sqlite3 calls outside data_store.py.
 - All Gmail API calls go through GmailPoller only. No direct google-api calls elsewhere.
-- Status transitions only via StatusUpdater._advance_status(). No direct status field writes.
+- Status transitions only via StatusUpdater._advance_status(). No direct status field writes. One documented exception: `DataStore.execute_merge()`/`undo_merge()` set the survivor's `current_status` to the value the user explicitly chose among the merged records (or restore it from the snapshot on undo). This is audited in `mergeoperation` and reversible; see docs/phase-2-identity-resolution.md §12.
 - Config values (paths, ports, thresholds) only from config.py. No hardcoded values.
 - Schema changes only via Alembic revisions in `backend/db/alembic/versions/` (see `docs/database-operations.md`). Never `create_all()` or runtime `ALTER TABLE`. Revisions are frozen: they must not import `backend/db/models.py`.
 - Never copy the live SQLite file; backups go through `scripts/backup_database.py` (SQLite online backup API).
 - No email body text stored in DB. Only: sender, subject, date, extracted fields, snippet.
+- Every received item (Gmail message, portal import, …) is stored once as `Evidence` via `DataStore.insert_evidence` (idempotent: unique fingerprint and `(source, external_id)`). Only an acknowledgement with no matching application may create one; follow-up/status mail that matches nothing is left `needs_review`. Identity is decided by the deterministic scoring resolver in `backend/engine/identity_resolver.py` (weights/thresholds in config.py); normalization lives only in `backend/engine/normalization.py`. Human decisions (`decided_by=human`) are never overwritten by automated processing. Non-job mail is stored minimally (IDs and date only). See `docs/phase-2-identity-resolution.md`.
 - Every public method must have type hints. No bare `except:` — always catch specific exceptions.
 
 ## File layout

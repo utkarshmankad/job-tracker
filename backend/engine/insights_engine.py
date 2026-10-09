@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from statistics import median
@@ -98,8 +99,11 @@ class InsightReport:
 
 
 class InsightsEngine:
-    def __init__(self, db: DataStore) -> None:
+    def __init__(self, db: DataStore, clock: Callable[[], datetime] = utc_now) -> None:
+        """`clock` fixes "now" for reproducible reports (reconciliation --as-of); the API
+        uses the real time."""
         self._db = db
+        self._clock = clock
 
     def generate_report(self) -> InsightReport:
         apps = self._fetch_active_apps()
@@ -114,7 +118,7 @@ class InsightsEngine:
                 insights=[],
                 total_applications=total,
                 insufficient_data=True,
-                generated_at=utc_now(),
+                generated_at=self._clock(),
             )
 
         channels = self._channel_stats(apps, "source_portal")
@@ -128,7 +132,7 @@ class InsightsEngine:
             insights=insights,
             total_applications=total,
             insufficient_data=False,
-            generated_at=utc_now(),
+            generated_at=self._clock(),
         )
 
     def _fetch_active_apps(self) -> list[Application]:
@@ -141,7 +145,7 @@ class InsightsEngine:
             raise ValueError("window_days must be one of 7, 28, or 90")
 
         apps = self._fetch_active_apps()
-        now = utc_now()
+        now = self._clock()
         recent_start = now - timedelta(days=window_days)
         cohort_end = now - timedelta(days=maturity_days)
         cohort_start = cohort_end - timedelta(days=window_days)
@@ -330,7 +334,7 @@ class InsightsEngine:
                     rejected_direct += 1
                 elif is_withdrawn:
                     withdrawn_direct += 1
-                elif is_application_stale(app):
+                elif is_application_stale(app, now=self._clock()):
                     stale_applied += 1
                 else:
                     active_applied += 1
@@ -422,7 +426,7 @@ class InsightsEngine:
         }
 
     def _weekly_activity(self, apps: list[Application], weeks: int = 12) -> list[dict]:
-        today = utc_now().date()
+        today = self._clock().date()
         start_monday = today - timedelta(weeks=weeks - 1, days=today.weekday())
         week_starts = [start_monday + timedelta(weeks=i) for i in range(weeks)]
 
@@ -457,7 +461,7 @@ class InsightsEngine:
     def conversion_data(self, months: int = 6) -> dict:
         if months not in (1, 3, 6, 12):
             raise ValueError("months must be one of 1, 3, 6, or 12")
-        cutoff = utc_now() - timedelta(days=months * 30)
+        cutoff = self._clock() - timedelta(days=months * 30)
         apps = self._fetch_active_apps()
         apps_by_id = {app.id: app for app in apps if app.id is not None}
         events = self._db.get_application_events_for_apps(set(apps_by_id))
@@ -650,7 +654,7 @@ class InsightsEngine:
             else:
                 monthly[key]["withdrawn"] += 1
 
-        today = utc_now().date()
+        today = self._clock().date()
         trend = []
         for i in range(5, -1, -1):
             raw_month = today.month - i

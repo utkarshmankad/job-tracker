@@ -22,12 +22,14 @@ export function setUnauthorizedHandler(handler) {
 }
 
 export class ApiError extends Error {
-  constructor(status, code, detail, body) {
+  constructor(status, code, detail, body, payload = null) {
     super(`${status} ${body}`);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
     this.detail = detail;
+    // Parsed JSON body, e.g. {detail: {message, conflicts}} for an unsafe merge undo.
+    this.payload = payload;
   }
 }
 
@@ -35,14 +37,15 @@ async function toApiError(res) {
   const body = await res.text();
   let code = null;
   let detail = null;
+  let payload = null;
   try {
-    const parsed = JSON.parse(body);
-    code = parsed.code ?? null;
-    detail = typeof parsed.detail === "string" ? parsed.detail : null;
+    payload = JSON.parse(body);
+    code = payload.code ?? null;
+    detail = typeof payload.detail === "string" ? payload.detail : null;
   } catch {
     // non-JSON error body — keep the raw text in the message
   }
-  return new ApiError(res.status, code, detail, body);
+  return new ApiError(res.status, code, detail, body, payload);
 }
 
 async function send(path, options = {}, { authRequest = false } = {}) {
@@ -87,6 +90,25 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ primary_id: primaryId, duplicate_id: duplicateId }),
     }),
+  dismissDuplicate: (applicationIds) =>
+    request("/applications/duplicates/dismiss", {
+      method: "POST",
+      body: JSON.stringify({ application_ids: applicationIds }),
+    }),
+  previewMerge: (applicationIds, survivorId = null) =>
+    request("/applications/merge/preview", {
+      method: "POST",
+      body: JSON.stringify(
+        survivorId == null
+          ? { application_ids: applicationIds }
+          : { application_ids: applicationIds, survivor_id: survivorId },
+      ),
+    }),
+  executeMerge: (body) =>
+    request("/applications/merge", { method: "POST", body: JSON.stringify(body) }),
+  listMerges: (params = {}) => request(`/applications/merges?${new URLSearchParams(params)}`),
+  getMerge: (id) => request(`/applications/merges/${id}`),
+  undoMerge: (id) => request(`/applications/merges/${id}/undo`, { method: "POST" }),
   getApplication: (id, signal) => request(`/applications/${id}`, { signal }),
   createApplication: (body) =>
     request("/applications", { method: "POST", body: JSON.stringify(body) }),

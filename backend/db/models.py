@@ -2,8 +2,9 @@
 
 import enum
 from datetime import UTC, datetime
+from typing import Any
 
-from sqlalchemy import Column, String
+from sqlalchemy import JSON, Column, Float, Index, String, UniqueConstraint
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.types import DateTime, TypeDecorator
 from sqlmodel import Field, Relationship, SQLModel
@@ -48,6 +49,8 @@ class ApplicationStatus(str, enum.Enum):
 
 
 class Application(SQLModel, table=True):
+    __table_args__ = (Index("ix_application_identity", "normalized_company", "normalized_role"),)
+
     id: int | None = Field(default=None, primary_key=True)
     company: str | None = None
     role: str | None = None
@@ -80,6 +83,31 @@ class Application(SQLModel, table=True):
     withdraw_reason: str | None = None  # "self_withdraw" | "company_closed"
     created_at: datetime = Field(default_factory=utc_now, sa_type=UTCDateTime)
     updated_at: datetime = Field(default_factory=utc_now, index=True, sa_type=UTCDateTime)
+    # Phase 2 identity columns (all nullable, additive). The first three are derived from
+    # company/role/job_url by DataStore on every save; last_evidence_at from linked evidence.
+    normalized_company: str | None = Field(default=None, index=True)
+    normalized_role: str | None = None
+    canonical_job_url: str | None = Field(default=None, index=True)
+    external_job_id: str | None = Field(default=None, index=True)
+    last_evidence_at: datetime | None = Field(default=None, sa_type=UTCDateTime)
+    # Revision 0004 — soft merge. Merged records stay in the table (never hard-deleted) and
+    # are excluded from default lists, counts and analytics.
+    record_state: str = Field(
+        default="active",
+        sa_column=Column(
+            "record_state",
+            String,
+            default="active",
+            server_default="active",
+            nullable=False,
+            index=True,
+        ),
+    )
+    # No database FK: SQLite cannot add one to an existing table without rebuilding it;
+    # the merge code validates the target (same approach as prospect.application_id).
+    merged_into_application_id: int | None = Field(default=None, index=True)
+    merge_operation_id: int | None = Field(default=None, index=True)
+    merged_at: datetime | None = Field(default=None, sa_type=UTCDateTime)
     status_history: list["StatusHistory"] = Relationship(back_populates="application")
 
 
@@ -91,6 +119,9 @@ class StatusHistory(SQLModel, table=True):
     trigger: str  # "email" | "manual"
     changed_at: datetime = Field(default_factory=utc_now, sa_type=UTCDateTime)
     message_id: str | None = None
+    # Revision 0004 — set when a merge found this row duplicated by another entry on the
+    # survivor; hidden from default history and analytics, restored by undo.
+    superseded_by_merge_id: int | None = Field(default=None, index=True)
     application: Application | None = Relationship(back_populates="status_history")
 
 
@@ -141,6 +172,7 @@ class ApplicationEvent(SQLModel, table=True):
     status_history_id: int | None = Field(default=None, index=True, unique=True)
     notes: str | None = None
     created_at: datetime = Field(default_factory=utc_now, sa_type=UTCDateTime)
+    superseded_by_merge_id: int | None = Field(default=None, index=True)  # revision 0004
 
 
 class ApplicationThreadId(SQLModel, table=True):
@@ -207,3 +239,157 @@ class Prospect(SQLModel, table=True):
     classification_reason: str
     created_at: datetime = Field(default_factory=utc_now, sa_type=UTCDateTime)
     updated_at: datetime = Field(default_factory=utc_now, index=True, sa_type=UTCDateTime)
+
+
+# ------------------------------------------------------------------ #
+# Evidence (Phase 2) — see docs/phase-2-identity-resolution.md         #
+# ------------------------------------------------------------------ #
+# Enumerated columns are stored as plain VARCHAR and validated in Python: a value added by a
+# later release must not make older code raise LookupError when it reads the row.
+
+
+class EvidenceType(enum.StrEnum):
+    EMAIL = "email"
+    PORTAL_IMPORT = "portal_import"
+    BROWSER_OBSERVATION = "browser_observation"
+    MANUAL = "manual"
+
+
+class EvidenceSource(enum.StrEnum):
+    GMAIL = "gmail"
+    LINKEDIN = "linkedin"
+    NAUKRI = "naukri"
+    INDEED = "indeed"
+    INSTAHYRE = "instahyre"
+    CAREERNET = "careernet"
+    COMPANY_PORTAL = "company_portal"
+    OTHER = "other"
+
+
+class EvidenceStatus(enum.StrEnum):
+    PENDING = "pending"  # recorded, not yet classified
+    PROCESSING = "processing"  # claimed by one worker (guards concurrent resolution)
+    LINKED = "linked"  # attached to an existing application
+    CREATED_APPLICATION = "created_application"  # an acknowledgement that created one
+    NEEDS_REVIEW = "needs_review"  # job-related but identity unclear
+    INFORMATIONAL = "informational"  # relevant but not about an application (prospects)
+    IGNORED = "ignored"  # not job mail / suppressed; stored minimally
+    DISMISSED = "dismissed"  # a person marked it irrelevant
+    DEFERRED = "deferred"  # a person postponed the review decision
+    ERROR = "error"
+
+
+class DecisionSource(enum.StrEnum):
+    RESOLVER = "resolver"
+    HUMAN = "human"  # always takes precedence over later automated decisions
+
+
+class LinkMethod(enum.StrEnum):
+    THREAD = "thread"
+    JOB_URL = "job_url"
+    EXTERNAL_JOB_ID = "external_job_id"
+    COMPANY_ROLE = "company_role"
+    COMPANY_ONLY = "company_only"
+    CREATED = "created"
+    MANUAL = "manual"
+    BACKFILL = "backfill"
+
+
+class Evidence(SQLModel, table=True):
+    """One observation received by the tracker (an email, a portal record, …).
+
+    Never holds a message body: only metadata, Gmail's preview snippet, and structured
+    classification results in raw_metadata.
+    """
+
+    __table_args__ = (
+        UniqueConstraint("source", "external_id", name="uq_evidence_source_external_id"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    evidence_type: str = Field(index=True)
+    source: str = Field(index=True)
+    external_id: str | None = None
+    thread_id: str | None = Field(default=None, index=True)
+    sender: str | None = None
+    recipient: str | None = None
+    subject: str | None = None
+    normalized_subject: str | None = None
+    snippet: str | None = None
+    occurred_at: datetime = Field(index=True, sa_type=UTCDateTime)
+    captured_at: datetime = Field(default_factory=utc_now, sa_type=UTCDateTime)
+    raw_metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column("raw_metadata", JSON, nullable=False, server_default="{}"),
+    )
+    content_fingerprint: str = Field(index=True, unique=True)
+    processing_status: str = Field(default=EvidenceStatus.PENDING.value, index=True)
+    review_reason: str | None = None
+    application_id: int | None = Field(default=None, foreign_key="application.id", index=True)
+    link_method: str | None = None
+    link_confidence: float | None = Field(default=None, sa_type=Float)
+    created_at: datetime = Field(default_factory=utc_now, sa_type=UTCDateTime)
+    updated_at: datetime = Field(default_factory=utc_now, sa_type=UTCDateTime)
+    # Revision 0003 — identity signals derived from the fields above (runtime-maintained)
+    sender_address: str | None = Field(default=None, index=True)
+    sender_domain: str | None = Field(default=None, index=True)
+    canonical_job_url: str | None = Field(default=None, index=True)
+    external_job_id: str | None = Field(default=None, index=True)
+    # Revision 0003 — resolver audit trail and decision ownership
+    resolver_version: str | None = None
+    resolver_decision: str | None = Field(default=None, index=True)
+    resolver_confidence: float | None = Field(default=None, sa_type=Float)
+    resolver_result: dict[str, Any] | None = Field(
+        default=None, sa_column=Column("resolver_result", JSON, nullable=True)
+    )
+    decided_by: str | None = None  # DecisionSource; "human" decisions are never overwritten
+    decided_at: datetime | None = Field(default=None, sa_type=UTCDateTime)
+    deferred_until: datetime | None = Field(default=None, sa_type=UTCDateTime)
+
+
+# ------------------------------------------------------------------ #
+# Merge operations (revision 0004) — docs/phase-2-identity-resolution.md §12
+# ------------------------------------------------------------------ #
+
+
+class RecordState(enum.StrEnum):
+    ACTIVE = "active"
+    MERGED = "merged"
+
+
+class MergeOperation(SQLModel, table=True):
+    """One human-confirmed merge of several applications into a survivor.
+
+    `snapshot` is the complete pre-merge state of every involved application and the
+    application links of their evidence, status history, events, thread links and
+    prospects — IDs, statuses, dates and link metadata only, never message content.
+    `snapshot_checksum` (SHA-256 of its canonical JSON) is verified before any undo.
+    """
+
+    id: int | None = Field(default=None, primary_key=True)
+    operation_version: int = 1
+    survivor_application_id: int = Field(foreign_key="application.id", index=True)
+    source_application_ids: list[int] = Field(sa_column=Column(JSON, nullable=False))
+    snapshot: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    snapshot_checksum: str
+    result: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    field_values: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    preview_token: str
+    idempotency_key: str = Field(unique=True, index=True)
+    initiated_by: str | None = None
+    reason: str | None = None
+    created_at: datetime = Field(default_factory=utc_now, sa_type=UTCDateTime, index=True)
+    undone_at: datetime | None = Field(default=None, sa_type=UTCDateTime)
+    undone_by: str | None = None
+    undo_metadata: dict[str, Any] | None = Field(
+        default=None, sa_column=Column(JSON, nullable=True)
+    )
+
+
+class DuplicateDismissal(SQLModel, table=True):
+    """A duplicate suggestion a person said is not a duplicate. Advisory only."""
+
+    id: int | None = Field(default=None, primary_key=True)
+    pair_key: str = Field(unique=True, index=True)  # "<lower id>:<higher id>"
+    dismissed_by: str | None = None
+    created_at: datetime = Field(default_factory=utc_now, sa_type=UTCDateTime)

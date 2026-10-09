@@ -147,6 +147,26 @@ def upgrade(engine: Engine, revision: str = "head") -> SchemaStatus:
     return status
 
 
+def ancestors(revision: str) -> list[str]:
+    """Revisions strictly below `revision` in the chain, newest first."""
+    script = ScriptDirectory.from_config(alembic_config())
+    chain = [rev.revision for rev in script.iterate_revisions(revision, "base")]
+    return chain[1:]
+
+
+def stamp(engine: Engine, revision: str) -> SchemaStatus:
+    """Rewrite only the recorded revision (no schema change). Used for the documented
+    rollback to an older release on an expand-only schema; callers must have checked that
+    `revision` is an ancestor of the current one."""
+    cfg = alembic_config()
+    with engine.begin() as conn:
+        cfg.attributes["connection"] = conn
+        command.stamp(cfg, revision)
+    status = get_status(engine)
+    log.warning("schema_stamped", revision=status.current_revision)
+    return status
+
+
 def prepare(engine: Engine, db_path: Path, policy: SchemaPolicy) -> SchemaStatus:
     """Apply the startup policy. Returns the resulting status or raises SchemaOutdatedError."""
     status = get_status(engine)

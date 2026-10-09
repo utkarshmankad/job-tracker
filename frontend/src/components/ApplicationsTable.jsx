@@ -9,6 +9,8 @@ import { Eye, ArrowUp, ArrowDown, ChevronsUpDown } from "lucide-react";
 import { api } from "../api/client";
 import { STATUS_COLORS, STATUS_OPTIONS } from "../utils/constants";
 import { formatDate } from "../utils/formatters";
+import MergeDialog from "./MergeDialog";
+import MergeNotice from "./MergeNotice";
 
 const BATCH = 30; // rows revealed per scroll trigger
 
@@ -32,6 +34,8 @@ export default function ApplicationsTable({ filters, onSelectId }) {
   const [bulkConfirmDelete, setBulkConfirmDelete] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkError, setBulkError] = useState(null);
+  const [mergeIds, setMergeIds] = useState(null);
+  const [mergeOperation, setMergeOperation] = useState(null);
   const sentinelRef = useRef(null);
 
   const refetch = useCallback(() => {
@@ -244,12 +248,53 @@ export default function ApplicationsTable({ filters, onSelectId }) {
     }
   };
 
+  const handleMerged = (operation) => {
+    setMergeIds(null);
+    setMergeOperation(operation);
+    clearSelection();
+    refetch();
+  };
+
+  const mergeUi = (
+    <>
+      {mergeOperation && (
+        <div className="mb-3">
+          <MergeNotice
+            key={mergeOperation.id}
+            operation={mergeOperation}
+            onUndone={refetch}
+            onDismiss={() => setMergeOperation(null)}
+          />
+        </div>
+      )}
+      {mergeIds && (
+        <MergeDialog
+          applicationIds={mergeIds}
+          onClose={() => setMergeIds(null)}
+          onMerged={handleMerged}
+        />
+      )}
+    </>
+  );
+
   if (loading)
-    return <div className="text-sm text-gray-500 dark:text-gray-400 py-8 text-center">Loading…</div>;
+    return (
+      <>
+        {mergeUi}
+        <div className="text-sm text-gray-500 dark:text-gray-400 py-8 text-center">Loading…</div>
+      </>
+    );
   if (error)
-    return <div className="text-sm text-red-600 py-8 text-center">Error: {error}</div>;
+    return (
+      <>
+        {mergeUi}
+        <div className="text-sm text-red-600 py-8 text-center">Error: {error}</div>
+      </>
+    );
 
   return (
+    <>
+    {mergeUi}
     <div className="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
       {selectedIds.size > 0 && (
         <div className="flex flex-wrap items-center gap-2 px-4 py-2.5 bg-blue-50 dark:bg-blue-900/20 border-b border-gray-200 dark:border-gray-700">
@@ -276,6 +321,16 @@ export default function ApplicationsTable({ filters, onSelectId }) {
             className="px-2.5 py-1 rounded-md text-xs font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 transition-colors"
           >
             Apply
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setMergeIds([...selectedIds].sort((a, b) => a - b))}
+            disabled={bulkBusy || selectedIds.size < 2}
+            title={selectedIds.size < 2 ? "Select at least two applications to merge" : undefined}
+            className="px-2.5 py-1 rounded-md text-xs font-medium border border-blue-600 text-blue-700 dark:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-900/40 disabled:opacity-50 transition-colors"
+          >
+            Merge duplicates
           </button>
 
           <div className="flex-1" />
@@ -406,5 +461,6 @@ export default function ApplicationsTable({ filters, onSelectId }) {
           : `All ${data.length} application${data.length !== 1 ? "s" : ""} shown`}
       </div>
     </div>
+    </>
   );
 }
