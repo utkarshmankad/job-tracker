@@ -185,7 +185,7 @@ class GmailPoller:
 
     def _save_token_to_keyring(self, creds: Credentials) -> None:
         if os.environ.get(GMAIL_TOKEN_ENV_VAR):
-            # Fly.io secrets are read-only at runtime; refreshed token stays
+            # An env-provided token is read-only at runtime; refreshed token stays
             # in-memory for this process and re-refreshes on next restart.
             log.info("gmail_token_refresh_not_persisted_env_backed")
             return
@@ -196,7 +196,7 @@ class GmailPoller:
         """Report where Gmail credentials come from and whether they are usable, without
         network calls and without revealing any token values.
 
-        An environment token (GMAIL_TOKEN_JSON, used on Fly) carries its own client ID and
+        An environment token (GMAIL_TOKEN_JSON) carries its own client ID and
         secret, so polling does not need client_secret.json; that file is only required for
         the web re-auth flow and its absence is reported as a note, not a failure.
         """

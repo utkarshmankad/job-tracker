@@ -1,7 +1,7 @@
 """End-to-end database recovery: a full backup → verify → restore drill on representative
 data, and the API's maintenance mode (quiesced writers) during migrations and restores.
 
-Everything runs on temporary files; nothing here can reach a Fly.io volume.
+Everything runs on temporary files; nothing here can touch a real database.
 """
 
 from __future__ import annotations

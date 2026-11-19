@@ -16,7 +16,7 @@ LOG_DIR = JOB_TRACKER_DIR / "logs"
 PORTAL_RULES_PATH = Path(__file__).parent / "parser" / "portal_rules.yaml"
 
 # Database recovery and migrations — see docs/database-operations.md.
-# Backups live beside the database (on the Fly volume in production), one directory each.
+# Backups live beside the database, one directory each.
 BACKUP_DIR_NAME = "backups"
 BACKUP_DIR = JOB_TRACKER_DIR / BACKUP_DIR_NAME
 # Default number of verified backups kept when a backup run is asked to prune (--keep).
@@ -29,7 +29,7 @@ MAINTENANCE_FLAG_PATH = JOB_TRACKER_DIR / "MAINTENANCE"
 GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 GMAIL_KEYCHAIN_SERVICE = "job-tracker-gmail"
 GMAIL_KEYCHAIN_USERNAME = "oauth-token"
-# Environment variable carrying the Gmail authorized-user token JSON (used on Fly instead of
+# Environment variable carrying the Gmail authorized-user token JSON (an alternative to
 # the keychain). When set, client_secret.json is only needed for the web re-auth flow.
 GMAIL_TOKEN_ENV_VAR = "GMAIL_TOKEN_JSON"
 
@@ -53,9 +53,8 @@ FRONTEND_ORIGIN = os.environ.get(
 
 # Public URL the API is reached at by the browser — used to build the OAuth redirect_uri
 # for the web-based Gmail re-auth flow (/poller/reauth/*). Must exactly match a redirect URI
-# registered on the OAuth client in Google Cloud Console. In production this is the Vercel
-# origin (which proxies /api/* to Fly) so the session cookie accompanies the callback.
-# Falls back to localhost for local development.
+# registered on the OAuth client in Google Cloud Console. Falls back to localhost for
+# local development.
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", f"http://{API_HOST}:{API_PORT}")
 
 # Deployment environment. "production" makes authentication fail closed: the API refuses to

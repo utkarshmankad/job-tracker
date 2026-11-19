@@ -7,7 +7,7 @@ in the keychain, and the browser profile directory is referenced by path, never 
 
 Example::
 
-    api_url = "https://job-tracker-api-verdant-haze-8797.fly.dev"
+    api_url = "http://jobtracker.localhost:8000"
 
     [browser]
     # A dedicated profile you sign in to once per site (recommended). Using your everyday

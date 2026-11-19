@@ -39,7 +39,7 @@ Create `~/Library/Application Support/JobTrackerCollector/config.toml`. Override
 location with `JOB_TRACKER_COLLECTOR_HOME`.
 
 ```toml
-api_url = "https://job-tracker-api-verdant-haze-8797.fly.dev"
+api_url = "http://jobtracker.localhost:8000"
 
 [browser]
 # A dedicated profile used only for collection (recommended). It is referenced by path,

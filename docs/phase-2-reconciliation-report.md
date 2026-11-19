@@ -21,7 +21,6 @@ touched it:
   - `df` and a backup listing.
 - **One online backup and its verification:**
   - `backup_database.py --label phase2-audit` created backup `20261009T055712Z-phase2-audit` on the volume;
-  - `verify_backup.py` verified it on Fly.
 
 The audit did not migrate, link, merge, dismiss, update or delete any production record.
 It did not poll Gmail, touch Gmail or Google auth, access the keychain, call an LLM, or
@@ -35,7 +34,7 @@ deploy anything.
 | Manifest SHA-256 | `492db893b4ca5f2bcdd4ac0a04e7a5d9dd3d1524996984020b86f9b305b24718` |
 | Size | 1,187,840 bytes |
 | Source schema | `0001_baseline` |
-| Integrity | `ok` (manifest), verified on Fly and again locally |
+| Integrity | `ok` (manifest), verified locally |
 
 **Download.** Only `applications.db` and `manifest.json` were downloaded, into a new
 `mktemp -d` directory:
