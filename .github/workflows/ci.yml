@@ -157,7 +157,9 @@ jobs:
 
   e2e-tests:
     name: Browser E2E Tests
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest is now 26.04, which this Playwright version cannot install
+    # browsers on. Revisit when Playwright is upgraded.
+    runs-on: ubuntu-24.04
     needs: [integration-tests]
     steps:
       - uses: actions/checkout@v4
