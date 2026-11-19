@@ -357,6 +357,9 @@ def test_malformed_session_cookie_is_rejected(env, cookie) -> None:
 def test_tampered_session_cookie_is_rejected(env) -> None:
     _login(env)
     token = env.client.cookies.get("jt_session")
+    # Drop the issued cookie first so a same-named cookie under another domain/path
+    # can't be sent alongside the tampered one (the server would read the valid one).
+    env.client.cookies.delete("jt_session")
     env.client.cookies.set("jt_session", token[:-2] + ("AA" if not token.endswith("AA") else "BB"))
     resp = env.client.get(f"{_BASE}/poller/status")
     assert resp.status_code == 401

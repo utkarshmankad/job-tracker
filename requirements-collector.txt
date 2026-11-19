@@ -4,4 +4,4 @@
 #   python -m playwright install chromium   # only if you do not use an installed Chrome
 playwright==1.55.0
 beautifulsoup4==4.12.3
-soupsieve==2.9.0
+soupsieve==4.1.2
