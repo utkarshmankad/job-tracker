@@ -180,7 +180,7 @@ Open [http://jobtracker.localhost:5173](http://jobtracker.localhost:5173) — yo
 
 The dashboard and every data endpoint require sign-in. In production the owner signs in with
 Google and only `AUTH_ALLOWED_EMAIL` is accepted; locally, set `AUTH_MODE=local` in `.env` for
-an explicit developer sign-in. Setup, environment variables, Vercel/Fly configuration and
+an explicit developer sign-in. Setup, environment variables, and
 rotation: [docs/authentication.md](docs/authentication.md).
 
 ## Running without the Gmail poller
@@ -208,7 +208,7 @@ instead of becoming duplicates. Design: [docs/phase-2-identity-resolution.md](do
 
 The schema is versioned with Alembic. Locally an older database is backed up and upgraded
 automatically on startup; in production the API waits in maintenance mode until an operator
-runs `scripts/migrate_database.py upgrade`. Backups, restores and the Fly.io runbooks:
+runs `scripts/migrate_database.py upgrade`. Backups and restores:
 [docs/database-operations.md](docs/database-operations.md).
 
 ## Useful commands

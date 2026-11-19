@@ -21,7 +21,7 @@ bypasses a CAPTCHA or other access challenge.
 ## 1. Architecture
 
 ```
-your computer                                                 Job Tracker (Fly)
+your computer                                                 Job Tracker     
 ┌───────────────────────────────────────────┐                ┌──────────────────────────┐
 │ scripts/collect.py (collector/ package)   │                │ /api/v1/collector/*      │
 │  config.toml (no secrets)                 │  HTTPS, Bearer │  scoped collector auth   │
@@ -293,4 +293,4 @@ opts in.
   never proves submission or changes status.
 - Fingerprint items (no site ID) whose company or role text changes on the site become a
   new item, which the resolver then matches or sends to review.
-- The in-memory rate limiter resets on restart (single Fly machine, as in Phase 1).
+- The in-memory rate limiter resets on restart (single process, as in Phase 1).

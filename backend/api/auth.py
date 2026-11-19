@@ -296,8 +296,8 @@ def _require_int(payload: Mapping[str, Any], key: str) -> int:
 
 
 class RateLimiter:
-    """Sliding-window limiter kept in process memory. The backend runs as a single Fly
-    machine, so in-memory state is authoritative; it resets on restart."""
+    """Sliding-window limiter kept in process memory. The backend runs as a single
+    process, so in-memory state is authoritative; it resets on restart."""
 
     def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock

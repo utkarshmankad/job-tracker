@@ -9,10 +9,10 @@ the owner, and the database can be restored to a known point at any time.
 
 ## 1. Scope
 
-1. **Protect the production API.** Every `/api/v1` route on the Fly deployment requires
+1. **Protect the production API.** Every `/api/v1` route on a deployed instance requires
    authentication. Fail closed when no secret is configured on a non-local host.
 2. **Reliable backups and restore tooling.** Consistent online SQLite backups, integrity
-   verification, retention, and a tested restore path, locally and on Fly.
+   verification, retention, and a tested restore path, locally.
 3. **Versioned migrations.** Alembic becomes the only schema-change mechanism, replacing
    `SQLModel.metadata.create_all()` + `DataStore._migrate_schema()`.
 4. **Evidence separate from canonical applications.** Gmail messages and portal records
@@ -36,7 +36,7 @@ the owner, and the database can be restored to a known point at any time.
 
 - Multi-user accounts, roles, or OAuth login for the dashboard (single owner only).
 - Moving off SQLite (Postgres, Turso, etc.).
-- Off-provider backup storage (S3/R2/GCS). Phase 1 relies on local + Fly volume backups; see §6.
+- Off-provider backup storage (S3/R2/GCS). Backups are local only; see §6.
 - Dropping legacy columns/tables (`Application.thread_ids`, `ApplicationThreadId`). Phase 1
   migrations are additive only; contraction happens in a later phase after one stable release.
 - Changes to the LLM extractor, analytics, insights, or the notification work in progress on
@@ -73,8 +73,8 @@ then `DataStore._migrate_schema()`, which checks for missing columns and issues
 `sqlalchemy.url`, zero revisions. `backend/db/migrations/` is an empty placeholder. No backup
 or restore tooling exists; SQLite runs in WAL mode with `foreign_keys=ON`.
 
-**API authentication.** Effectively none. The backend is deployed publicly on Fly
-(`job-tracker-api-verdant-haze-8797`, `force_https`), and all 35 routes — including
+**API authentication.** Effectively none. The backend was deployed publicly (since
+removed), and all 35 routes — including
 `DELETE /applications/{id}`, `/applications/bulk-delete`, `/applications/duplicates/merge`,
 `/poller/trigger`, `/diagnostics`, and `/export` — are reachable without credentials. CORS
 restricts browsers only, not direct callers. The single guarded route,
@@ -118,9 +118,9 @@ original API-token sketch in favour of Google identity):
   `Secure` in production) plus an in-memory CSRF token required on state-changing requests.
 - `backend/api/auth.py` holds the single `require_user` dependency; `backend/main.py` mounts
   the whole data router with it. Public surface: `/health` and `/auth/*` only.
-- Vercel rewrites `/api/*` to Fly, so production is same-origin; CORS is an explicit
+- Production is expected to be same-origin; CORS is an explicit
   credentialed allow-list for local development.
-- `APP_ENV=production` (Docker image, `fly.toml`) fails closed at startup without complete
+- `APP_ENV=production` (Docker image) fails closed at startup without complete
   `AUTH_*` configuration. `AUTH_MODE=local` is an explicit, loopback-only developer mode,
   refused in production. `ADMIN_TOKEN` removed; Gmail re-auth `state` is bound to the session
   and expires; the callback requires the session (via `PUBLIC_BASE_URL` = Vercel origin).
@@ -161,8 +161,7 @@ Implemented together; the operator runbook is [`docs/database-operations.md`](da
 - `scripts/backup_database.py` (verifies by default; `--keep N` prunes only after a verified
   backup and only tool-written backups). Pre-migration backups are automatic and mandatory in
   `scripts/migrate_database.py upgrade`.
-- Fly: backups on `/data/backups`; opt-in daily GitHub Actions workflow over `fly ssh`
-  (`FLY_BACKUPS_ENABLED`), Fly volume snapshots, and manual off-provider pulls.
+- Backups live in `.job-tracker/backups` on the local machine (no scheduled or remote job).
 
 **Restore procedure**
 
@@ -177,8 +176,7 @@ temporary directory, trial-migrates older backups there, and opens the copy thro
 **Rollback procedure** — see §5 and the runbook: restore the printed pre-migration backup
 while in maintenance mode, then deploy the matching release; or roll forward.
 
-**Operational risks** — backups share the Fly volume (mitigated by snapshots and off-provider
-copies); SQLite DDL is not fully transactional (mandatory backup, trial migration, post-checks);
+**Operational risks** — backups share the local disk (mitigated by periodic encrypted external copies); SQLite DDL is not fully transactional (mandatory backup, trial migration, post-checks);
 maintenance windows pause Gmail polling (history ID catch-up; backfill after ~7 days);
 restores lose post-backup manual edits; backups contain personal data. Full table in the
 runbook.
@@ -277,7 +275,7 @@ Make the E2E job blocking in CI. Flows, all against a seeded temporary DB with G
 
 ## 5. Migration and rollback strategy
 
-Concrete procedures (production migration sequence, rollback, Fly backup/restore) are in
+Concrete procedures (production migration sequence, rollback, backup/restore) are in
 [`docs/database-operations.md`](database-operations.md). Summary:
 
 - **Expand only.** Every Phase 1 revision adds tables/columns/indexes; nothing is dropped or
@@ -297,11 +295,11 @@ Concrete procedures (production migration sequence, rollback, Fly backup/restore
   the resolver ships; removal is a later phase.
 - **Production rollout per step:** quiesce (maintenance flag) → `migrate_database.py upgrade`
   → diagnostics → resume → confirm `/status` and the poller → spot-check data. Rollback:
-  restore the pre-migration backup in maintenance mode, then `fly releases` → redeploy the
-  matching image.
+  restore the pre-migration backup in maintenance mode, then redeploy the
+  matching code version.
 - **Merges are reversible by design** (soft delete + snapshot), so reconciliation mistakes are
   undone per operation without a full restore.
-- **Auth rollout:** set the `AUTH_*`, `FRONTEND_ORIGIN` and `PUBLIC_BASE_URL` Fly secrets and
+- **Auth rollout:** set the `AUTH_*`, `FRONTEND_ORIGIN` and `PUBLIC_BASE_URL` environment values and
   remove `VITE_API_BASE` from Vercel before deploying Step 1, so the fail-closed check does
   not take the API down (see `docs/authentication.md`). Rollback: redeploy the previous
   release (never ship a "disable auth" flag to production).
@@ -311,7 +309,7 @@ Concrete procedures (production migration sequence, rollback, Fly backup/restore
 | Risk | Today | Mitigation in Phase 1 |
 |---|---|---|
 | Public unauthenticated API exposes job-search PII (companies, roles, senders, snippets) and allows deletes, merges, bulk edits, poller triggers | Fixed by Step 1 once deployed | Router-level auth, fail closed |
-| `reauth/start` open when `ADMIN_TOKEN` unset → attacker could bind their own Gmail account | **Live** if secret unset in Fly | Moves under required auth; startup check |
+| `reauth/start` open when `ADMIN_TOKEN` unset → attacker could bind their own Gmail account | **Live** if secret unset | Moves under required auth; startup check |
 | Secrets in URLs (`?token=`) captured by logs/proxies/history | Live on `reauth/start` | Header/cookie only |
 | Token shipped in the frontend bundle via `VITE_*` | Risk of naive implementation | Same-origin proxy + HttpOnly cookie; no client-side secret |
 | CSRF once cookies are used | New | `SameSite=Strict`, same-origin, state-changing routes require JSON content type; Bearer path unaffected |
@@ -321,7 +319,6 @@ Concrete procedures (production migration sequence, rollback, Fly backup/restore
 | Reconciliation fetching Gmail data beyond policy | New | Read-only scope unchanged, `format=metadata`, no body text persisted, logs exclude snippets |
 | Merge snapshots duplicate data | New | Stored in the same DB under the same protections; no external export |
 | Single-slot, non-expiring OAuth `state` in `app.state` | Live | Add expiry; one outstanding state |
-| Gmail OAuth token storage on Fly (keyring on Linux) | Unverified | Verify where the token lives on the Fly machine during Step 1; document |
 
 ## 7. Test strategy
 
@@ -354,11 +351,11 @@ Concrete procedures (production migration sequence, rollback, Fly backup/restore
 
 ## 8. Definition of done
 
-- [ ] All Fly-deployed `/api/v1` routes except the documented liveness and sign-in
+- [ ] All deployed `/api/v1` routes except the documented liveness and sign-in
       routes return 401 without valid credentials; the server refuses to start in production
       without secrets; no secret appears in the frontend bundle or in URLs.
-- [ ] Daily and pre-migration backups run on Fly and locally; `scripts/restore_database.py` has been
-      exercised end to end against a copy of production data; Fly volume snapshots confirmed.
+- [ ] Daily and pre-migration backups run locally; `scripts/restore_database.py` has been
+      exercised end to end against a copy of production data.
 - [ ] Alembic is the only schema-change path; production DB is stamped and at `head`;
       `create_all()`/`_migrate_schema()` removed; `CLAUDE.md` updated.
 - [ ] Every Gmail message and portal record that affects an application is stored as evidence

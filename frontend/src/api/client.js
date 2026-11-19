@@ -1,5 +1,5 @@
-// Production builds call the API same-origin: Vercel rewrites /api/* to the Fly backend,
-// so the session cookie is first-party. Local dev talks to the backend directly.
+// Production builds call the API same-origin: the API is served same-origin
+// (first-party session cookie). Local dev talks to the backend directly.
 const API_ORIGIN =
   import.meta.env.VITE_API_BASE ?? (import.meta.env.PROD ? "" : "http://jobtracker.localhost:8000");
 const BASE = `${API_ORIGIN}/api/v1`;

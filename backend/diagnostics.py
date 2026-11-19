@@ -241,7 +241,7 @@ class DiagnosticRunner:
         return DiagnosticResult("config_paths", True, "All config paths present")
 
     def _check_gmail_credentials(self) -> DiagnosticResult:
-        """Where Gmail credentials come from. An environment token (Fly) needs no
+        """Where Gmail credentials come from. An environment token needs no
         client_secret.json for polling; that file only matters for web re-auth."""
         from backend.poller.gmail_poller import GmailPoller
 

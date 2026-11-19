@@ -31,8 +31,8 @@ named, never committed to the repository, and never pasted into chat or issue tr
 The frontend bundle contains no reusable secret. The Google client ID is public by design,
 and the CSRF token is useless without the HttpOnly cookie.
 
-**Same-origin in production.** Vercel rewrites `/api/*` to the Fly backend (`vercel.json`).
-The browser therefore talks only to the Vercel origin, so the session cookie is first-party
+**Same-origin in production.** The frontend and API must share an origin (for example behind one reverse proxy).
+The browser therefore talks only to that origin, so the session cookie is first-party
 and is not affected by third-party-cookie blocking.
 
 ### Responses
@@ -55,8 +55,8 @@ Every error body has the shape `{"detail": "...", "code": "..."}` and is sent wi
 
 ### Rate limits
 
-Limits are kept in process memory and counted per client address. Production runs as a
-single Fly machine.
+Limits are kept in process memory and counted per client address. The backend runs as a
+single process.
 
 - Sign-in attempts: 10 per 5 minutes (`AUTH_RATE_LIMIT_*` in `backend/config.py`).
 - Sensitive operations: 30 per minute, shared across all of them. These are merge, delete,
@@ -73,30 +73,25 @@ replaced with `?[redacted]`, because the Gmail re-auth callback carries an OAuth
 
 | Name | Where | Required | Notes |
 |---|---|---|---|
-| `APP_ENV` | Fly (set in `fly.toml` and the Docker image) | yes in prod | `production` makes the API refuse to start if anything below is missing |
+| `APP_ENV` | environment (set in the Docker image) | yes in prod | `production` makes the API refuse to start if anything below is missing |
 | `AUTH_MODE` | backend | no | `google` (default) or `local`. `local` is refused in production |
-| `AUTH_ALLOWED_EMAIL` | Fly secret / local `.env` | yes (google) | The only Google account allowed to sign in |
-| `AUTH_GOOGLE_CLIENT_ID` | Fly secret / local `.env` | yes (google) | Web-application OAuth client ID used for Sign in with Google |
-| `AUTH_SESSION_SECRET` | Fly secret / local `.env` | yes (google, prod) | At least 32 random characters. Signs sessions, CSRF tokens and nonces |
+| `AUTH_ALLOWED_EMAIL` | environment / local `.env` | yes (google) | The only Google account allowed to sign in |
+| `AUTH_GOOGLE_CLIENT_ID` | environment / local `.env` | yes (google) | Web-application OAuth client ID used for Sign in with Google |
+| `AUTH_SESSION_SECRET` | environment / local `.env` | yes (google, prod) | At least 32 random characters. Signs sessions, CSRF tokens and nonces |
 | `AUTH_SESSION_TTL_SECONDS` | backend | no | Session lifetime. Default 43200 (12 h); allowed range 300–604800 |
-| `FRONTEND_ORIGIN` | Fly secret or env | yes in prod | `https://` origin of the Vercel frontend. Used for CORS and the sign-in origin check |
-| `PUBLIC_BASE_URL` | Fly secret or env | for Gmail re-auth | Must be the Vercel origin so the session cookie reaches `/poller/reauth/callback` |
-| `VITE_API_BASE` | Vercel | **must be unset** | Leave unset so production calls `/api` on the same origin. Only set it for local setups that point somewhere unusual |
+| `FRONTEND_ORIGIN` | environment | yes in prod | `https://` origin of the frontend. Used for CORS and the sign-in origin check |
+| `PUBLIC_BASE_URL` | environment | for Gmail re-auth | Must be the frontend origin so the session cookie reaches `/poller/reauth/callback` |
+| `VITE_API_BASE` | frontend build | **must be unset** | Leave unset so production calls `/api` on the same origin. Only set it for local setups that point somewhere unusual |
 
 **Handling the session secret.** Generate it and pipe it straight into its destination, so
 it never appears on screen, on a command line, or in shell history:
 
 ```bash
-# Fly (production): fly secrets import reads NAME=VALUE lines from stdin
-python3 -c "import secrets; print('AUTH_SESSION_SECRET=' + secrets.token_urlsafe(48))" \
-  | fly secrets import --app job-tracker-api-verdant-haze-8797
-
 # Local .env (git-ignored)
 python3 -c "import secrets; print('AUTH_SESSION_SECRET=' + secrets.token_urlsafe(48))" >> .env
 ```
 
-Never write the value into a command such as `fly secrets set AUTH_SESSION_SECRET=<value>`.
-Shell history would keep it.
+Never write the value into a command line; shell history would keep it.
 
 ## Google Cloud setup (one time)
 
@@ -143,67 +138,14 @@ the login screen reports "Sign-in isn't configured" and every protected endpoint
 `tests/integration/test_auth.py` exercises the real authentication path without that
 override. E2E tests run the backend with `AUTH_MODE=local` and sign in through the UI.
 
-## Fly.io configuration
-
-`fly.toml` sets `APP_ENV=production` and a health check on `/api/v1/health`. Set the
-secrets with `flyctl` from your own terminal. None of these values are committed:
-
-```bash
-APP=job-tracker-api-verdant-haze-8797
-
-# 1. The session secret: generated and piped in, never displayed (see above).
-python3 -c "import secrets; print('AUTH_SESSION_SECRET=' + secrets.token_urlsafe(48))" \
-  | fly secrets import --app $APP --stage
-
-# 2. Non-secret settings. The client ID and origins are public. The email is personal
-#    rather than secret; to keep it out of shell history as well, enter it at a prompt:
-read -r "?Allowed Google account: " ALLOWED_EMAIL   # bash: read -rp "Allowed Google account: " ALLOWED_EMAIL
-fly secrets set --app $APP --stage \
-  AUTH_ALLOWED_EMAIL="$ALLOWED_EMAIL" \
-  AUTH_GOOGLE_CLIENT_ID=<web-client-id>.apps.googleusercontent.com \
-  FRONTEND_ORIGIN=https://<your-app>.vercel.app \
-  PUBLIC_BASE_URL=https://<your-app>.vercel.app
-unset ALLOWED_EMAIL
-
-# 3. Remove the obsolete admin token (staged too).
-fly secrets unset --app $APP --stage ADMIN_TOKEN
-```
-
-`--stage` stores the values without restarting the running release. They take effect at
-the next deploy, which is the release that needs them. Without `--stage`, Fly restarts the
-current release; that is harmless too, because the current release ignores these values.
-
-**Order matters.** Set the secrets **before** deploying this change. Pushes to `main`
-deploy automatically, and the new release refuses to start without them. Setting secrets
-first is harmless to the currently running release.
-
-Check the setup with:
-
-```bash
-curl -s https://<your-app>.vercel.app/api/v1/health            # {"status":"ok"}
-curl -s -o /dev/null -w '%{http_code}\n' https://<your-app>.vercel.app/api/v1/applications  # 401
-```
-
-## Vercel configuration
-
-- `vercel.json` rewrites `/api/:path*` to the Fly app. If the Fly app name changes, update
-  the destination there.
-- Project → Settings → Environment Variables: **remove `VITE_API_BASE`** for Production (and
-  Preview). A frontend that calls the Fly URL directly would rely on third-party cookies,
-  and sign-in would fail in most browsers.
-- No authentication secret belongs in Vercel. The Google client ID comes from the backend at
-  runtime.
-- Preview deployments use a different origin. To sign in on a preview, add that origin to
-  the Google client's JavaScript origins. Otherwise, use production.
-
 ## Rotating configuration
 
 | What | How | Effect |
 |---|---|---|
-| Session secret | Pipe a newly generated value into `fly secrets import` (see *Handling the session secret*) | Fly restarts the app. Every existing session, CSRF token and pending nonce becomes invalid, so you sign in again |
-| Allowed account | `fly secrets set AUTH_ALLOWED_EMAIL=...` | Sessions issued to the previous account are rejected (`invalid_session`) |
+| Session secret | Generate a new value (see *Handling the session secret*) and update `.env` | Restart the backend. Every existing session, CSRF token and pending nonce becomes invalid, so you sign in again |
+| Allowed account | Update `AUTH_ALLOWED_EMAIL` in `.env` | Sessions issued to the previous account are rejected (`invalid_session`) |
 | Google client ID | Create a new web client with the same JavaScript origins, set `AUTH_GOOGLE_CLIENT_ID`, then delete the old client in Google Cloud | New sign-ins use the new client. Existing sessions continue until they expire |
-| Session lifetime | `fly secrets set AUTH_SESSION_TTL_SECONDS=...` | Applies to new sessions |
+| Session lifetime | Update `AUTH_SESSION_TTL_SECONDS` in `.env` | Applies to new sessions |
 | Suspected compromise | Rotate the session secret first (ends all sessions), then review the Google account's security events | Immediate global sign-out |
 
 For local `.env` changes, restart the backend.
